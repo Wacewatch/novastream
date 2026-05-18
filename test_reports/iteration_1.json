@@ -1,0 +1,41 @@
+{
+  "summary": "Full backend + frontend test of NovaStream French live TV. 8/8 backend pytest passing (root, countries, categories, channels with filters, stream proxy, hls rewrite). Source domain ('vavoo'/'kool.to') correctly hidden from all API responses and m3u8 playlists. Frontend loads with NovaStream branding, France default, 800 channels, French UI. Category Sport filter (800->206), search 'tf1' (->4), country dropdown (17 countries), ad-unlock 2-step modal all functional. Both ad buttons open new tabs (Pub1, Pub2). Modal closes after Pub2 and resolves stream.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/stream/{id}", "issue": "Some channels fail upstream resolution (varies by channel). Expected per task context but worth surfacing user-friendly retry hint."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "ChannelCard list (NovaStream.jsx line 270)", "issue": "React 'Encountered two children with the same key' warning floods console — multiple channels share same id derived from upstream catalog. Use composite key like `${ch.id}-${idx}` or de-dupe channels in backend.", "selector": "[data-testid^=\"channel-card-\"]", "priority": "MEDIUM"}
+    ],
+    "integration_issues": [
+      {"flow": "Switch channel while player is open", "issue": "Player overlay (player-shell) blocks pointer events on channel grid, so users must close player first before selecting another channel from the grid. Either dim+pass-through, or add an in-player 'change channel' affordance.", "affected_selectors": ["[data-testid^=\"channel-card-\"]", "player-shell"]}
+    ],
+    "design_issues": [
+      {"screen": "Player error overlay", "issues": ["When stream fails the error text 'Flux indisponible. Essayez une autre chaîne.' is shown but the close button is small; consider a 'Choisir une autre chaîne' CTA"]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_novastream_api.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [
+    "Fix React duplicate-key warning in channel grid (NovaStream.jsx key prop or backend de-dup).",
+    "Improve UX for switching channels while video player is open (close on grid click or always-visible 'change channel' button).",
+    "Optional: surface user-friendly retry/auto-fallback when /api/stream returns 502 for a specific channel."
+  ],
+  "critical_code_review_comments": [
+    "server.py: `verify=False` on all httpx clients disables TLS verification — fine for proxy but flag as security note.",
+    "server.py: Single in-process _cache dict — fine for single replica, but won't scale horizontally.",
+    "server.py: /api/hls returns binary segments by buffering full r.content then re-yielding — fine for tiny segments but use cx.stream() for large ones to avoid memory spikes.",
+    "NovaStream.jsx key collision (see ui_bugs).",
+    "AdUnlockModal hardcodes ad URLs — fine per spec but document in /app/memory/PRD.md."
+  ],
+  "updated_files": ["/app/backend/tests/test_novastream_api.py"],
+  "success_rate": {"backend": "100%", "frontend": "95%"},
+  "test_credentials": "none required",
+  "seed_data_creation": "none",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Backend pytest at /app/backend/tests/test_novastream_api.py covers all 8 backend requirements and verifies 'vavoo'/'kool.to' is never leaked. Frontend ad-unlock 2-step flow validated end-to-end via Playwright. Known minor issue: React duplicate-key warning due to colliding channel ids. Stream playback can intermittently fail on specific channels (upstream-dependent) — try CANAL+ HD .s, TF1 HD .s, M6 HD .s for retesting.",
+  "rca of the issue": "Duplicate React key warning RCA: backend assigns `cid = (item.ids.id || item.id || item.url)`; upstream catalog includes >1 entry with identical id/url for some channels (likely the same channel listed under multiple categories/regions). Mitigation A: de-duplicate in get_channels() by cid. Mitigation B: frontend uses `${ch.id}-${index}` for key prop."
+}
