@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { ExternalLink, ShieldCheck, Check, Lock, Crown, Shield } from "lucide-react";
+import { ExternalLink, ShieldCheck, Check, Lock, Crown, Shield, Loader2 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 
 const AD_URL_1 = "https://foreignabnormality.com/ktfpa1187?key=bcec92d207239b8d8e091e898bcd8666";
@@ -7,7 +7,8 @@ const AD_URL_2 = "https://omg10.com/4/10323906";
 
 export default function AdUnlockModal({ channel, onUnlocked, onCancel }) {
   const [step, setStep] = useState(1);
-  const { hasAdFreeExperience, isAdmin, isVip, roleLabel, loading } = useAuth();
+  const [waitedTooLong, setWaitedTooLong] = useState(false);
+  const { user, profile, hasAdFreeExperience, isAdmin, roleLabel, loading, refreshProfile } = useAuth();
 
   // Admins and VIPs bypass the ad modal entirely — auto-unlock as soon as
   // their auth/profile finished loading.
@@ -20,6 +21,21 @@ export default function AdUnlockModal({ channel, onUnlocked, onCancel }) {
     }
   }, [hasAdFreeExperience, loading, onUnlocked]);
 
+  // Safety: if the user is logged-in but profile didn't load (RLS/etc.),
+  // re-trigger a profile refresh so role-based bypass can apply.
+  useEffect(() => {
+    if (!loading && user && !profile) {
+      refreshProfile?.();
+    }
+  }, [loading, user, profile, refreshProfile]);
+
+  // Cap the loading splash at 4s — after that, fall through to ad modal
+  // so a stuck profile fetch doesn't block playback indefinitely.
+  useEffect(() => {
+    const t = setTimeout(() => setWaitedTooLong(true), 4000);
+    return () => clearTimeout(t);
+  }, []);
+
   const openAd1 = () => {
     window.open(AD_URL_1, "_blank", "noopener,noreferrer");
     setStep(2);
@@ -28,6 +44,29 @@ export default function AdUnlockModal({ channel, onUnlocked, onCancel }) {
     window.open(AD_URL_2, "_blank", "noopener,noreferrer");
     onUnlocked();
   };
+
+  // ===== Loading splash =====
+  // While auth/profile is still resolving, OR if the user is logged-in but
+  // their profile hasn't been fetched yet (RLS retry in flight), show a
+  // neutral loader rather than the ad modal — avoids flashing the pub modal
+  // to admins/VIPs whose role hasn't been resolved yet.
+  if (!waitedTooLong && (loading || (user && !profile))) {
+    return (
+      <div className="player-shell" data-testid="ad-modal-loading">
+        <div className="ad-modal glass-heavy">
+          <div className="flex justify-center mb-4">
+            <Loader2 size={28} className="animate-spin text-[#ff2e63]" />
+          </div>
+          <h2 className="text-white text-xl font-bold tracking-tight mb-2 text-center">
+            Préparation…
+          </h2>
+          <p className="text-white/65 text-sm text-center">
+            {channel?.name ? `${channel.name} — ` : ""}Vérification de votre statut.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   // ===== VIP / Admin bypass splash =====
   if (hasAdFreeExperience) {

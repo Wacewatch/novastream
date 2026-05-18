@@ -1073,25 +1073,29 @@ def _normalize_referer(raw: str) -> Optional[str]:
 @app.middleware("http")
 async def _log_referrer(request: Request, call_next):
     """Best-effort logging of HTTP Referer for top-referrers analytics.
-    We only log non-internal, non-API-internal referers."""
+    Only logs the actual 'play this channel' action — i.e. /api/stream/{id} —
+    not every HLS segment fetch (which would inflate counts by ~1 per second)."""
     response = await call_next(request)
     try:
         path = request.url.path or ""
-        # only log meaningful page hits
-        if path.startswith("/api/hls") or path.startswith("/api/stream"):
-            ref = request.headers.get("referer") or ""
-            host = _normalize_referer(ref)
-            if host:
-                # don't log self-referrals
-                own = (request.url.hostname or "").lower()
-                if own.startswith("www."):
-                    own = own[4:]
-                if host != own:
-                    await db.referrers.insert_one({
-                        "host": host,
-                        "ts": datetime.now(timezone.utc),
-                        "path": path,
-                    })
+        # Only log the play-action endpoint. /api/hls and /api/stream/{id} segments
+        # would multiply by ~30/min per viewer, so we skip them.
+        if not path.startswith("/api/stream/"):
+            return response
+        ref = request.headers.get("referer") or ""
+        host = _normalize_referer(ref)
+        if not host:
+            return response
+        own = (request.url.hostname or "").lower()
+        if own.startswith("www."):
+            own = own[4:]
+        if host == own:
+            return response
+        await db.referrers.insert_one({
+            "host": host,
+            "ts": datetime.now(timezone.utc),
+            "path": path,
+        })
     except Exception:
         pass
     return response
@@ -1233,7 +1237,8 @@ async def admin_global_stats(authorization: Optional[str] = Header(None)):
     total_users, admins, vips, all_channels_safe = await asyncio.gather(
         _count("user_profiles", {}),
         _count("user_profiles", {"role": "eq.admin"}),
-        _count("user_profiles", {"is_vip": "eq.true"}),
+        # VIPs are users with role=vip OR is_vip=true (some accounts have one but not the other)
+        _count("user_profiles", {"or": "(role.eq.vip,is_vip.eq.true)"}),
         get_channels(),
         return_exceptions=False,
     )

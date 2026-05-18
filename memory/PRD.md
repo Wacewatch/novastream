@@ -108,3 +108,12 @@ French live-TV streaming app (Vavoo-backed). User reported flaky UX (no loader, 
 - **Dashboard avatar** placeholder initials replaced with site logo `<img src="https://i.imgur.com/V8YmT4z.png">`.
 - **Tests**: `testing_agent_v3_fork` iter_4 → backend 15/15 pytest, frontend 100% (admin gating, multiview, favorites sync all green).
 
+
+## Session 2026-02-18 (part 3) — Bugfixes signalés par l'utilisateur
+- **Bug Top Référents inflaté** : le middleware `_log_referrer` loggait chaque segment `.ts` (≈1/s par viewer) → le compteur explosait sans nouvelle lecture. Corrigé : on n'enregistre désormais QUE sur `/api/stream/{id}` (action "play" unique par lecture). 153 enregistrements bidons supprimés de la collection `db.referrers`.
+- **Comptage VIP faux** : `/api/admin/global-stats` ne comptait que `is_vip=true`, manquant les comptes `role=vip` sans flag `is_vip`. Corrigé via filtre Supabase `or=(role.eq.vip,is_vip.eq.true)`.
+- **Modal pub apparaissait pour Admin/VIP** : si le profil Supabase n'était pas encore résolu (RLS, latence) au moment où l'utilisateur cliquait sur une chaîne, `hasAdFreeExperience` était `false` et la modal pub s'affichait. Corrigé dans `AdUnlockModal.jsx` :
+  - Affiche un **loader neutre** tant que `loading=true` ou `(user && !profile)`.
+  - Déclenche un `refreshProfile()` automatique si la session est là mais le profil est vide.
+  - Cap de 4 s sur le loader pour éviter un blocage définitif.
+
