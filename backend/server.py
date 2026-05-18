@@ -1033,6 +1033,221 @@ async def channels_by_ids(body: ChannelsByIdsRequest):
     return {"channels": out}
 
 
+# ==============================================================================
+# ADMIN STATS MODULES (system, live, referrers, global)
+# ==============================================================================
+
+import psutil  # noqa: E402
+import platform as _platform  # noqa: E402
+import sys as _sys  # noqa: E402
+from urllib.parse import urlparse  # noqa: E402
+
+_PROCESS = psutil.Process()
+_PROCESS_START = time.time()
+
+
+async def _ensure_referrers_index() -> None:
+    try:
+        await db.referrers.create_index("ts", expireAfterSeconds=30 * 24 * 3600)
+        await db.referrers.create_index([("host", 1), ("ts", -1)])
+    except Exception as e:
+        logger.warning(f"referrers index init failed: {e}")
+
+
+def _normalize_referer(raw: str) -> Optional[str]:
+    if not raw:
+        return None
+    try:
+        u = urlparse(raw)
+        host = (u.netloc or "").lower().strip()
+        if not host:
+            return None
+        # strip www.
+        if host.startswith("www."):
+            host = host[4:]
+        return host
+    except Exception:
+        return None
+
+
+@app.middleware("http")
+async def _log_referrer(request: Request, call_next):
+    """Best-effort logging of HTTP Referer for top-referrers analytics.
+    We only log non-internal, non-API-internal referers."""
+    response = await call_next(request)
+    try:
+        path = request.url.path or ""
+        # only log meaningful page hits
+        if path.startswith("/api/hls") or path.startswith("/api/stream"):
+            ref = request.headers.get("referer") or ""
+            host = _normalize_referer(ref)
+            if host:
+                # don't log self-referrals
+                own = (request.url.hostname or "").lower()
+                if own.startswith("www."):
+                    own = own[4:]
+                if host != own:
+                    await db.referrers.insert_one({
+                        "host": host,
+                        "ts": datetime.now(timezone.utc),
+                        "path": path,
+                    })
+    except Exception:
+        pass
+    return response
+
+
+@api_router.get("/admin/system-stats")
+async def admin_system_stats(authorization: Optional[str] = Header(None)):
+    """CPU %, RAM usage, uptime, platform, python version (admin-only)."""
+    jwt = (authorization or "").removeprefix("Bearer ").strip()
+    await _require_admin(jwt)
+
+    try:
+        cpu_pct = psutil.cpu_percent(interval=0.1)
+    except Exception:
+        cpu_pct = 0.0
+    try:
+        proc_mem = _PROCESS.memory_info().rss / (1024 * 1024)  # MB
+    except Exception:
+        proc_mem = 0.0
+    try:
+        vm = psutil.virtual_memory()
+        total_mem = vm.total / (1024 * 1024)
+        sys_mem_pct = vm.percent
+    except Exception:
+        total_mem = 0.0
+        sys_mem_pct = 0.0
+
+    uptime_s = int(time.time() - _PROCESS_START)
+    h = uptime_s // 3600
+    m = (uptime_s % 3600) // 60
+    uptime_str = f"{h}h {m:02d}m" if h > 0 else f"{m}m"
+
+    return {
+        "cpu_percent": round(cpu_pct, 2),
+        "process_mem_mb": round(proc_mem, 2),
+        "total_mem_mb": round(total_mem, 2),
+        "system_mem_percent": round(sys_mem_pct, 2),
+        "uptime": uptime_str,
+        "uptime_seconds": uptime_s,
+        "platform": _platform.system().lower(),
+        "platform_full": _platform.platform(),
+        "python_version": f"v{_sys.version_info.major}.{_sys.version_info.minor}.{_sys.version_info.micro}",
+    }
+
+
+@api_router.get("/admin/live-stats")
+async def admin_live_stats(authorization: Optional[str] = Header(None)):
+    """Real-time viewing stats: online viewers, currently watching, top channels (admin-only)."""
+    jwt = (authorization or "").removeprefix("Bearer ").strip()
+    await _require_admin(jwt)
+
+    stats = await _compute_stats()
+    live_total = stats.get("live_total", 0)
+    total_24h = stats.get("total_24h", 0)
+    per_channel = stats.get("per_channel", {})
+
+    # Map per_channel counts to channel names (top 10)
+    top_pairs = sorted(per_channel.items(), key=lambda kv: kv[1], reverse=True)[:10]
+    all_channels = await get_channels()
+    by_id = {c["id"]: c for c in all_channels}
+    top_channels = []
+    for cid, n in top_pairs:
+        c = by_id.get(cid)
+        if c is not None:
+            top_channels.append({
+                "id": cid,
+                "name": c.get("name", cid),
+                "country": c.get("country", ""),
+                "viewers": n,
+            })
+
+    return {
+        "online": live_total,
+        "watching": live_total,
+        "total_24h": total_24h,
+        "top_channels": top_channels,
+    }
+
+
+@api_router.get("/admin/top-referrers")
+async def admin_top_referrers(authorization: Optional[str] = Header(None), hours: int = 24, limit: int = 10):
+    """Top HTTP Referer hosts in the last N hours (admin-only)."""
+    jwt = (authorization or "").removeprefix("Bearer ").strip()
+    await _require_admin(jwt)
+
+    since = datetime.now(timezone.utc) - timedelta(hours=max(1, min(hours, 24 * 30)))
+    try:
+        pipeline = [
+            {"$match": {"ts": {"$gte": since}}},
+            {"$group": {"_id": "$host", "n": {"$sum": 1}}},
+            {"$sort": {"n": -1}},
+            {"$limit": max(1, min(limit, 50))},
+        ]
+        rows = []
+        async for r in db.referrers.aggregate(pipeline):
+            rows.append({"host": r["_id"], "count": r["n"]})
+    except Exception as e:
+        logger.warning(f"top-referrers aggregate failed: {e}")
+        rows = []
+
+    return {"referrers": rows, "window_hours": hours}
+
+
+@api_router.get("/admin/global-stats")
+async def admin_global_stats(authorization: Optional[str] = Header(None)):
+    """Total users, admins, vips, channels count (admin-only, uses Supabase service role)."""
+    jwt = (authorization or "").removeprefix("Bearer ").strip()
+    await _require_admin(jwt)
+
+    # Supabase counts via Prefer: count=exact, head request
+    headers = {
+        "apikey": SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+        "Prefer": "count=exact",
+        "Range": "0-0",
+    }
+    http = await get_http_client()
+
+    async def _count(path: str, params: Dict[str, Any]) -> int:
+        try:
+            params_clean = {**params, "select": "id"}
+            r = await http.get(
+                f"{SUPABASE_URL}/rest/v1/{path}",
+                headers=headers,
+                params=params_clean,
+                timeout=8.0,
+            )
+            cr = r.headers.get("content-range") or ""
+            # format: "0-0/123" or "*/123"
+            if "/" in cr:
+                tail = cr.split("/", 1)[1]
+                if tail.isdigit():
+                    return int(tail)
+            return 0
+        except Exception as e:
+            logger.warning(f"supabase count {path} failed: {e}")
+            return 0
+
+    total_users = await _count("user_profiles", {})
+    admins = await _count("user_profiles", {"role": "eq.admin"})
+    vips = await _count("user_profiles", {"is_vip": "eq.true"})
+
+    try:
+        all_channels = await get_channels()
+        total_channels = len(all_channels)
+    except Exception:
+        total_channels = 0
+
+    return {
+        "total_users": total_users,
+        "admins": admins,
+        "vips": vips,
+        "total_channels": total_channels,
+    }
+
+
 
 # ----------------- App setup -----------------
 app.include_router(api_router)
@@ -1054,6 +1269,7 @@ async def startup_warmup():
             # First build the logo index so the catalog can attach real URLs
             await _refresh_logo_index()
             await _ensure_views_index()
+            await _ensure_referrers_index()
             await get_signature()
             channels = await get_channels()
             logger.info(f"warmup done: {len(channels)} channels cached")

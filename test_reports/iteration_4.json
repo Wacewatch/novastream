@@ -1,0 +1,44 @@
+{
+  "summary": "Iteration 4 covers the new ADMIN STATS MODULES (system, live, top-referrers, global), the rewritten Admin.jsx page, and the Dashboard avatar change. Backend: 15/15 pytest cases pass — all four new admin endpoints correctly return 401 (JSON {detail}) when Authorization header is missing AND 401/403 for an invalid Bearer token; psutil import does not break startup; /api/countries, /api/channels (France), /api/stats, /api/channels/by-ids all 200 OK. Frontend: /admin route for unauthenticated user redirects to /login (no compile errors, no blank screen, no console errors) — gating still works post-rewrite. /multiview renders mv-grid-2x2 correctly. Home loads 800 channel cards, favorites counter sync 0→1→0 still works via [data-testid='favorites-filter-btn']. Code review confirms: (a) Admin.jsx reloadUsers now uses .range(from, from+pageSize-1) in a loop with 1000-page chunks and 50k hard cap (no .limit(500) on users); (b) Admin.jsx exposes all required data-testids (sys-card-cpu/ram/network/system, admin-live-section, live-online, live-watching, live-top-channels, admin-referrers-section, admin-stat-*); (c) Dashboard.jsx profile-card uses <img src='https://i.imgur.com/V8YmT4z.png' alt='LiveWatch' class='w-10 h-10 object-contain'> at lines 152-157 inside [data-testid='profile-card'].",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/countries", "issue": "First request occasionally returned 502 (transient — second attempt 200). Likely cold-start contention with the warmup task and/or upstream signature refresh. Re-running the same test immediately passed. Not blocking."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_admin_stats_modules.py",
+    "/app/test_reports/pytest/admin_stats_results.xml"
+  ],
+  "action_items": [
+    "OPTIONAL: Could not directly verify the admin endpoints' response SHAPE (cpu_percent, process_mem_mb, total_mem_mb, system_mem_percent, uptime, platform, python_version, etc.) — no admin user available. Shape verified via code review of /app/backend/server.py lines 1100-1248. Main agent should consider seeding a deterministic admin test account so future iterations can exercise the 200 path.",
+    "OPTIONAL: AuthLogin still doesn't surface Supabase 400/error responses to the user (carried over from iteration_3). Not in scope for this iteration but worth picking up."
+  ],
+  "critical_code_review_comments": [
+    "GOOD: All four new admin endpoints (/admin/system-stats, /admin/live-stats, /admin/top-referrers, /admin/global-stats) consistently call `await _require_admin(jwt)` which chains through `_supabase_get_user('')` → HTTPException 401 when the header is absent. 401-on-missing-token is now uniform across the admin surface.",
+    "GOOD: psutil is correctly added to /app/backend/requirements.txt and imported lazily near the section that uses it (line 1040). _PROCESS_START captured at module load avoids reporting host-process uptime confusion.",
+    "GOOD: Referrer middleware (_log_referrer) is best-effort wrapped in try/except so insert failures cannot break the response path; it also skips self-referrals and only logs /api/hls and /api/stream — sensible. Index with TTL (30d) and (host,ts) compound index created at startup via _ensure_referrers_index().",
+    "GOOD: Admin.jsx reloadUsers correctly removes the 500-user limit by using .range(from, from+pageSize-1) in a paginated loop with break-on-empty and 50000 hard safety cap. No .limit(500) on user_profiles.",
+    "GOOD: Dashboard.jsx profile-card renders <img src='https://i.imgur.com/V8YmT4z.png' alt='LiveWatch' /> at lines 152-157 — placeholder initials are replaced.",
+    "MEDIUM: server.py is now 1286 lines — exceeds the 700-line guideline. Should be split into routers (admin_router.py, channels_router.py, stream_router.py, supabase_helpers.py) for maintainability.",
+    "MINOR: `_log_referrer` runs on EVERY HTTP request (including health checks, OPTIONS, static assets) before its path-prefix check — fine performance-wise but moving the prefix check earlier (before `await call_next`) wouldn't change behaviour. Current ordering is correct (log AFTER response so failures don't break user requests).",
+    "MINOR: /api/admin/global-stats issues 4 sequential supabase HTTP calls (_count x3 + get_channels). Could be parallelised with asyncio.gather to cut p95 by ~3x.",
+    "MINOR: /api/admin/live-stats returns `online` and `watching` as the SAME `live_total` value — these are aliased. If the product intent is two distinct metrics (e.g., 'online sessions' vs 'currently in a player'), this needs a real distinction; otherwise consider documenting that they intentionally mirror.",
+    "MINOR: psutil.cpu_percent(interval=0.1) blocks the event loop for 100ms each admin-stats call — fine for an admin-only endpoint, but if called from a polling UI consider caching for 2-5s."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_admin_stats_modules.py (NEW — 15 test cases)"
+  ],
+  "success_rate": {"backend": "100% (15/15 pytest after transient retry on /api/countries)", "frontend": "100% (admin gating, multiview, favorites sync all green)"},
+  "test_credentials": "No admin user seeded. /app/memory/test_credentials.md unchanged — qa+{ts}@livewatchtest.dev / Test1234! signup flow blocked by Supabase 400 from iter_3.",
+  "seed_data_creation": "None.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Backend admin endpoints are fully auth-gated. To exercise the 200 path (cpu_percent, top_channels, top referrers list, total_users count), an admin Supabase JWT is required. Next testing agent should either be handed a real admin token by the main agent OR the main agent should add a short-lived dev bypass route. Verified end-to-end so far: unauthenticated 401 JSON, invalid-token 401/403, malformed Authorization 401, query-params route still 401, all 4 endpoints behave identically. Frontend Admin.jsx confirmed to compile (no blank screen) and to redirect non-admins to /login. Dashboard avatar img tag confirmed via code review (live verification still blocked by Supabase signUp 400 — same as iter_3). Referrer middleware will populate db.referrers naturally as users hit /api/hls and /api/stream; cannot directly query Mongo from tests but observed no regression on stream endpoints in test_novastream_api.py.",
+  "rca of the issue": "N/A — no regressions found. The transient 502 on /api/countries was a one-off; the second request returned 200 within ~1s, consistent with a cold cache state (signature refresh + catalog fetch from upstream)."
+}

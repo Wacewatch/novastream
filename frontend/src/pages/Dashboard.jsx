@@ -146,10 +146,15 @@ export default function Dashboard() {
         <section className="glass-heavy rounded-2xl p-5 sm:p-6 border border-white/10" data-testid="profile-card">
           <div className="flex flex-col sm:flex-row sm:items-center gap-4">
             <div
-              className="w-16 h-16 rounded-full flex items-center justify-center text-lg font-bold"
-              style={{ background: `linear-gradient(135deg, ${roleColor}, #0a0a0f)` }}
+              className="w-16 h-16 rounded-full flex items-center justify-center overflow-hidden border border-white/10"
+              style={{ background: `linear-gradient(135deg, ${roleColor}33, #0a0a0f)` }}
             >
-              {(profile?.email || user.email).split("@")[0].slice(0, 2).toUpperCase()}
+              <img
+                src="https://i.imgur.com/V8YmT4z.png"
+                alt="LiveWatch"
+                className="w-10 h-10 object-contain"
+                draggable={false}
+              />
             </div>
             <div className="flex-1 min-w-0">
               <h2 className="text-xl font-bold truncate">{profile?.email || user.email}</h2>

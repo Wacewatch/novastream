@@ -14,6 +14,15 @@ import {
   Trash2,
   Copy,
   CalendarClock,
+  Cpu,
+  MemoryStick,
+  Network,
+  Server,
+  Activity,
+  Globe,
+  Eye,
+  Radio,
+  Tv2,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { supabase } from "@/lib/supabase";
@@ -21,6 +30,7 @@ import { toast } from "sonner";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
+const SITE_LOGO = "https://i.imgur.com/V8YmT4z.png";
 
 async function authHeader() {
   const { data: { session } } = await supabase.auth.getSession();
@@ -37,16 +47,31 @@ export default function Admin() {
   const [generating, setGenerating] = useState(false);
   const [genCount, setGenCount] = useState(5);
 
+  // New modules state
+  const [sysStats, setSysStats] = useState(null);
+  const [liveStats, setLiveStats] = useState(null);
+  const [referrers, setReferrers] = useState([]);
+  const [globalStats, setGlobalStats] = useState(null);
+
   const reloadUsers = useCallback(async () => {
     setUsersLoading(true);
     try {
-      const { data, error } = await supabase
-        .from("user_profiles")
-        .select("id, email, role, is_vip, vip_granted_at, created_at")
-        .order("created_at", { ascending: false })
-        .limit(500);
-      if (error) throw new Error(error.message);
-      setUsers(data || []);
+      // No artificial limit — fetch in chunks of 1000 until exhausted (Supabase max per query = 1000)
+      const all = [];
+      const pageSize = 1000;
+      for (let from = 0; ; from += pageSize) {
+        const { data, error } = await supabase
+          .from("user_profiles")
+          .select("id, email, role, is_vip, vip_granted_at, created_at")
+          .order("created_at", { ascending: false })
+          .range(from, from + pageSize - 1);
+        if (error) throw new Error(error.message);
+        if (!data || data.length === 0) break;
+        all.push(...data);
+        if (data.length < pageSize) break;
+        if (from > 50000) break; // hard safety cap
+      }
+      setUsers(all);
     } catch (e) {
       toast.error(`Impossible de charger les utilisateurs: ${e.message}`);
     } finally {
@@ -61,7 +86,7 @@ export default function Admin() {
         .from("vip_keys")
         .select("id, key, used, used_by, used_at, created_at")
         .order("created_at", { ascending: false })
-        .limit(200);
+        .limit(500);
       if (error) throw new Error(error.message);
       setVipKeys(data || []);
     } catch (e) {
@@ -71,12 +96,33 @@ export default function Admin() {
     }
   }, []);
 
-  useEffect(() => {
-    if (isAdmin) {
-      reloadUsers();
-      reloadKeys();
+  const fetchAdminStats = useCallback(async () => {
+    try {
+      const headers = await authHeader();
+      const [sys, live, ref, glob] = await Promise.all([
+        axios.get(`${API}/admin/system-stats`, { headers }).catch(() => ({ data: null })),
+        axios.get(`${API}/admin/live-stats`, { headers }).catch(() => ({ data: null })),
+        axios.get(`${API}/admin/top-referrers?hours=24&limit=10`, { headers }).catch(() => ({ data: { referrers: [] } })),
+        axios.get(`${API}/admin/global-stats`, { headers }).catch(() => ({ data: null })),
+      ]);
+      if (sys.data) setSysStats(sys.data);
+      if (live.data) setLiveStats(live.data);
+      setReferrers(ref.data?.referrers || []);
+      if (glob.data) setGlobalStats(glob.data);
+    } catch (_) {
+      /* silent */
     }
-  }, [isAdmin, reloadUsers, reloadKeys]);
+  }, []);
+
+  useEffect(() => {
+    if (!isAdmin) return;
+    reloadUsers();
+    reloadKeys();
+    fetchAdminStats();
+    // Poll system/live stats every 5s
+    const t = setInterval(fetchAdminStats, 5000);
+    return () => clearInterval(t);
+  }, [isAdmin, reloadUsers, reloadKeys, fetchAdminStats]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -85,13 +131,19 @@ export default function Admin() {
   }, [users, search]);
 
   const stats = useMemo(() => {
-    const total = users.length;
-    const admins = users.filter((u) => u.role === "admin").length;
-    const vips = users.filter((u) => u.role === "vip" || u.is_vip).length;
-    const members = total - admins - vips;
+    const total = globalStats?.total_users ?? users.length;
+    const admins = globalStats?.admins ?? users.filter((u) => u.role === "admin").length;
+    const vips = globalStats?.vips ?? users.filter((u) => u.role === "vip" || u.is_vip).length;
     const usedKeys = vipKeys.filter((k) => k.used).length;
-    return { total, admins, vips, members, usedKeys, totalKeys: vipKeys.length };
-  }, [users, vipKeys]);
+    return {
+      total,
+      admins,
+      vips,
+      usedKeys,
+      totalKeys: vipKeys.length,
+      channels: globalStats?.total_channels ?? 0,
+    };
+  }, [users, vipKeys, globalStats]);
 
   if (loading) {
     return (
@@ -174,7 +226,7 @@ export default function Admin() {
           <Link to="/" className="player-btn" data-testid="admin-back-btn">
             <ArrowLeft size={18} />
           </Link>
-          <img src="https://i.imgur.com/V8YmT4z.png" alt="LiveWatch" className="h-7" />
+          <img src={SITE_LOGO} alt="LiveWatch" className="h-7" />
           <span className="hidden sm:inline-flex items-center gap-1.5 text-xs uppercase tracking-[0.18em] text-red-400 px-2.5 py-1 rounded-full bg-red-500/10 border border-red-500/30">
             <Shield size={12} /> Admin
           </span>
@@ -185,20 +237,196 @@ export default function Admin() {
       </header>
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-6">
-        {/* Stats */}
-        <section className="grid grid-cols-2 sm:grid-cols-4 gap-3" data-testid="admin-stats">
+        {/* Global Stats cards */}
+        <section className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3" data-testid="admin-stats">
           {[
-            { label: "Utilisateurs", value: stats.total, icon: UsersIcon, color: "text-white" },
+            { label: "Utilisateurs", value: stats.total.toLocaleString("fr-FR"), icon: UsersIcon, color: "text-white" },
             { label: "Admins", value: stats.admins, icon: Shield, color: "text-red-400" },
             { label: "VIP", value: stats.vips, icon: Crown, color: "text-yellow-400" },
+            { label: "Chaînes", value: stats.channels.toLocaleString("fr-FR"), icon: Tv2, color: "text-pink-400" },
             { label: "Clés VIP", value: `${stats.usedKeys} / ${stats.totalKeys}`, icon: KeyRound, color: "text-blue-400" },
           ].map((s) => (
-            <div key={s.label} className="glass rounded-xl p-4 border border-white/10">
+            <div key={s.label} className="glass rounded-xl p-4 border border-white/10" data-testid={`admin-stat-${s.label.toLowerCase()}`}>
               <s.icon size={16} className={s.color} />
               <p className="text-2xl font-bold mt-2 tabular-nums">{s.value}</p>
               <p className="text-[11px] uppercase tracking-wider text-white/50">{s.label}</p>
             </div>
           ))}
+        </section>
+
+        {/* System stats: CPU / RAM / Network / System */}
+        <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3" data-testid="admin-system-stats">
+          <SystemCard
+            title="CPU App"
+            icon={Cpu}
+            iconColor="text-yellow-400"
+            primary={sysStats ? `${sysStats.cpu_percent.toFixed(1)}%` : "—"}
+            barPct={sysStats?.cpu_percent || 0}
+            barColor="bg-yellow-400"
+            sub="FastAPI Process"
+            testid="sys-card-cpu"
+          />
+          <SystemCard
+            title="RAM App"
+            icon={MemoryStick}
+            iconColor="text-pink-400"
+            primary={sysStats ? `${sysStats.system_mem_percent.toFixed(1)}%` : "—"}
+            barPct={sysStats?.system_mem_percent || 0}
+            barColor="bg-pink-400"
+            sub={sysStats ? `${sysStats.process_mem_mb.toFixed(1)} MB / ${sysStats.total_mem_mb.toFixed(0)} MB` : "—"}
+            testid="sys-card-ram"
+          />
+          <div className="glass rounded-xl p-4 border border-white/10" data-testid="sys-card-network">
+            <div className="flex items-center gap-2 mb-3 text-cyan-400">
+              <Network size={14} />
+              <span className="text-[11px] uppercase tracking-wider">Réseau</span>
+            </div>
+            <p className="text-[11px] text-white/40 uppercase tracking-wider mb-2">En direct</p>
+            <div className="flex items-end gap-3">
+              <div>
+                <p className="text-2xl font-bold tabular-nums">{liveStats?.online ?? 0}</p>
+                <p className="text-[10px] text-white/50 uppercase tracking-wider">En ligne</p>
+              </div>
+              <div className="ml-auto">
+                <p className="text-xl font-semibold tabular-nums text-cyan-400">{liveStats?.total_24h ?? 0}</p>
+                <p className="text-[10px] text-white/50 uppercase tracking-wider">/ 24 h</p>
+              </div>
+            </div>
+          </div>
+          <div className="glass rounded-xl p-4 border border-white/10" data-testid="sys-card-system">
+            <div className="flex items-center gap-2 mb-3 text-blue-400">
+              <Server size={14} />
+              <span className="text-[11px] uppercase tracking-wider">Système</span>
+            </div>
+            <div className="space-y-1.5 text-sm">
+              <Row k="Uptime" v={sysStats?.uptime || "—"} />
+              <Row k="Platform" v={sysStats?.platform || "—"} />
+              <Row k="Python" v={sysStats?.python_version || "—"} />
+            </div>
+          </div>
+        </section>
+
+        {/* Statistiques en direct */}
+        <section className="glass-heavy rounded-2xl p-5 border border-white/10" data-testid="admin-live-section">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-bold flex items-center gap-2">
+              <Activity size={18} className="text-green-400" /> Statistiques en direct
+              <span className="ml-2 inline-flex items-center gap-1 text-[10px] uppercase tracking-wider text-green-400 px-2 py-0.5 rounded-full bg-green-500/10">
+                <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" /> LIVE
+              </span>
+            </h3>
+            <span className="text-xs text-white/40">
+              {liveStats?.online ?? 0} en ligne · {liveStats?.watching ?? 0} en visionnage
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            {/* En ligne */}
+            <div className="rounded-xl border border-white/10 bg-white/[0.02] p-5" data-testid="live-online">
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2 text-green-400">
+                  <Activity size={14} />
+                  <span className="text-[11px] uppercase tracking-wider">En ligne</span>
+                </div>
+                <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider text-green-400 px-2 py-0.5 rounded-full bg-green-500/10">
+                  Live
+                </span>
+              </div>
+              <p className="text-5xl font-extrabold text-green-400 tabular-nums">{liveStats?.online ?? 0}</p>
+              <div className="mt-4 pt-4 border-t border-white/5 text-xs space-y-1">
+                <div className="flex justify-between text-white/50">
+                  <span>Membres :</span>
+                  <span className="text-white/80 tabular-nums">0</span>
+                </div>
+                <div className="flex justify-between text-white/50">
+                  <span>Invités :</span>
+                  <span className="text-white/80 tabular-nums">{liveStats?.online ?? 0}</span>
+                </div>
+              </div>
+            </div>
+
+            {/* En visionnage */}
+            <div className="rounded-xl border border-white/10 bg-white/[0.02] p-5" data-testid="live-watching">
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2 text-purple-400">
+                  <Eye size={14} />
+                  <span className="text-[11px] uppercase tracking-wider">En visionnage</span>
+                </div>
+                <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider text-purple-400 px-2 py-0.5 rounded-full bg-purple-500/10">
+                  Live
+                </span>
+              </div>
+              <p className="text-5xl font-extrabold text-purple-400 tabular-nums">{liveStats?.watching ?? 0}</p>
+              <p className="text-xs text-white/50 mt-4 pt-4 border-t border-white/5">regardent maintenant</p>
+            </div>
+
+            {/* Top Chaînes en Direct */}
+            <div className="rounded-xl border border-white/10 bg-white/[0.02] p-5" data-testid="live-top-channels">
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2 text-orange-400">
+                  <Radio size={14} />
+                  <span className="text-[11px] uppercase tracking-wider">Top Chaînes en Direct</span>
+                </div>
+                <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider text-orange-400 px-2 py-0.5 rounded-full bg-orange-500/10">
+                  Live
+                </span>
+              </div>
+              {liveStats?.top_channels?.length ? (
+                <ol className="space-y-1.5 text-sm">
+                  {liveStats.top_channels.slice(0, 5).map((c, i) => (
+                    <li key={c.id} className="flex items-center justify-between" data-testid={`top-ch-${i}`}>
+                      <span className="flex items-center gap-2 min-w-0">
+                        <span className="text-white/40 text-xs tabular-nums w-5">#{i + 1}</span>
+                        <span className="text-white truncate">{c.name}</span>
+                      </span>
+                      <span className="text-orange-400 tabular-nums text-xs flex items-center gap-1">
+                        {c.viewers} <Activity size={10} />
+                      </span>
+                    </li>
+                  ))}
+                </ol>
+              ) : (
+                <p className="text-xs text-white/40 mt-4">Aucun visionnage actif.</p>
+              )}
+            </div>
+          </div>
+        </section>
+
+        {/* Top Référents */}
+        <section className="glass-heavy rounded-2xl p-5 border border-white/10" data-testid="admin-referrers-section">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-bold flex items-center gap-2">
+              <Globe size={18} className="text-cyan-400" /> Top Référents
+              <span className="text-sm font-normal text-white/40">/ 24 h</span>
+            </h3>
+            <span className="text-xs text-white/40">{referrers.length} source(s)</span>
+          </div>
+          {referrers.length === 0 ? (
+            <p className="text-sm text-white/50 text-center py-4">Aucun référent enregistré pour l'instant.</p>
+          ) : (
+            <ol className="space-y-2" data-testid="referrers-list">
+              {referrers.map((r, i) => {
+                const max = referrers[0]?.count || 1;
+                const pct = (r.count / max) * 100;
+                return (
+                  <li key={r.host} className="relative" data-testid={`referrer-${i}`}>
+                    <div
+                      className="absolute inset-0 rounded-lg bg-cyan-400/10"
+                      style={{ width: `${pct}%`, transition: "width .3s" }}
+                    />
+                    <div className="relative flex items-center justify-between px-3 py-2 text-sm">
+                      <span className="flex items-center gap-2 min-w-0">
+                        <span className="text-white/40 text-xs tabular-nums w-5">#{i + 1}</span>
+                        <Globe size={12} className="text-cyan-400 shrink-0" />
+                        <span className="text-white truncate">{r.host}</span>
+                      </span>
+                      <span className="text-cyan-400 tabular-nums font-semibold ml-3">{r.count.toLocaleString("fr-FR")}</span>
+                    </div>
+                  </li>
+                );
+              })}
+            </ol>
+          )}
         </section>
 
         {/* VIP keys */}
@@ -290,7 +518,7 @@ export default function Admin() {
         <section className="glass-heavy rounded-2xl p-5 border border-white/10" data-testid="admin-users-section">
           <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
             <h3 className="text-lg font-bold flex items-center gap-2">
-              <UsersIcon size={18} className="text-[#ff2e63]" /> Utilisateurs ({filtered.length})
+              <UsersIcon size={18} className="text-[#ff2e63]" /> Utilisateurs ({filtered.length.toLocaleString("fr-FR")})
             </h3>
             <div className="relative">
               <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-white/50" />
@@ -380,6 +608,34 @@ export default function Admin() {
           )}
         </section>
       </main>
+    </div>
+  );
+}
+
+function SystemCard({ title, icon: Icon, iconColor, primary, barPct, barColor, sub, testid }) {
+  return (
+    <div className="glass rounded-xl p-4 border border-white/10" data-testid={testid}>
+      <div className="flex items-center gap-2 mb-3" style={{}}>
+        <Icon size={14} className={iconColor} />
+        <span className={`text-[11px] uppercase tracking-wider ${iconColor}`}>{title}</span>
+      </div>
+      <p className="text-3xl font-bold tabular-nums">{primary}</p>
+      <div className="mt-3 h-1.5 rounded-full bg-white/5 overflow-hidden">
+        <div
+          className={`h-full ${barColor} transition-all`}
+          style={{ width: `${Math.min(100, Math.max(0, barPct))}%` }}
+        />
+      </div>
+      <p className="mt-2 text-[11px] text-white/40 truncate">{sub}</p>
+    </div>
+  );
+}
+
+function Row({ k, v }) {
+  return (
+    <div className="flex items-center justify-between gap-2">
+      <span className="text-white/50 text-xs uppercase tracking-wider">{k}:</span>
+      <span className="text-white text-sm truncate text-right">{v}</span>
     </div>
   );
 }
