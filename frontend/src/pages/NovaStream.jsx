@@ -169,10 +169,12 @@ export default function NovaStream() {
       <header className="sticky top-0 z-40 glass" style={{ borderRadius: 0, backdropFilter: "blur(22px) saturate(140%)" }}>
         <div className="max-w-7xl mx-auto px-4 sm:px-6 py-4 flex items-center gap-3 sm:gap-6">
           <div className="flex items-center gap-2.5 shrink-0" data-testid="brand-logo">
-            <span className="brand-dot" />
-            <span className="text-xl sm:text-2xl font-extrabold tracking-tight" style={{ fontFamily: "Outfit, sans-serif" }}>
-              NovaStream
-            </span>
+            <img
+              src="https://i.imgur.com/HrbEzpm.png"
+              alt="LiveWatch"
+              className="h-7 sm:h-8 w-auto"
+              draggable={false}
+            />
           </div>
 
           <div className="hidden md:flex flex-1 max-w-md mx-auto">
@@ -188,7 +190,14 @@ export default function NovaStream() {
             </div>
           </div>
 
-          <div className="ml-auto md:ml-0 shrink-0">
+          <div className="ml-auto md:ml-0 shrink-0 flex items-center gap-2">
+            <a
+              href="/docs"
+              className="hidden sm:inline-flex items-center gap-1.5 text-sm text-white/70 hover:text-white px-3 py-2 rounded-full glass-pill border-white/10 transition-colors"
+              data-testid="api-link"
+            >
+              API
+            </a>
             <Select value={country} onValueChange={setCountry}>
               <SelectTrigger
                 data-testid="country-filter"
@@ -282,7 +291,7 @@ export default function NovaStream() {
 
       {/* Footer */}
       <footer className="max-w-7xl mx-auto px-4 sm:px-6 pb-10 text-center">
-        <p className="text-white/40 text-xs">© {new Date().getFullYear()} NovaStream — Diffusion en direct. Tous droits réservés.</p>
+        <p className="text-white/40 text-xs">© {new Date().getFullYear()} LiveWatch — Diffusion en direct. Tous droits réservés.</p>
       </footer>
 
       {/* Resolving indicator */}
@@ -309,7 +318,20 @@ export default function NovaStream() {
 
       {/* Video player */}
       {activeChannel && streamUrl && (
-        <VideoPlayer channel={activeChannel} streamUrl={streamUrl} onClose={handleClosePlayer} />
+        <VideoPlayer
+          channel={activeChannel}
+          streamUrl={streamUrl}
+          onClose={handleClosePlayer}
+          onRetry={async () => {
+            try {
+              const r = await axios.get(`${API}/stream/${encodeURIComponent(activeChannel.id)}`);
+              setStreamUrl(`${r.data.proxy_url}&_t=${Date.now()}`);
+            } catch (e) {
+              console.error(e);
+              toast.error("Impossible de relancer le flux");
+            }
+          }}
+        />
       )}
     </div>
   );

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Hls from "hls.js";
 import {
   Play,
@@ -10,11 +10,13 @@ import {
   X,
   PictureInPicture2,
   Loader2,
+  RotateCcw,
 } from "lucide-react";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
+const LOGO_URL = "https://i.imgur.com/HrbEzpm.png";
 
-export default function VideoPlayer({ channel, streamUrl, onClose }) {
+export default function VideoPlayer({ channel, streamUrl, onClose, onRetry }) {
   const videoRef = useRef(null);
   const hlsRef = useRef(null);
   const containerRef = useRef(null);
@@ -27,49 +29,92 @@ export default function VideoPlayer({ channel, streamUrl, onClose }) {
   const [controlsVisible, setControlsVisible] = useState(true);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [retryToken, setRetryToken] = useState(0);
 
-  useEffect(() => {
-    if (!streamUrl || !videoRef.current) return;
-
+  const attach = useCallback(() => {
+    if (!streamUrl || !videoRef.current) return () => {};
     const video = videoRef.current;
     const absUrl = streamUrl.startsWith("http") ? streamUrl : `${BACKEND_URL}${streamUrl}`;
 
     setLoading(true);
     setError(null);
 
+    let destroyed = false;
+    let hls = null;
+
     if (Hls.isSupported()) {
-      const hls = new Hls({ enableWorker: true, lowLatencyMode: true });
+      hls = new Hls({
+        enableWorker: true,
+        lowLatencyMode: true,
+        // Live broadcast tuning: start fast, stay smooth even under load
+        backBufferLength: 30,
+        maxBufferLength: 30,
+        maxMaxBufferLength: 60,
+        liveSyncDurationCount: 3,
+        liveMaxLatencyDurationCount: 8,
+        manifestLoadingTimeOut: 12000,
+        manifestLoadingMaxRetry: 2,
+        levelLoadingTimeOut: 12000,
+        levelLoadingMaxRetry: 4,
+        fragLoadingTimeOut: 20000,
+        fragLoadingMaxRetry: 6,
+      });
       hlsRef.current = hls;
       hls.loadSource(absUrl);
       hls.attachMedia(video);
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        if (destroyed) return;
         setLoading(false);
         video.play().catch(() => {});
       });
       hls.on(Hls.Events.ERROR, (_e, data) => {
+        if (destroyed) return;
         if (data.fatal) {
-          setError("Flux indisponible. Essayez une autre chaîne.");
+          // Try graceful recovery first
+          if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+            try { hls.startLoad(); return; } catch (_) { /* fall through */ }
+          }
+          if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+            try { hls.recoverMediaError(); return; } catch (_) { /* fall through */ }
+          }
+          setError("Flux temporairement indisponible.");
           setLoading(false);
         }
       });
     } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+      // Safari native HLS
       video.src = absUrl;
-      video.addEventListener("loadedmetadata", () => {
+      const onMeta = () => {
+        if (destroyed) return;
         setLoading(false);
         video.play().catch(() => {});
-      });
+      };
+      const onErr = () => {
+        if (destroyed) return;
+        setError("Flux temporairement indisponible.");
+        setLoading(false);
+      };
+      video.addEventListener("loadedmetadata", onMeta);
+      video.addEventListener("error", onErr);
     } else {
       setError("Lecteur non supporté sur ce navigateur.");
       setLoading(false);
     }
 
     return () => {
-      if (hlsRef.current) {
-        hlsRef.current.destroy();
-        hlsRef.current = null;
+      destroyed = true;
+      if (hls) {
+        try { hls.destroy(); } catch (_) { /* noop */ }
       }
+      hlsRef.current = null;
     };
-  }, [streamUrl]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [streamUrl, retryToken]);
+
+  useEffect(() => {
+    const cleanup = attach();
+    return cleanup;
+  }, [attach]);
 
   useEffect(() => {
     const v = videoRef.current;
@@ -148,6 +193,14 @@ export default function VideoPlayer({ channel, streamUrl, onClose }) {
     }
   };
 
+  const handleRetry = () => {
+    if (onRetry) {
+      onRetry();
+    } else {
+      setRetryToken((t) => t + 1);
+    }
+  };
+
   const showControls = () => {
     setControlsVisible(true);
     if (hideTimer.current) clearTimeout(hideTimer.current);
@@ -165,22 +218,40 @@ export default function VideoPlayer({ channel, streamUrl, onClose }) {
           onClick={togglePlay}
         />
 
+        {/* Watermark logo — fades together with the UI controls */}
+        <img
+          src={LOGO_URL}
+          alt="LiveWatch"
+          className={`player-watermark ${controlsVisible ? "visible" : ""}`}
+          draggable={false}
+        />
+
         {loading && !error && (
-          <div className="absolute inset-0 flex items-center justify-center bg-black/40">
-            <div className="spinner" />
+          <div className="absolute inset-0 flex items-center justify-center bg-black/40 pointer-events-none">
+            <Loader2 className="animate-spin text-white/90" size={42} />
           </div>
         )}
 
         {error && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/70 px-6 text-center">
-            <p className="text-white/90 text-base mb-3">{error}</p>
-            <button
-              onClick={onClose}
-              className="ad-btn-secondary max-w-[200px]"
-              data-testid="player-error-close-btn"
-            >
-              Fermer
-            </button>
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/75 px-6 text-center gap-3">
+            <p className="text-white/90 text-base">{error}</p>
+            <div className="flex gap-2">
+              <button
+                onClick={handleRetry}
+                className="ad-btn-secondary"
+                data-testid="player-error-retry-btn"
+              >
+                <RotateCcw size={16} className="inline-block mr-2" />
+                Réessayer
+              </button>
+              <button
+                onClick={onClose}
+                className="ad-btn-secondary"
+                data-testid="player-error-close-btn"
+              >
+                Fermer
+              </button>
+            </div>
           </div>
         )}
 
@@ -202,6 +273,10 @@ export default function VideoPlayer({ channel, streamUrl, onClose }) {
           <div className="player-bottom">
             <button onClick={togglePlay} className="player-btn" data-testid="video-play-btn" aria-label="Lecture/Pause">
               {isPlaying ? <Pause size={20} /> : <Play size={20} />}
+            </button>
+
+            <button onClick={handleRetry} className="player-btn" data-testid="video-retry-btn" aria-label="Réessayer">
+              <RotateCcw size={20} />
             </button>
 
             <div className="flex items-center gap-2">
@@ -235,5 +310,4 @@ export default function VideoPlayer({ channel, streamUrl, onClose }) {
   );
 }
 
-// Tiny re-export of loader icon spinner usage from lucide for the spinner div fallback
 export { Loader2 };

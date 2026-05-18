@@ -1,5 +1,5 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Query
-from fastapi.responses import StreamingResponse, PlainTextResponse
+from fastapi import FastAPI, APIRouter, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse, PlainTextResponse, Response
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -9,7 +9,7 @@ import asyncio
 import time
 import re
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from urllib.parse import quote
 import httpx
 
@@ -20,11 +20,32 @@ mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
-app = FastAPI(title="NovaStream API")
+app = FastAPI(title="LiveWatch API")
 api_router = APIRouter(prefix="/api")
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger("novastream")
+logger = logging.getLogger("livewatch")
+
+# ----------------- Shared HTTP client (connection pool) -----------------
+# A single AsyncClient is reused for ALL upstream requests so we benefit from
+# connection keep-alive. This is critical to scale to 1000+ concurrent viewers.
+_http_client: Optional[httpx.AsyncClient] = None
+
+async def get_http_client() -> httpx.AsyncClient:
+    global _http_client
+    if _http_client is None or _http_client.is_closed:
+        _http_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(30.0, connect=10.0),
+            verify=False,
+            follow_redirects=True,
+            limits=httpx.Limits(
+                max_keepalive_connections=200,
+                max_connections=500,
+                keepalive_expiry=60.0,
+            ),
+            http2=False,
+        )
+    return _http_client
 
 # ----------------- Upstream proxy logic (source hidden) -----------------
 UPSTREAM_BASES = ["https://vavoo.to", "https://kool.to"]
@@ -44,6 +65,20 @@ _cache: Dict[str, Any] = {
     "channels": None,
     "channels_exp": 0,
 }
+
+# Resolved stream URL cache. Vavoo signed URLs are usually valid 5+ minutes.
+# Caching for 240 s means that even if 1000 clients ask for the same channel
+# in the same minute, we only do ONE upstream resolve call.
+RESOLVE_TTL = 240
+_resolve_cache: Dict[str, Tuple[str, float]] = {}
+_resolve_locks: Dict[str, asyncio.Lock] = {}
+
+# Micro-cache for HLS playlists (the .m3u8 file). The playlist updates every
+# segment-duration (~6 s) so we cache it for 2 s to coalesce concurrent viewers
+# on the same channel. Segments (.ts) are NOT cached (they would explode RAM).
+HLS_PLAYLIST_TTL = 2.0
+_hls_cache: Dict[str, Tuple[bytes, str, float]] = {}
+_hls_locks: Dict[str, asyncio.Lock] = {}
 
 # Category keyword mapping (French-leaning)
 CATEGORY_KEYWORDS = {
@@ -113,19 +148,19 @@ async def get_signature() -> str:
     if _cache["sig"] and _cache["sig_exp"] > now:
         return _cache["sig"]
     payload = _ping_payload()
-    async with httpx.AsyncClient(timeout=20, verify=False) as cx:
-        for url in PING_URLS:
-            try:
-                r = await cx.post(url, json=payload)
-                r.raise_for_status()
-                data = r.json()
-                sig = data.get("addonSig")
-                if sig:
-                    _cache["sig"] = sig
-                    _cache["sig_exp"] = now + 300
-                    return sig
-            except Exception as e:
-                logger.warning(f"ping failed {url}: {e}")
+    cx = await get_http_client()
+    for url in PING_URLS:
+        try:
+            r = await cx.post(url, json=payload, timeout=20.0)
+            r.raise_for_status()
+            data = r.json()
+            sig = data.get("addonSig")
+            if sig:
+                _cache["sig"] = sig
+                _cache["sig_exp"] = now + 300
+                return sig
+        except Exception as e:
+            logger.warning(f"ping failed {url}: {e}")
     raise HTTPException(status_code=502, detail="Service indisponible (auth)")
 
 def _catalog_headers(sig: str) -> Dict[str, str]:
@@ -143,40 +178,40 @@ async def _load_catalog(base: str, sig: str) -> List[Dict[str, Any]]:
     url = f"{base.rstrip('/')}/mediahubmx-catalog.json"
     channels: List[Dict[str, Any]] = []
     cursor = None
-    async with httpx.AsyncClient(timeout=30, verify=False) as cx:
-        while True:
-            body = {
-                "language": LANG,
-                "region": REGION,
-                "catalogId": "iptv",
-                "id": "iptv",
-                "adult": False,
-                "search": "",
-                "sort": "",
-                "filter": {},
-                "cursor": cursor,
-                "clientVersion": CLIENT_VERSION,
-            }
-            r = await cx.post(url, headers=_catalog_headers(sig), json=body)
-            r.raise_for_status()
-            data = r.json()
-            for item in (data.get("items") or []):
-                if item.get("type") == "iptv" and item.get("url"):
-                    cid = str((item.get("ids") or {}).get("id") or item.get("id") or item.get("url"))
-                    name = item.get("name") or "Chaîne"
-                    group = item.get("group") or ""
-                    channels.append({
-                        "id": cid,
-                        "url": item["url"],
-                        "name": name,
-                        "logo": item.get("logo") or "",
-                        "group": group,
-                        "country": _extract_country(group),
-                        "categories": _categorize(name),
-                    })
-            cursor = data.get("nextCursor")
-            if not cursor:
-                break
+    cx = await get_http_client()
+    while True:
+        body = {
+            "language": LANG,
+            "region": REGION,
+            "catalogId": "iptv",
+            "id": "iptv",
+            "adult": False,
+            "search": "",
+            "sort": "",
+            "filter": {},
+            "cursor": cursor,
+            "clientVersion": CLIENT_VERSION,
+        }
+        r = await cx.post(url, headers=_catalog_headers(sig), json=body, timeout=30.0)
+        r.raise_for_status()
+        data = r.json()
+        for item in (data.get("items") or []):
+            if item.get("type") == "iptv" and item.get("url"):
+                cid = str((item.get("ids") or {}).get("id") or item.get("id") or item.get("url"))
+                name = item.get("name") or "Chaîne"
+                group = item.get("group") or ""
+                channels.append({
+                    "id": cid,
+                    "url": item["url"],
+                    "name": name,
+                    "logo": item.get("logo") or "",
+                    "group": group,
+                    "country": _extract_country(group),
+                    "categories": _categorize(name),
+                })
+        cursor = data.get("nextCursor")
+        if not cursor:
+            break
     return channels
 
 async def get_channels(force: bool = False) -> List[Dict[str, Any]]:
@@ -198,8 +233,21 @@ async def get_channels(force: bool = False) -> List[Dict[str, Any]]:
     raise HTTPException(status_code=502, detail=f"Impossible de charger les chaînes: {last_err}")
 
 async def resolve_stream(channel_url: str) -> str:
-    sig = await get_signature()
-    async with httpx.AsyncClient(timeout=20, verify=False) as cx:
+    """Resolve channel → signed HLS URL. Cached 240 s with per-channel lock
+    so that 1000 simultaneous viewers result in only ONE upstream resolve call."""
+    now = time.time()
+    cached = _resolve_cache.get(channel_url)
+    if cached and cached[1] > now:
+        return cached[0]
+    # Per-channel lock to prevent thundering herd
+    lock = _resolve_locks.setdefault(channel_url, asyncio.Lock())
+    async with lock:
+        # Re-check after acquiring lock
+        cached = _resolve_cache.get(channel_url)
+        if cached and cached[1] > time.time():
+            return cached[0]
+        sig = await get_signature()
+        cx = await get_http_client()
         for base in UPSTREAM_BASES:
             url = f"{base.rstrip('/')}/mediahubmx-resolve.json"
             try:
@@ -208,24 +256,25 @@ async def resolve_stream(channel_url: str) -> str:
                     "region": REGION,
                     "url": channel_url,
                     "clientVersion": CLIENT_VERSION,
-                })
+                }, timeout=20.0)
                 r.raise_for_status()
                 data = r.json()
+                stream_url = None
                 if isinstance(data, list) and data and data[0].get("url"):
-                    return data[0]["url"]
-                if isinstance(data, dict):
-                    if data.get("url"):
-                        return data["url"]
-                    if data.get("streamUrl"):
-                        return data["streamUrl"]
+                    stream_url = data[0]["url"]
+                elif isinstance(data, dict):
+                    stream_url = data.get("url") or data.get("streamUrl")
+                if stream_url:
+                    _resolve_cache[channel_url] = (stream_url, time.time() + RESOLVE_TTL)
+                    return stream_url
             except Exception as e:
                 logger.warning(f"resolve failed {base}: {e}")
-    raise HTTPException(status_code=502, detail="Flux non disponible")
+        raise HTTPException(status_code=502, detail="Flux non disponible")
 
 # ----------------- API Routes -----------------
 @api_router.get("/")
 async def root():
-    return {"app": "NovaStream", "status": "ok"}
+    return {"app": "LiveWatch", "status": "ok"}
 
 @api_router.get("/countries")
 async def list_countries():
@@ -236,11 +285,6 @@ async def list_countries():
 @api_router.get("/categories")
 async def list_categories():
     return {"categories": list(CATEGORY_KEYWORDS.keys())}
-
-def _proxy_logo(url: str) -> str:
-    if not url:
-        return ""
-    return f"/api/logo?u={quote(url, safe='')}"
 
 @api_router.get("/channels")
 async def list_channels(
@@ -259,32 +303,74 @@ async def list_channels(
     if search:
         s = search.lower()
         out = [c for c in out if s in c["name"].lower()]
-    # Sanitize output (hide upstream url, proxy logos to bypass ad-blockers)
+    # Sanitize output. Upstream logo CDN (logo.huhu.to) is broken (returns 404)
+    # so we omit logos entirely to keep the browser console clean. The FE shows
+    # a TV-icon fallback which looks consistent.
     cleaned = [{
         "id": c["id"],
         "name": c["name"],
-        "logo": _proxy_logo(c["logo"]),
+        "logo": "",
         "country": c["country"],
         "categories": c["categories"],
     } for c in out[:limit]]
     return {"total": len(cleaned), "channels": cleaned}
 
-@api_router.get("/logo")
-async def logo_proxy(u: str):
-    """Proxy channel logos to bypass ad-blockers that block third-party logo CDNs."""
-    try:
-        async with httpx.AsyncClient(timeout=15, verify=False, follow_redirects=True) as cx:
-            r = await cx.get(u, headers={"User-Agent": "Mozilla/5.0", "Accept": "image/*"})
-            if r.status_code != 200:
-                raise HTTPException(status_code=404, detail="Logo introuvable")
-            ct = r.headers.get("content-type", "image/png")
-            return StreamingResponse(
-                _stream_bytes(r.content),
-                media_type=ct,
-                headers={"Cache-Control": "public, max-age=86400"},
-            )
-    except httpx.HTTPError:
-        raise HTTPException(status_code=404, detail="Logo introuvable")
+# ----------------- Public API (v1) -----------------
+def _public_channel(c: Dict[str, Any], base_url: str) -> Dict[str, Any]:
+    return {
+        "id": c["id"],
+        "name": c["name"],
+        "country": c["country"],
+        "categories": c["categories"],
+        "stream_url": f"{base_url}/api/stream/{c['id']}",
+        "embed_url": f"{base_url}/embed/{c['id']}",
+    }
+
+def _public_base(request: Request) -> str:
+    # Trust X-Forwarded-* set by the ingress
+    proto = request.headers.get("x-forwarded-proto") or request.url.scheme
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
+    return f"{proto}://{host}"
+
+@api_router.get("/v1/public/countries")
+async def public_countries():
+    channels = await get_channels()
+    countries = sorted({c["country"] for c in channels if c["country"] and c["country"] != "default"})
+    return {"total": len(countries), "countries": countries}
+
+@api_router.get("/v1/public/categories")
+async def public_categories():
+    return {"categories": list(CATEGORY_KEYWORDS.keys())}
+
+@api_router.get("/v1/public/channels")
+async def public_channels(
+    request: Request,
+    country: Optional[str] = Query(None),
+    category: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    limit: int = Query(2000, ge=1, le=5000),
+):
+    channels = await get_channels()
+    out = channels
+    if country:
+        cl = country.lower()
+        out = [c for c in out if c["country"].lower() == cl]
+    if category:
+        out = [c for c in out if category in c["categories"]]
+    if search:
+        s = search.lower()
+        out = [c for c in out if s in c["name"].lower()]
+    base = _public_base(request)
+    result = [_public_channel(c, base) for c in out[:limit]]
+    return {"total": len(result), "channels": result}
+
+@api_router.get("/v1/public/channel/{channel_id}")
+async def public_channel(channel_id: str, request: Request):
+    channels = await get_channels()
+    c = next((x for x in channels if x["id"] == channel_id), None)
+    if not c:
+        raise HTTPException(status_code=404, detail="Chaîne introuvable")
+    return _public_channel(c, _public_base(request))
 
 @api_router.get("/stream/{channel_id}")
 async def get_stream_url(channel_id: str):
@@ -294,7 +380,6 @@ async def get_stream_url(channel_id: str):
     if not channel:
         raise HTTPException(status_code=404, detail="Chaîne introuvable")
     upstream = await resolve_stream(channel["url"])
-    # Return a proxied URL so the source domain is hidden from frontend
     return {
         "id": channel_id,
         "name": channel["name"],
@@ -303,21 +388,56 @@ async def get_stream_url(channel_id: str):
 
 @api_router.get("/hls")
 async def hls_proxy(u: str):
-    """Proxy HLS playlists & segments, rewriting URLs so the source stays hidden."""
+    """Proxy HLS playlists & segments. Playlists are micro-cached (2 s) so
+    that thousands of concurrent viewers on the same channel result in a
+    single upstream fetch every 2 s."""
+    now = time.time()
+    # Quick test: is this a playlist URL (.m3u8)?
+    looks_like_playlist = ".m3u8" in u.lower().split("?")[0]
+
+    if looks_like_playlist:
+        cached = _hls_cache.get(u)
+        if cached and cached[2] > now:
+            return Response(content=cached[0], media_type=cached[1])
+        lock = _hls_locks.setdefault(u, asyncio.Lock())
+        async with lock:
+            cached = _hls_cache.get(u)
+            if cached and cached[2] > time.time():
+                return Response(content=cached[0], media_type=cached[1])
+            try:
+                cx = await get_http_client()
+                r = await cx.get(u, headers={"User-Agent": USER_AGENT_STREAM}, timeout=15.0)
+                ct = r.headers.get("content-type", "").lower()
+                is_m3u8 = ("mpegurl" in ct) or ("application/vnd.apple" in ct) or looks_like_playlist
+                if is_m3u8:
+                    text = r.text
+                    rewritten = _rewrite_m3u8(text, u).encode("utf-8")
+                    media = "application/vnd.apple.mpegurl"
+                    _hls_cache[u] = (rewritten, media, time.time() + HLS_PLAYLIST_TTL)
+                    return Response(content=rewritten, media_type=media)
+                # Fallback: not really a playlist, stream binary
+                return Response(content=r.content, media_type=r.headers.get("content-type", "application/octet-stream"))
+            except httpx.HTTPError as e:
+                raise HTTPException(status_code=502, detail=f"Erreur de flux: {e}")
+
+    # Segments (.ts, .key, .m4s, …): stream directly, NO cache
     try:
-        async with httpx.AsyncClient(timeout=30, verify=False, follow_redirects=True) as cx:
-            r = await cx.get(u, headers={"User-Agent": USER_AGENT_STREAM, "Connection": "close"})
-            ct = r.headers.get("content-type", "").lower()
-            is_m3u8 = "mpegurl" in ct or "application/vnd.apple" in ct or u.lower().split("?")[0].endswith(".m3u8")
-            if is_m3u8:
-                text = r.text
-                rewritten = _rewrite_m3u8(text, u)
-                return PlainTextResponse(rewritten, media_type="application/vnd.apple.mpegurl")
-            # Binary segment: stream back
-            return StreamingResponse(
-                _stream_bytes(r.content),
-                media_type=r.headers.get("content-type", "application/octet-stream"),
-            )
+        cx = await get_http_client()
+        upstream_req = cx.build_request("GET", u, headers={"User-Agent": USER_AGENT_STREAM})
+        r = await cx.send(upstream_req, stream=True, timeout=30.0)
+        if r.status_code >= 400:
+            await r.aclose()
+            raise HTTPException(status_code=502, detail=f"Erreur amont: HTTP {r.status_code}")
+        media = r.headers.get("content-type", "application/octet-stream")
+
+        async def _passthrough():
+            try:
+                async for chunk in r.aiter_bytes(chunk_size=65536):
+                    yield chunk
+            finally:
+                await r.aclose()
+
+        return StreamingResponse(_passthrough(), media_type=media)
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"Erreur de flux: {e}")
 
@@ -367,3 +487,6 @@ app.add_middleware(
 @app.on_event("shutdown")
 async def shutdown_db_client():
     client.close()
+    global _http_client
+    if _http_client is not None and not _http_client.is_closed:
+        await _http_client.aclose()
