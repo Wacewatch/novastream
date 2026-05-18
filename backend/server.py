@@ -28,7 +28,10 @@ logger = logging.getLogger("novastream")
 
 # ----------------- Upstream proxy logic (source hidden) -----------------
 UPSTREAM_BASES = ["https://vavoo.to", "https://kool.to"]
-PING_URLS = ["https://www.vavoo.tv/api/app/ping", "https://www.lokke.app/api/app/ping"]
+# IMPORTANT: lokke.app MUST be tried first. The vavoo.tv ping endpoint returns
+# a "free-tier" signature that makes the upstream serve the LOKKE-promo ad stream
+# instead of the real channel. lokke.app ping returns the working signature.
+PING_URLS = ["https://www.lokke.app/api/app/ping", "https://www.vavoo.tv/api/app/ping"]
 USER_AGENT_STREAM = "VAVOO/2.6"
 LANG = "fr"
 REGION = "US"  # US returns broad multi-country catalog
