@@ -335,12 +335,13 @@ async def list_channels(
 
 # ----------------- Public API (v1) -----------------
 def _public_channel(c: Dict[str, Any], base_url: str) -> Dict[str, Any]:
+    """Public-facing channel object. NO direct stream URL is exposed —
+    third parties must use the embed page to play the channel."""
     return {
         "id": c["id"],
         "name": c["name"],
         "country": c["country"],
         "categories": c["categories"],
-        "stream_url": f"{base_url}/api/stream/{c['id']}",
         "embed_url": f"{base_url}/embed/{c['id']}",
     }
 
@@ -349,6 +350,20 @@ def _public_base(request: Request) -> str:
     proto = request.headers.get("x-forwarded-proto") or request.url.scheme
     host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
     return f"{proto}://{host}"
+
+@api_router.get("/v1/public/all")
+async def public_all(request: Request):
+    """Single endpoint that returns everything a third-party integrator needs:
+    the full list of countries, categories and channels with their embed URL."""
+    channels = await get_channels()
+    countries = sorted({c["country"] for c in channels if c["country"] and c["country"] != "default"})
+    base = _public_base(request)
+    return {
+        "countries": countries,
+        "categories": list(CATEGORY_KEYWORDS.keys()),
+        "channels": [_public_channel(c, base) for c in channels],
+        "total": len(channels),
+    }
 
 @api_router.get("/v1/public/countries")
 async def public_countries():

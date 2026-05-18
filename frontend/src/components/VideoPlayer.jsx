@@ -16,7 +16,7 @@ import {
 import { toast } from "sonner";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
-const LOGO_URL = "https://i.imgur.com/HrbEzpm.png";
+const LOGO_URL = "https://i.imgur.com/V8YmT4z.png";
 
 export default function VideoPlayer({ channel, streamUrl, onClose, onRetry }) {
   const videoRef = useRef(null);

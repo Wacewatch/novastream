@@ -170,7 +170,7 @@ export default function NovaStream() {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 py-4 flex items-center gap-3 sm:gap-6">
           <div className="flex items-center gap-2.5 shrink-0" data-testid="brand-logo">
             <img
-              src="https://i.imgur.com/HrbEzpm.png"
+              src="https://i.imgur.com/V8YmT4z.png"
               alt="LiveWatch"
               className="h-7 sm:h-8 w-auto"
               draggable={false}

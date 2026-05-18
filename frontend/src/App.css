@@ -235,11 +235,12 @@
 }
 
 /* ===== Watermark logo on player (fades together with controls) ===== */
+/* Positioned just below the "EN DIRECT" live badge (top-left) */
 .player-watermark {
   position: absolute;
-  top: 70px;          /* below the close button area to avoid overlap */
-  right: 22px;
-  height: 28px;
+  top: 64px;
+  left: 22px;
+  height: 26px;
   width: auto;
   opacity: 0;
   filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.6));
@@ -250,10 +251,10 @@
 }
 .player-frame:hover .player-watermark,
 .player-watermark.visible {
-  opacity: 0.78;
+  opacity: 0.85;
 }
 @media (max-width: 640px) {
-  .player-watermark { height: 22px; top: 56px; right: 14px; }
+  .player-watermark { height: 20px; top: 52px; left: 14px; }
 }
 
 /* ===== Ad Modal ===== */
