@@ -222,6 +222,15 @@ export default function NovaStream() {
               <span className="text-[11px] text-white/55 uppercase tracking-wider">vues / 24 h</span>
             </div>
             <a
+              href="/multiview"
+              className="hidden sm:inline-flex items-center gap-1.5 text-sm text-white/70 hover:text-white px-3 py-2 rounded-full glass-pill border-white/10 transition-colors"
+              data-testid="multiview-link"
+              title="Mode multiview (jusqu'à 4×4)"
+            >
+              <Tv2 size={14} className="text-[#ff2e63]" />
+              Multi
+            </a>
+            <a
               href="/docs"
               className="hidden sm:inline-flex items-center gap-1.5 text-sm text-white/70 hover:text-white px-3 py-2 rounded-full glass-pill border-white/10 transition-colors"
               data-testid="api-link"
