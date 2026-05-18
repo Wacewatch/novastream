@@ -1230,13 +1230,15 @@ async def admin_global_stats(authorization: Optional[str] = Header(None)):
             logger.warning(f"supabase count {path} failed: {e}")
             return 0
 
-    total_users = await _count("user_profiles", {})
-    admins = await _count("user_profiles", {"role": "eq.admin"})
-    vips = await _count("user_profiles", {"is_vip": "eq.true"})
-
+    total_users, admins, vips, all_channels_safe = await asyncio.gather(
+        _count("user_profiles", {}),
+        _count("user_profiles", {"role": "eq.admin"}),
+        _count("user_profiles", {"is_vip": "eq.true"}),
+        get_channels(),
+        return_exceptions=False,
+    )
     try:
-        all_channels = await get_channels()
-        total_channels = len(all_channels)
+        total_channels = len(all_channels_safe) if all_channels_safe else 0
     except Exception:
         total_channels = 0
 

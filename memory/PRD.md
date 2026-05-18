@@ -89,3 +89,22 @@ French live-TV streaming app (Vavoo-backed). User reported flaky UX (no loader, 
 - **P2** Move file structure: split `server.py` into `/app/backend/routes/{streams,supabase,admin}.py` and add `/app/backend/tests/` regression suite for the new Supabase endpoints.
 - **P2** `/api/hls` upstream-degraded guard: return 502 when playlist body is missing `#EXTM3U` instead of a rewritten single-line proxy URL.
 
+
+## Session 2026-02-18 (part 2) — Admin Stats Modules
+- **Removed 500-user limit** in `/admin` — pagination with Supabase `.range()` in 1000-row chunks (50k hard safety cap).
+- **4 new admin endpoints** (all `_require_admin` JWT-protected):
+  - `GET /api/admin/system-stats` — CPU %, RAM %, process MB, uptime, platform, python version (via `psutil`).
+  - `GET /api/admin/live-stats` — `online`, `watching`, `total_24h`, `top_channels` (top 10 from `views` aggregation enriched with channel names).
+  - `GET /api/admin/top-referrers` — top HTTP Referer hosts in last 24 h (default window).
+  - `GET /api/admin/global-stats` — `total_users` / `admins` / `vips` / `total_channels` with `asyncio.gather` parallelization.
+- **Referrer logging middleware** (`_log_referrer`) writes to `db.referrers` (TTL 30 d, indexed on `host,ts`). Only logs `/api/hls` and `/api/stream` Referer headers and skips self-referrals.
+- **Admin.jsx rewritten** with new cards/sections:
+  - 5 global stat cards (Utilisateurs / Admins / VIP / Chaînes / Clés VIP).
+  - System cards: CPU App / RAM App / Réseau (live count) / Système (uptime, platform, python).
+  - "Statistiques en direct" block: En ligne, En visionnage, Top Chaînes en Direct.
+  - "Top Référents" with progress-bar style ranking.
+  - Existing VIP keys & Users tables preserved.
+  - Polls backend admin endpoints every 5 s.
+- **Dashboard avatar** placeholder initials replaced with site logo `<img src="https://i.imgur.com/V8YmT4z.png">`.
+- **Tests**: `testing_agent_v3_fork` iter_4 → backend 15/15 pytest, frontend 100% (admin gating, multiview, favorites sync all green).
+
