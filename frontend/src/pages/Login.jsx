@@ -13,18 +13,24 @@ export default function Login() {
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [busy, setBusy] = useState(false);
+  const [errorMsg, setErrorMsg] = useState("");
 
   const from = location.state?.from?.pathname || "/";
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (busy) return;
+    setErrorMsg("");
     if (mode === "signup" && password !== confirm) {
-      toast.error("Les mots de passe ne correspondent pas");
+      const m = "Les mots de passe ne correspondent pas";
+      setErrorMsg(m);
+      toast.error(m);
       return;
     }
     if (password.length < 6) {
-      toast.error("Le mot de passe doit faire au moins 6 caractères");
+      const m = "Le mot de passe doit faire au moins 6 caractères";
+      setErrorMsg(m);
+      toast.error(m);
       return;
     }
     setBusy(true);
@@ -39,7 +45,9 @@ export default function Login() {
         navigate(from, { replace: true });
       }
     } catch (err) {
-      toast.error(err?.message || "Erreur d'authentification");
+      const m = err?.message || "Erreur d'authentification";
+      setErrorMsg(m);
+      toast.error(m);
     } finally {
       setBusy(false);
     }
@@ -123,6 +131,16 @@ export default function Login() {
             {mode === "signin" ? "Se connecter" : "Créer mon compte"}
           </button>
         </form>
+
+        {errorMsg && (
+          <div
+            className="mt-3 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/30 text-red-300 text-xs"
+            data-testid="auth-error-msg"
+            role="alert"
+          >
+            {errorMsg}
+          </div>
+        )}
 
         <p className="text-center text-sm text-white/60 mt-5">
           {mode === "signin" ? "Pas encore de compte ?" : "Déjà un compte ?"}{" "}

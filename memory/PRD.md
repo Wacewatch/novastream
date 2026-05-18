@@ -61,3 +61,31 @@ French live-TV streaming app (Vavoo-backed). User reported flaky UX (no loader, 
 - Upstream Vavoo signed URLs expire ~5 min → user might need to "Recharger le flux" occasionally (now in kebab).
 - Many channels have no match in the tv-logos repo (e.g. "A LA CARTE 1 HD", "BACKUP ONLY") — they show TV icon by design.
 - Total 24 h is "view events" not "unique users" (we don't track sessions).
+
+## Session 2026-02-18 — Supabase integration + global favorites sync
+- **Multiview (1×2 / 2×2 / 3×3 / 4×4)** with iframe embed mode (modal + player flow).
+- **HLS single-flight optimization** in `/app/backend/server.py` (asyncio.Task + shield); load-tested with 1000 concurrent viewers on same channel → zero extra upstream calls.
+- **Supabase integration** (`@supabase/supabase-js`):
+  - `AuthProvider` in `/app/frontend/src/context/AuthContext.jsx` with `.maybeSingle()`, 3-second `Promise.race` on profile fetch, and 5-second safety `setTimeout` so the UI never hangs on Loader2.
+  - `signUp` performs a best-effort upsert into `user_profiles` (safety net if no `handle_new_user` DB trigger exists).
+  - Pages: `/login`, `/dashboard`, `/admin` with role-aware UI (Membre / VIP / Admin / Invité).
+  - Schema (Supabase): `user_profiles { id, email, role, is_vip, vip_granted_at, created_at }`, `user_favorites { id, user_id, channel_id }`, `vip_keys { id, key, used, used_by, used_at }`.
+- **FavoritesProvider** (`/app/frontend/src/hooks/useFavorites.js`) — global React context now wraps the app in `App.js`. Heart toggle on any `ChannelCard` updates the header counter instantly (verified 0→1→2→3 in smoke screenshot).
+- **Backend endpoints (Supabase-backed)**:
+  - `POST /api/auth/redeem-vip` — JWT-protected, validates and atomically marks the key + bumps the user to VIP.
+  - `POST /api/admin/vip-keys/generate` — admin-only batch key generation.
+  - `POST /api/channels/by-ids` — enriched lookup for the Dashboard favorites grid.
+- **VIP/Admin ad-bypass** wired into `AdUnlockModal` via `useAuth().hasAdFreeExperience`.
+- **Bug fixes this session**:
+  - Dashboard infinite spinner (RCA: AuthProvider had no timeout — fixed with Promise.race + safety setTimeout + maybeSingle).
+  - React hydration warning `<button>` cannot be a descendant of `<button>` — `ChannelCard` outer element converted from `<button>` to `<div role="button" tabIndex={0} onKeyDown>`.
+  - Admin.jsx hooks order violation (useMemo after early return) — hoisted memos above conditional returns.
+  - Login.jsx now also shows an inline red error pill (in addition to the existing toast) so signUp/signIn 4xx errors are impossible to miss.
+  - Truncated `SUPABASE_SERVICE_ROLE_KEY` replaced with full JWT in `/app/backend/.env`.
+
+## Roadmap (post-2026-02-18)
+- **P1** Surface clearer email-confirmation onboarding (currently a generic toast; show explicit "Vérifiez votre boîte mail" banner when Supabase has email confirmation enabled).
+- **P1** Promote first registered user to admin automatically (or via env-listed admin emails) to bootstrap the Admin page.
+- **P2** Move file structure: split `server.py` into `/app/backend/routes/{streams,supabase,admin}.py` and add `/app/backend/tests/` regression suite for the new Supabase endpoints.
+- **P2** `/api/hls` upstream-degraded guard: return 502 when playlist body is missing `#EXTM3U` instead of a rewritten single-line proxy URL.
+
