@@ -31,7 +31,7 @@ export function AuthProvider({ children }) {
         .from("user_profiles")
         .select("id, email, role, is_vip, vip_granted_at, created_at")
         .eq("id", userId)
-        .single();
+        .maybeSingle();
       if (error) {
         if (error.code !== "PGRST116") {
           // eslint-disable-next-line no-console
@@ -52,25 +52,52 @@ export function AuthProvider({ children }) {
 
   useEffect(() => {
     let cancelled = false;
+
+    // Safety: guarantee loading flips to false within 5s even if Supabase hangs
+    const safety = setTimeout(() => {
+      if (!cancelled) setLoading(false);
+    }, 5000);
+
     (async () => {
-      const {
-        data: { session },
-      } = await supabase.auth.getSession();
-      if (cancelled) return;
-      setUser(session?.user || null);
-      await fetchProfile(session?.user?.id);
-      setLoading(false);
+      try {
+        const {
+          data: { session },
+        } = await supabase.auth.getSession();
+        if (cancelled) return;
+        setUser(session?.user || null);
+        if (session?.user?.id) {
+          // Race profile fetch against a 3s timeout to never block UI
+          await Promise.race([
+            fetchProfile(session.user.id),
+            new Promise((resolve) => setTimeout(resolve, 3000)),
+          ]);
+        }
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.warn("[auth] init session error", e);
+      } finally {
+        if (!cancelled) setLoading(false);
+        clearTimeout(safety);
+      }
     })();
 
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange(async (_event, session) => {
       setUser(session?.user || null);
-      await fetchProfile(session?.user?.id);
+      if (session?.user?.id) {
+        await Promise.race([
+          fetchProfile(session.user.id),
+          new Promise((resolve) => setTimeout(resolve, 3000)),
+        ]);
+      } else {
+        setProfile(null);
+      }
     });
 
     return () => {
       cancelled = true;
+      clearTimeout(safety);
       subscription.unsubscribe();
     };
   }, [fetchProfile]);
@@ -90,6 +117,25 @@ export function AuthProvider({ children }) {
       password,
     });
     if (error) throw new Error(error.message);
+    // Best-effort: ensure a user_profiles row exists for the new user.
+    // This is a safety net in case Supabase has no `handle_new_user` trigger.
+    const newUserId = data?.user?.id;
+    if (newUserId) {
+      try {
+        await supabase.from("user_profiles").upsert(
+          {
+            id: newUserId,
+            email: email,
+            role: "member",
+            is_vip: false,
+          },
+          { onConflict: "id", ignoreDuplicates: true }
+        );
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.warn("[auth] profile upsert on signup failed", e);
+      }
+    }
     return data;
   }, []);
 

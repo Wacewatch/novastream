@@ -1,0 +1,39 @@
+{
+  "summary": "Frontend re-verification of FIX1 (Dashboard infinite spinner) and FIX2 (button-in-button). Both fixes VERIFIED. (1) ChannelCard root is now <div role='button' tabIndex=0> — confirmed via DOM (tag=DIV, role=button, tabindex=0) and ZERO 'button cannot be a descendant of button' console warnings while browsing home. (2) AuthProvider safety timeout works — /dashboard and /admin no longer hang on Loader2; when no session exists they redirect to /login within <8s (confirming setLoading(false) is being reached). Regressions all PASS: favorites counter sync 0→1→0, ChannelCard click opens AdUnlockModal (data-testid='ad-modal'), keyboard Enter on focused card opens modal, /multiview renders (mv-grid-2x2). LIMITATION: Could not fully render profile-card because Supabase signUp is returning HTTP 400 (likely email-confirmation required OR signups rate-limited on the project) — both fresh signups in this iteration failed silently; subsequent signIn also failed. Per the testing brief this is treated as PASS for the spinner fix because the page does NOT spin — it redirects cleanly. Profile-card render itself was not directly observed in an authenticated session.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {"flow": "Supabase signUp", "issue": "POST to Supabase auth /signup returns HTTP 400 (visible as 'Failed to load resource: 400' in console) for fresh qa+{timestamp}@livewatchtest.dev / Test1234! credentials. No toast/error surfaces in the UI — the AuthLogin page silently stays on /login with no feedback. Two distinct timestamps tried (1779145725 and 1779145800), both 400. Likely causes: Supabase project has 'Enable email confirmations' ON (signup succeeds server-side but client sees 400 if response shape differs, OR Supabase is treating these as already-existing users), OR signup rate-limiting kicked in after iteration_2 created 2 users in the same minute. Action: (a) ensure AuthLogin.jsx surfaces signUp/signIn errors via a visible toast/inline message so users aren't left on a silent form, (b) check Supabase project email-confirmation setting and ensure either it's disabled for QA OR the UI tells the user to confirm their email.", "affected_selectors": ["[data-testid='auth-submit-btn']"]}
+    ],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/test_reports/iteration_3.json",
+    "/app/backend/tests/test_novastream_api.py",
+    "/app/backend/tests/test_supabase_and_extras.py"
+  ],
+  "action_items": [
+    "MEDIUM: Surface Supabase signUp/signIn errors in the AuthLogin UI (currently 400 responses are completely silent — no toast, no inline error). The form just stays put which is confusing.",
+    "MEDIUM: Verify Supabase project email-confirmation setting. If ON, the AuthLogin should show a 'Vérifiez votre boîte mail pour confirmer votre compte' message after successful signUp instead of just returning to the form.",
+    "OPTIONAL: Once signUp works (or confirmation flow is wired up), re-run a single happy-path test to actually observe [data-testid='profile-card'] rendering with role 'Membre', VIP redeem section, and logout button."
+  ],
+  "critical_code_review_comments": [
+    "AuthContext.jsx looks good: maybeSingle() + Promise.race(3s) + safety setTimeout(5s) + cancelled flag are all in place. The fix is correctly implemented.",
+    "ChannelCard.jsx looks good: div + role='button' + tabIndex={0} + onKeyDown handles Enter and Space. No button-in-button nesting anymore.",
+    "AuthLogin / login form: no visible error/toast surface for Supabase 400 — user sees nothing happen after clicking 'Créer mon compte'. Add try/catch around signUp/signIn with a toast (sonner/react-hot-toast already in deps) so failures surface to the user.",
+    "AuthContext.signUp does a best-effort upsert into user_profiles but does NOT await error or surface it — if RLS blocks the insert, no feedback. Consider logging client-side and/or moving this upsert to a backend handler that runs with service-role privileges.",
+    "Consider adding e2e tracing in the AuthLogin component (console.warn / Sentry breadcrumb) when supabase.auth.signUp returns an error — current behavior of swallowing the 400 makes triage hard."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100% (carried from iter_2)", "frontend": "85%"},
+  "test_credentials": "Attempted qa+1779145725@livewatchtest.dev / Test1234! and qa+1779145800@livewatchtest.dev / Test1234! — both got Supabase 400 on signUp. Memory file lists test1779144435@livewatchtest.dev with unknown password.",
+  "seed_data_creation": "None successful this iteration (signUp 400s).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "FIX1 and FIX2 verified at DOM/console level. The only remaining gap is direct visual confirmation of profile-card in an authenticated session — blocked by Supabase 400 on signUp. Main agent should either (a) provide working creds, (b) disable email-confirmation on the Supabase project for QA, or (c) wire up an admin-bypass test endpoint. Once authenticated, profile-card, vip-redeem-section, logout-btn, /admin 'Accès refusé' should be verified.",
+  "rca of the issue": "FIX1 RCA: Previous infinite spinner was due to AuthContext.useEffect awaiting supabase.auth.getSession() then fetchProfile().single() with no timeout. New code wraps both in Promise.race vs 3s timeout and adds a 5s outer safety setTimeout that flips loading=false regardless. Verified: /dashboard and /admin both resolve within ~5-6s to a redirect (no session) instead of an infinite Loader2 spinner. FIX2 RCA: ChannelCard outer element was <button>, FavoriteButton inside is also <button> — invalid HTML triggering React hydration warnings. Now outer is <div role='button' tabIndex={0} onKeyDown={Enter/Space → onClick}> — semantically equivalent for users and a11y, valid HTML, and zero console warnings observed while loading /. SECONDARY ISSUE: Supabase signUp returns 400 silently — main agent should investigate project-level signup settings."
+}

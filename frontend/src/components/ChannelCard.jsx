@@ -33,9 +33,17 @@ function ChannelCard({ channel, onClick }) {
   const viewers = channel.viewers || 0;
 
   return (
-    <button
+    <div
       onClick={onClick}
-      className="channel-card channel-card-solid text-left"
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onClick?.();
+        }
+      }}
+      role="button"
+      tabIndex={0}
+      className="channel-card channel-card-solid text-left cursor-pointer"
       data-testid={`channel-card-${channel.id}`}
       aria-label={`Lancer ${channel.name}`}
     >
@@ -92,7 +100,7 @@ function ChannelCard({ channel, onClick }) {
           {channel.categories?.[0] || "TV"}
         </p>
       </div>
-    </button>
+    </div>
   );
 }
 
