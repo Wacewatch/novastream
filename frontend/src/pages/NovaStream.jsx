@@ -102,6 +102,7 @@ export default function NovaStream() {
   // Load channels when filters change
   useEffect(() => {
     const ctrl = new AbortController();
+    let cancelled = false;
     (async () => {
       setLoading(true);
       try {
@@ -109,17 +110,23 @@ export default function NovaStream() {
         if (category && category !== "Tous") params.category = category;
         if (search.trim()) params.search = search.trim();
         const r = await axios.get(`${API}/channels`, { params, signal: ctrl.signal });
+        if (cancelled) return;
         setChannels(r.data.channels || []);
+        setLoading(false);
       } catch (e) {
+        if (cancelled) return;
         if (e.name !== "CanceledError" && e.code !== "ERR_CANCELED") {
           console.error("channels error", e);
           toast.error("Erreur lors du chargement des chaînes");
+          setLoading(false);
         }
-      } finally {
-        setLoading(false);
+        // On abort: keep loading=true so we don't flash the empty state
       }
     })();
-    return () => ctrl.abort();
+    return () => {
+      cancelled = true;
+      ctrl.abort();
+    };
   }, [country, category, search]);
 
   const handleChannelClick = (ch) => {

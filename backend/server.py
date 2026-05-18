@@ -234,6 +234,11 @@ async def list_countries():
 async def list_categories():
     return {"categories": list(CATEGORY_KEYWORDS.keys())}
 
+def _proxy_logo(url: str) -> str:
+    if not url:
+        return ""
+    return f"/api/logo?u={quote(url, safe='')}"
+
 @api_router.get("/channels")
 async def list_channels(
     country: Optional[str] = Query(None),
@@ -251,15 +256,32 @@ async def list_channels(
     if search:
         s = search.lower()
         out = [c for c in out if s in c["name"].lower()]
-    # Sanitize output (hide upstream url)
+    # Sanitize output (hide upstream url, proxy logos to bypass ad-blockers)
     cleaned = [{
         "id": c["id"],
         "name": c["name"],
-        "logo": c["logo"],
+        "logo": _proxy_logo(c["logo"]),
         "country": c["country"],
         "categories": c["categories"],
     } for c in out[:limit]]
     return {"total": len(cleaned), "channels": cleaned}
+
+@api_router.get("/logo")
+async def logo_proxy(u: str):
+    """Proxy channel logos to bypass ad-blockers that block third-party logo CDNs."""
+    try:
+        async with httpx.AsyncClient(timeout=15, verify=False, follow_redirects=True) as cx:
+            r = await cx.get(u, headers={"User-Agent": "Mozilla/5.0", "Accept": "image/*"})
+            if r.status_code != 200:
+                raise HTTPException(status_code=404, detail="Logo introuvable")
+            ct = r.headers.get("content-type", "image/png")
+            return StreamingResponse(
+                _stream_bytes(r.content),
+                media_type=ct,
+                headers={"Cache-Control": "public, max-age=86400"},
+            )
+    except httpx.HTTPError:
+        raise HTTPException(status_code=404, detail="Logo introuvable")
 
 @api_router.get("/stream/{channel_id}")
 async def get_stream_url(channel_id: str):

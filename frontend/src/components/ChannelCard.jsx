@@ -1,8 +1,14 @@
 import { useState } from "react";
 import { Tv } from "lucide-react";
 
+const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
+
 export default function ChannelCard({ channel, onClick }) {
   const [imgError, setImgError] = useState(!channel.logo);
+
+  const logoSrc = channel.logo
+    ? (channel.logo.startsWith("http") ? channel.logo : `${BACKEND_URL}${channel.logo}`)
+    : "";
 
   return (
     <button
@@ -19,9 +25,9 @@ export default function ChannelCard({ channel, onClick }) {
       </div>
 
       <div className="absolute inset-0 flex items-center justify-center p-4">
-        {!imgError ? (
+        {!imgError && logoSrc ? (
           <img
-            src={channel.logo}
+            src={logoSrc}
             alt={channel.name}
             className="channel-logo"
             onError={() => setImgError(true)}
