@@ -1,0 +1,134 @@
+{
+  "app_context": {
+    "name": "NovaStream",
+    "description": "Plateforme web de streaming TV en direct avec lecteur personnalisé, interface moderne en glassmorphisme et flux monétisé via un système publicitaire modal.",
+    "language": "fr",
+    "default_country": "FR",
+    "theme_mode": "dark_only",
+    "archetype": "Archetype 5: Jewel & Luxury - Cinematic Dark (Dark Glassmorphism)"
+  },
+  "typography": {
+    "headings": {
+      "family": "Outfit, sans-serif",
+      "weights": ["400", "600", "800"],
+      "usage": "Utilisé pour le logo, les titres de catégories et le modal publicitaire."
+    },
+    "body": {
+      "family": "Manrope, sans-serif",
+      "weights": ["400", "500", "700"],
+      "usage": "Utilisé pour la navigation, les noms des chaînes et les textes des boutons."
+    },
+    "rules": [
+      "Inter ou Roboto sont formellement interdits.",
+      "Appliquer 'tracking-tight' aux titres de plus de 24px.",
+      "Les labels et les badges 'LIVE' doivent être en majuscules avec un espacement 'tracking-wider'."
+    ]
+  },
+  "colors": {
+    "background_base": "#05050A",
+    "surface_glass": "rgba(255, 255, 255, 0.03)",
+    "surface_glass_hover": "rgba(255, 255, 255, 0.08)",
+    "border_glass": "rgba(255, 255, 255, 0.08)",
+    "accent_primary": "#FF2E63",
+    "accent_hover": "#FF4C79",
+    "text_primary": "#FFFFFF",
+    "text_secondary": "rgba(255, 255, 255, 0.6)",
+    "live_indicator": "#FF0033",
+    "success_green": "#00E676"
+  },
+  "design_system": {
+    "surfaces": {
+      "glassmorphism_card": "backdrop-blur-xl bg-white/5 border border-white/10 shadow-[0_8px_32px_rgba(0,0,0,0.3)] rounded-2xl",
+      "glassmorphism_heavy": "backdrop-blur-3xl bg-black/60 border border-white/10 rounded-3xl shadow-[0_16px_48px_rgba(0,0,0,0.8)]",
+      "glassmorphism_pill": "backdrop-blur-md bg-white/10 border border-white/5 rounded-full"
+    },
+    "spacing": "Système généreux. p-6 ou p-8 sur Desktop. p-4 sur Mobile. Les grilles doivent avoir un gap-6.",
+    "icons": "lucide-react (taille standard 20px ou 24px, stroke-width 1.5 pour un look moderne)."
+  },
+  "components_specs": {
+    "navigation_header": {
+      "layout": "Sticky header (z-50) avec effet 'Crystal Glass' (backdrop-blur-xl bg-black/40 border-b border-white/10).",
+      "elements": [
+        "Brand Logo (à gauche, texte 'NovaStream' avec point rouge).",
+        "Barre de recherche (centrée sur desktop, glass effect, icône loupe).",
+        "Filtre pays (à droite, menu déroulant, par défaut: France avec drapeau)."
+      ]
+    },
+    "category_filters": {
+      "layout": "Liste horizontale scrollable sous le header.",
+      "items": ["Généralistes", "Sport", "Info", "Cinéma", "Jeunesse", "Divertissement", "Documentaire", "Musique"],
+      "style": "Pillules en glassmorphisme. État actif: bg-accent_primary text-white font-bold sans bordure."
+    },
+    "channel_grid": {
+      "layout": "Responsive: grid-cols-2 (mobile), grid-cols-3 (tablette), grid-cols-4 lg:grid-cols-6 (desktop) avec gap-6.",
+      "card_style": "Format 16:9 ou carré. Effet Glassmorphism card. Au survol: 'transition-all duration-300 hover:scale-105 hover:border-accent_primary/50 hover:bg-white/10'.",
+      "elements": [
+        "Logo de la chaîne au centre (blanc si possible).",
+        "Badge 'LIVE' rouge clignotant en haut à droite (animation pulse)."
+      ]
+    },
+    "custom_video_player": {
+      "layout": "Lecteur vidéo sans bords (cardless) ou avec coins légèrement arrondis (rounded-xl) prenant toute la largeur du container.",
+      "background": "Noir absolu (#000000) quand la vidéo charge.",
+      "controls_overlay": "Dégradé noir au bas (bg-gradient-to-t from-black/90 to-transparent) apparaissant au hover.",
+      "controls": [
+        "Bouton Play/Pause (bas gauche).",
+        "Contrôle du volume (slider hover).",
+        "Indicateur 'EN DIRECT' (point rouge).",
+        "Options à droite: Qualité, Picture-in-Picture (PiP), Plein écran."
+      ]
+    },
+    "ad_unlock_modal": {
+      "trigger": "Déclenché à CHAQUE changement de chaîne.",
+      "layout": "Modal centré en absolute/fixed (z-[100]) par-dessus le lecteur vidéo noir. Effet 'glassmorphism_heavy'.",
+      "content": "Message: 'Débloquez cette chaîne pour lancer le direct'. Affichage de la progression 0/2.",
+      "flow": [
+        "Étape 1: Bouton 'Débloquer la chaîne (Pub 1)'. data-testid='ad-btn-1'. Action: Ouvre l'URL pub 1 dans un nouvel onglet.",
+        "Étape 2: Le bouton 1 est désactivé/coché. Le bouton 2 apparaît: 'Lancer le lecteur (Pub 2)'. data-testid='ad-btn-2'. Action: Ouvre l'URL pub 2 ET ferme le modal pour lancer la vidéo.",
+        "URL 1: https://foreignabnormality.com/ktfpa1187?key=bcec92d207239b8d8e091e898bcd8666",
+        "URL 2: https://omg10.com/4/10323906"
+      ]
+    }
+  },
+  "media_assets": {
+    "background_image": {
+      "url": "https://static.prod-images.emergentagent.com/jobs/999712a4-1b3e-4409-a34d-8820f0725572/images/d55e48c3e4f4282d23ce1bed15d0f2104536527094d667f6a19a6459dbf97d86.png",
+      "description": "Image cinématique générée. À utiliser en position fixed 'w-full h-full object-cover', avec une surcouche (overlay) 'bg-black/80' par dessus pour que l'UI glassmorphisme ressorte parfaitement.",
+      "category": "background"
+    },
+    "placeholders_grid": [
+      {
+        "url": "https://images.unsplash.com/photo-1552380072-85a95a4c348a?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxOTB8MHwxfHNlYXJjaHwxfHxzcG9ydHMlMjBhY3Rpb24lMjBkYXJrfGVufDB8fHx8MTc3OTEyOTQwN3ww&ixlib=rb-4.1.0&q=85",
+        "description": "Image placeholder sport 1 pour tester la grille",
+        "category": "placeholder"
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1763044937427-aeab6013eee6?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxOTB8MHwxfHNlYXJjaHw0fHxzcG9ydHMlMjBhY3Rpb24lMjBkYXJrfGVufDB8fHx8MTc3OTEyOTQwN3ww&ixlib=rb-4.1.0&q=85",
+        "description": "Image placeholder sport 2 pour tester la grille",
+        "category": "placeholder"
+      }
+    ]
+  },
+  "testing_requirements": {
+    "data_testid_rules": "Tous les éléments interactifs DOIVENT posséder un attribut data-testid.",
+    "examples": [
+      "data-testid='search-input'",
+      "data-testid='country-filter'",
+      "data-testid='category-pill-[nom]'",
+      "data-testid='channel-card-[id]'",
+      "data-testid='ad-modal'",
+      "data-testid='ad-btn-1'",
+      "data-testid='ad-btn-2'",
+      "data-testid='video-play-btn'",
+      "data-testid='video-fullscreen-btn'"
+    ]
+  },
+  "instructions_to_main_agent": [
+    "IMPORTANT: Ne jamais mentionner ou utiliser le mot 'Vavoo' dans l'UI ou le code source visible. Utilisez le nom de marque générique 'NovaStream'.",
+    "Assurez-vous que l'application est entièrement en langue Française (Textes, Placeholders, Boutons).",
+    "Le thème sombre (dark_only) est obligatoire. N'incluez pas de toggle light/dark.",
+    "Gérez l'état d'ouverture des publicités par chaîne. Si un utilisateur change de chaîne, le processus publicitaire à 2 clics (ad-unlock) doit recommencer.",
+    "Utilisez un lecteur vidéo HLS entièrement personnalisé en React avec l'UI spécifiée (Pas de lecteur natif basique du navigateur).",
+    "Appliquez l'image de background avec un overlay très sombre pour que le 'backdrop-blur' du glassmorphisme fasse ressortir les lumières subtiles sans compromettre la lisibilité."
+  ]
+}
