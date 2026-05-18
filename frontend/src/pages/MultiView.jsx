@@ -65,7 +65,6 @@ export default function MultiView() {
     }
     return arr;
   });
-  const [focusedIndex, setFocusedIndex] = useState(-1);
 
   // Picker modal
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -151,17 +150,11 @@ export default function MultiView() {
       next[index] = null;
       return next;
     });
-    setFocusedIndex((f) => (f === index ? -1 : f));
   }, []);
 
   const clearAll = useCallback(() => {
     setCells(new Array(16).fill(null));
-    setFocusedIndex(-1);
     toast.success("Toutes les cellules ont été vidées");
-  }, []);
-
-  const onFocus = useCallback((index) => {
-    setFocusedIndex((f) => (f === index ? -1 : index));
   }, []);
 
   const filledCount = cells.slice(0, visibleCells).filter(Boolean).length;
@@ -240,8 +233,6 @@ export default function MultiView() {
               key={`cell-${idx}-${ch?.id || "empty"}`}
               index={idx}
               channel={ch}
-              isFocused={focusedIndex === idx}
-              onFocus={() => onFocus(idx)}
               onPick={() => openPicker(idx)}
               onClear={() => clearCell(idx)}
             />
@@ -249,7 +240,7 @@ export default function MultiView() {
         </div>
 
         <div className="text-center text-white/40 text-xs mt-4">
-          Cliquez sur une cellule pour activer le son (une seule à la fois). Bande passante limitée par cellule en qualité min.
+          Chaque cellule charge la page d'embed (pub puis lecteur). Cliquez dans le lecteur pour activer le son.
         </div>
       </main>
 
