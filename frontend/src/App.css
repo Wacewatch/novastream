@@ -240,10 +240,10 @@
   position: absolute;
   top: 64px;
   left: 22px;
-  height: 26px;
+  height: 38px;
   width: auto;
   opacity: 0;
-  filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.6));
+  filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.65));
   transition: opacity 0.3s ease;
   pointer-events: none;
   user-select: none;
@@ -251,11 +251,119 @@
 }
 .player-frame:hover .player-watermark,
 .player-watermark.visible {
-  opacity: 0.85;
+  opacity: 0.9;
 }
 @media (max-width: 640px) {
-  .player-watermark { height: 20px; top: 52px; left: 14px; }
+  .player-watermark { height: 28px; top: 52px; left: 14px; }
 }
+
+/* ===== Channel card source tag (BASIC / CABLE / SAT …) ===== */
+.source-tag {
+  display: inline-flex;
+  align-items: center;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 6px;
+  text-transform: uppercase;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(20, 20, 22, 0.72);
+  color: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(6px);
+}
+.source-tag.source-basic     { background: rgba(34, 197, 94, 0.22);  color: #4ade80; border-color: rgba(74, 222, 128, 0.35); }
+.source-tag.source-cable     { background: rgba(59, 130, 246, 0.22); color: #60a5fa; border-color: rgba(96, 165, 250, 0.35); }
+.source-tag.source-satellite { background: rgba(168, 85, 247, 0.22); color: #c084fc; border-color: rgba(192, 132, 252, 0.35); }
+.source-tag.source-terrestrial { background: rgba(245, 158, 11, 0.22); color: #fbbf24; border-color: rgba(251, 191, 36, 0.35); }
+.source-tag.source-iptv      { background: rgba(236, 72, 153, 0.22); color: #f472b6; border-color: rgba(244, 114, 182, 0.35); }
+.source-tag.source-hd, .source-tag.source-fhd { background: rgba(255, 46, 99, 0.18); color: #ff6f8b; border-color: rgba(255, 46, 99, 0.35); }
+
+/* ===== Player menu (kebab) dropdown ===== */
+.player-menu-wrap { position: relative; }
+.player-menu {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  right: 0;
+  min-width: 220px;
+  background: rgba(14, 14, 18, 0.96);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  padding: 6px;
+  box-shadow: 0 24px 40px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(16px) saturate(140%);
+  pointer-events: auto;
+  z-index: 8;
+}
+.player-menu .menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 12px;
+  border-radius: 8px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 13px;
+  cursor: pointer;
+  border: none;
+  text-align: left;
+  transition: background 0.15s ease;
+}
+.player-menu .menu-item:hover { background: rgba(255, 255, 255, 0.07); }
+.player-menu .menu-item .menu-value {
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.player-menu .menu-separator {
+  height: 1px;
+  background: rgba(255, 255, 255, 0.08);
+  margin: 4px 2px;
+}
+.player-menu .menu-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.45);
+  padding: 8px 12px 4px;
+}
+.player-menu .menu-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 12px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  border-radius: 6px;
+  margin-bottom: 4px;
+}
+.player-menu .menu-back:hover { color: white; background: rgba(255, 255, 255, 0.05); }
+.player-menu .menu-radio {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 13px;
+  cursor: pointer;
+  border: none;
+  text-align: left;
+}
+.player-menu .menu-radio:hover { background: rgba(255, 255, 255, 0.07); }
+.player-menu .menu-radio.active { color: #ff2e63; }
+.player-menu .menu-radio .check { color: #ff2e63; }
 
 /* ===== Ad Modal ===== */
 .ad-modal-backdrop {

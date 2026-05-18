@@ -114,6 +114,34 @@ def _extract_country(group: str) -> str:
             return part or "default"
     return raw
 
+# Channel name suffix -> source label.
+# Vavoo encodes the broadcast source as a 1-letter suffix at the end of the
+# channel name (".b" / ".c" / ".s" mostly).
+_SOURCE_LABELS = {
+    "b": "basic",        # free / standard
+    "c": "cable",        # cable distribution
+    "s": "satellite",    # satellite
+    "t": "terrestrial",  # DVB-T / TNT (very rare in the catalog)
+    "i": "iptv",         # IPTV / OTT
+    "h": "hd",
+    "f": "fhd",
+}
+
+_NAME_SUFFIX_RE = re.compile(r"\s\.([A-Za-z]{1,3})\s*$")
+
+def _clean_name_and_source(raw_name: str) -> Tuple[str, Optional[str]]:
+    name = (raw_name or "").strip()
+    if not name:
+        return name, None
+    m = _NAME_SUFFIX_RE.search(name)
+    if not m:
+        return name, None
+    code = m.group(1).lower()
+    label = _SOURCE_LABELS.get(code)
+    # Strip the suffix from the display name (always, even if unknown code)
+    cleaned = _NAME_SUFFIX_RE.sub("", name).rstrip(" .")
+    return (cleaned or name), label
+
 def _ping_payload():
     ts = int(time.time() * 1000)
     return {
@@ -205,12 +233,14 @@ async def _load_catalog(base: str, sig: str) -> List[Dict[str, Any]]:
                 import hashlib
                 url_hash = hashlib.md5(item["url"].encode("utf-8")).hexdigest()[:14]
                 cid = f"{raw_cid}-{url_hash}" if raw_cid else url_hash
-                name = item.get("name") or "Chaîne"
+                raw_name = item.get("name") or "Chaîne"
+                name, source = _clean_name_and_source(raw_name)
                 group = item.get("group") or ""
                 channels.append({
                     "id": cid,
                     "url": item["url"],
                     "name": name,
+                    "source": source,         # "basic" / "cable" / "satellite" / ...
                     "logo": item.get("logo") or "",
                     "group": group,
                     "country": _extract_country(group),
@@ -327,6 +357,7 @@ async def list_channels(
     cleaned = [{
         "id": c["id"],
         "name": c["name"],
+        "source": c.get("source"),
         "logo": "",
         "country": c["country"],
         "categories": c["categories"],
@@ -340,6 +371,7 @@ def _public_channel(c: Dict[str, Any], base_url: str) -> Dict[str, Any]:
     return {
         "id": c["id"],
         "name": c["name"],
+        "source": c.get("source"),
         "country": c["country"],
         "categories": c["categories"],
         "embed_url": f"{base_url}/embed/{c['id']}",

@@ -3,12 +3,25 @@ import { Tv } from "lucide-react";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 
+// Source -> short uppercase label shown on each card
+const SOURCE_TAGS = {
+  basic: "BASIC",
+  cable: "CABLE",
+  satellite: "SAT",
+  terrestrial: "DVB-T",
+  iptv: "IPTV",
+  hd: "HD",
+  fhd: "FHD",
+};
+
 export default function ChannelCard({ channel, onClick }) {
   const [imgError, setImgError] = useState(!channel.logo);
 
   const logoSrc = channel.logo
     ? (channel.logo.startsWith("http") ? channel.logo : `${BACKEND_URL}${channel.logo}`)
     : "";
+
+  const tag = SOURCE_TAGS[channel.source];
 
   return (
     <button
@@ -17,7 +30,12 @@ export default function ChannelCard({ channel, onClick }) {
       data-testid={`channel-card-${channel.id}`}
       aria-label={`Lancer ${channel.name}`}
     >
-      <div className="absolute top-3 right-3 z-10">
+      <div className="absolute top-3 right-3 z-10 flex items-center gap-1.5">
+        {tag && (
+          <span className={`source-tag source-${channel.source}`} data-testid={`source-tag-${channel.source}`}>
+            {tag}
+          </span>
+        )}
         <span className="live-badge">
           <span className="dot" />
           Live

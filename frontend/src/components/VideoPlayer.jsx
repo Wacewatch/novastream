@@ -8,21 +8,29 @@ import {
   Maximize,
   Minimize,
   X,
-  PictureInPicture2,
   Loader2,
   RotateCcw,
+  MoreVertical,
+  Check,
+  ChevronRight,
+  ChevronLeft,
+  PictureInPicture2,
   Link as LinkIcon,
+  Gauge,
+  Wand2,
 } from "lucide-react";
 import { toast } from "sonner";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const LOGO_URL = "https://i.imgur.com/V8YmT4z.png";
+const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2];
 
 export default function VideoPlayer({ channel, streamUrl, onClose, onRetry }) {
   const videoRef = useRef(null);
   const hlsRef = useRef(null);
   const containerRef = useRef(null);
   const hideTimer = useRef(null);
+  const menuRef = useRef(null);
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [muted, setMuted] = useState(false);
@@ -33,6 +41,13 @@ export default function VideoPlayer({ channel, streamUrl, onClose, onRetry }) {
   const [error, setError] = useState(null);
   const [retryToken, setRetryToken] = useState(0);
 
+  // Menu state
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [menuView, setMenuView] = useState("root"); // root | quality | speed
+  const [qualityLevels, setQualityLevels] = useState([]); // HLS levels
+  const [currentLevel, setCurrentLevel] = useState(-1);   // -1 = auto
+  const [speed, setSpeed] = useState(1);
+
   const attach = useCallback(() => {
     if (!streamUrl || !videoRef.current) return () => {};
     const video = videoRef.current;
@@ -40,18 +55,16 @@ export default function VideoPlayer({ channel, streamUrl, onClose, onRetry }) {
 
     setLoading(true);
     setError(null);
+    setQualityLevels([]);
+    setCurrentLevel(-1);
 
     let destroyed = false;
     let hls = null;
 
     if (Hls.isSupported()) {
       hls = new Hls({
-        // Worker disabled: in some preview/iframe contexts the hls.js worker
-        // bundle is fetched from a cross-origin URL which triggers opaque
-        // "Script error." events that crash the React error overlay.
         enableWorker: false,
         lowLatencyMode: true,
-        // Live broadcast tuning: start fast, stay smooth even under load
         backBufferLength: 30,
         maxBufferLength: 30,
         maxMaxBufferLength: 60,
@@ -67,38 +80,45 @@ export default function VideoPlayer({ channel, streamUrl, onClose, onRetry }) {
       hlsRef.current = hls;
       hls.loadSource(absUrl);
       hls.attachMedia(video);
+
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
         if (destroyed) return;
         setLoading(false);
+        setQualityLevels(
+          (hls.levels || []).map((lv, i) => ({
+            index: i,
+            height: lv.height,
+            width: lv.width,
+            bitrate: lv.bitrate,
+          }))
+        );
+        setCurrentLevel(hls.currentLevel);
         video.play().catch(() => {});
       });
+
+      hls.on(Hls.Events.LEVEL_SWITCHED, (_e, data) => {
+        if (destroyed) return;
+        setCurrentLevel(data.level);
+      });
+
       hls.on(Hls.Events.ERROR, (_e, data) => {
         if (destroyed) return;
         try {
           if (data.fatal) {
-            // Try graceful recovery first
             if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-              try {
-                hls.startLoad();
-                return;
-              } catch (_err) { /* fall through */ }
+              try { hls.startLoad(); return; } catch (_err) { /* noop */ }
             }
             if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-              try {
-                hls.recoverMediaError();
-                return;
-              } catch (_err) { /* fall through */ }
+              try { hls.recoverMediaError(); return; } catch (_err) { /* noop */ }
             }
             setError("Flux temporairement indisponible.");
             setLoading(false);
           }
         } catch (_outer) {
-          // swallow any unexpected throw from the error path so it doesn't
-          // bubble up to window.onerror as an opaque "Script error."
+          /* swallow */
         }
       });
     } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
-      // Safari native HLS
       video.src = absUrl;
       const onMeta = () => {
         if (destroyed) return;
@@ -157,6 +177,19 @@ export default function VideoPlayer({ channel, streamUrl, onClose, onRetry }) {
     return () => document.removeEventListener("fullscreenchange", handler);
   }, []);
 
+  // Close menu on outside click
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onClick = (e) => {
+      if (menuRef.current && !menuRef.current.contains(e.target)) {
+        setMenuOpen(false);
+        setMenuView("root");
+      }
+    };
+    document.addEventListener("mousedown", onClick);
+    return () => document.removeEventListener("mousedown", onClick);
+  }, [menuOpen]);
+
   const togglePlay = () => {
     const v = videoRef.current;
     if (!v) return;
@@ -205,16 +238,13 @@ export default function VideoPlayer({ channel, streamUrl, onClose, onRetry }) {
         await v.requestPictureInPicture();
       }
     } catch {
-      // ignore
+      toast.error("Picture-in-Picture indisponible");
     }
   };
 
   const handleRetry = () => {
-    if (onRetry) {
-      onRetry();
-    } else {
-      setRetryToken((t) => t + 1);
-    }
+    if (onRetry) onRetry();
+    else setRetryToken((t) => t + 1);
   };
 
   const copyEmbedUrl = async () => {
@@ -222,12 +252,8 @@ export default function VideoPlayer({ channel, streamUrl, onClose, onRetry }) {
     const embedUrl = `${window.location.origin}/embed/${encodeURIComponent(channel.id)}`;
     try {
       await navigator.clipboard.writeText(embedUrl);
-      toast.success("URL embed copiée", {
-        description: embedUrl,
-        duration: 3500,
-      });
+      toast.success("URL embed copiée", { description: embedUrl, duration: 3500 });
     } catch (_e) {
-      // Fallback: select+copy via a hidden textarea (older browsers / non-https)
       try {
         const ta = document.createElement("textarea");
         ta.value = embedUrl;
@@ -244,11 +270,37 @@ export default function VideoPlayer({ channel, streamUrl, onClose, onRetry }) {
     }
   };
 
+  const setHlsLevel = (level) => {
+    if (hlsRef.current) {
+      hlsRef.current.currentLevel = level;
+      setCurrentLevel(level);
+    }
+  };
+
+  const setPlaybackSpeed = (s) => {
+    if (videoRef.current) {
+      videoRef.current.playbackRate = s;
+      setSpeed(s);
+    }
+  };
+
   const showControls = () => {
     setControlsVisible(true);
     if (hideTimer.current) clearTimeout(hideTimer.current);
-    hideTimer.current = setTimeout(() => setControlsVisible(false), 3000);
+    if (!menuOpen) {
+      hideTimer.current = setTimeout(() => setControlsVisible(false), 3000);
+    }
   };
+
+  const formatLevel = (lv) => {
+    if (!lv) return "Auto";
+    if (lv.height) return `${lv.height}p`;
+    return `${Math.round((lv.bitrate || 0) / 1000)} kbps`;
+  };
+  const currentQualityLabel =
+    currentLevel === -1 || !qualityLevels.length
+      ? "Auto"
+      : formatLevel(qualityLevels.find((l) => l.index === currentLevel));
 
   return (
     <div className="player-shell" data-testid="video-player-shell" onMouseMove={showControls}>
@@ -261,7 +313,7 @@ export default function VideoPlayer({ channel, streamUrl, onClose, onRetry }) {
           onClick={togglePlay}
         />
 
-        {/* Watermark logo — fades together with the UI controls */}
+        {/* Watermark logo — top-left, under "EN DIRECT" */}
         <img
           src={LOGO_URL}
           alt="LiveWatch"
@@ -279,19 +331,11 @@ export default function VideoPlayer({ channel, streamUrl, onClose, onRetry }) {
           <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/75 px-6 text-center gap-3">
             <p className="text-white/90 text-base">{error}</p>
             <div className="flex gap-2">
-              <button
-                onClick={handleRetry}
-                className="ad-btn-secondary"
-                data-testid="player-error-retry-btn"
-              >
+              <button onClick={handleRetry} className="ad-btn-secondary" data-testid="player-error-retry-btn">
                 <RotateCcw size={16} className="inline-block mr-2" />
                 Réessayer
               </button>
-              <button
-                onClick={onClose}
-                className="ad-btn-secondary"
-                data-testid="player-error-close-btn"
-              >
+              <button onClick={onClose} className="ad-btn-secondary" data-testid="player-error-close-btn">
                 Fermer
               </button>
             </div>
@@ -340,21 +384,136 @@ export default function VideoPlayer({ channel, streamUrl, onClose, onRetry }) {
 
             <div className="flex-1" />
 
-            <button
-              onClick={copyEmbedUrl}
-              className="player-btn"
-              data-testid="video-embed-btn"
-              aria-label="Copier l'URL embed"
-              title="Copier l'URL embed"
-            >
-              <LinkIcon size={20} />
-            </button>
-            <button onClick={togglePip} className="player-btn hidden sm:inline-flex" data-testid="video-pip-btn" aria-label="Picture-in-Picture">
-              <PictureInPicture2 size={20} />
-            </button>
             <button onClick={toggleFullscreen} className="player-btn" data-testid="video-fullscreen-btn" aria-label="Plein écran">
               {isFullscreen ? <Minimize size={20} /> : <Maximize size={20} />}
             </button>
+
+            {/* Menu (kebab) */}
+            <div className="player-menu-wrap" ref={menuRef}>
+              <button
+                onClick={() => { setMenuOpen((o) => !o); setMenuView("root"); }}
+                className="player-btn"
+                data-testid="video-menu-btn"
+                aria-label="Menu"
+              >
+                <MoreVertical size={20} />
+              </button>
+
+              {menuOpen && (
+                <div className="player-menu" data-testid="video-menu">
+                  {menuView === "root" && (
+                    <>
+                      <button
+                        className="menu-item"
+                        onClick={() => setMenuView("quality")}
+                        data-testid="menu-quality"
+                      >
+                        <span className="flex items-center gap-2">
+                          <Wand2 size={16} />
+                          Qualité
+                        </span>
+                        <span className="menu-value">
+                          {currentQualityLabel}
+                          <ChevronRight size={14} />
+                        </span>
+                      </button>
+
+                      <button
+                        className="menu-item"
+                        onClick={() => setMenuView("speed")}
+                        data-testid="menu-speed"
+                      >
+                        <span className="flex items-center gap-2">
+                          <Gauge size={16} />
+                          Vitesse
+                        </span>
+                        <span className="menu-value">
+                          {speed}x
+                          <ChevronRight size={14} />
+                        </span>
+                      </button>
+
+                      <div className="menu-separator" />
+
+                      <button
+                        className="menu-item"
+                        onClick={() => { togglePip(); setMenuOpen(false); }}
+                        data-testid="menu-pip"
+                      >
+                        <span className="flex items-center gap-2">
+                          <PictureInPicture2 size={16} />
+                          Picture-in-Picture
+                        </span>
+                      </button>
+
+                      <button
+                        className="menu-item"
+                        onClick={() => { copyEmbedUrl(); setMenuOpen(false); }}
+                        data-testid="menu-embed"
+                      >
+                        <span className="flex items-center gap-2">
+                          <LinkIcon size={16} />
+                          Copier l'URL embed
+                        </span>
+                      </button>
+                    </>
+                  )}
+
+                  {menuView === "quality" && (
+                    <>
+                      <button className="menu-back" onClick={() => setMenuView("root")}>
+                        <ChevronLeft size={14} />
+                        Qualité
+                      </button>
+                      <button
+                        className={`menu-radio ${currentLevel === -1 ? "active" : ""}`}
+                        onClick={() => setHlsLevel(-1)}
+                        data-testid="quality-auto"
+                      >
+                        Auto
+                        {currentLevel === -1 && <Check size={14} className="check" />}
+                      </button>
+                      {qualityLevels.length === 0 && (
+                        <div className="menu-title" style={{ color: "rgba(255,255,255,0.4)", fontWeight: 400 }}>
+                          Un seul niveau disponible
+                        </div>
+                      )}
+                      {qualityLevels.map((lv) => (
+                        <button
+                          key={lv.index}
+                          className={`menu-radio ${currentLevel === lv.index ? "active" : ""}`}
+                          onClick={() => setHlsLevel(lv.index)}
+                          data-testid={`quality-${lv.height || lv.index}`}
+                        >
+                          {formatLevel(lv)}
+                          {currentLevel === lv.index && <Check size={14} className="check" />}
+                        </button>
+                      ))}
+                    </>
+                  )}
+
+                  {menuView === "speed" && (
+                    <>
+                      <button className="menu-back" onClick={() => setMenuView("root")}>
+                        <ChevronLeft size={14} />
+                        Vitesse
+                      </button>
+                      {SPEEDS.map((s) => (
+                        <button
+                          key={s}
+                          className={`menu-radio ${speed === s ? "active" : ""}`}
+                          onClick={() => setPlaybackSpeed(s)}
+                          data-testid={`speed-${s}`}
+                        >
+                          {s}x{s === 1 && <span className="text-white/40 text-xs ml-1">normal</span>}
+                          {speed === s && <Check size={14} className="check" />}
+                        </button>
+                      ))}
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
         </div>
       </div>
