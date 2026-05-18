@@ -180,6 +180,7 @@
   opacity: 0;
   transition: opacity 0.3s ease;
   pointer-events: none;
+  z-index: 6;     /* above .player-watermark (z-index: 5) */
 }
 .player-frame:hover .player-controls,
 .player-controls.visible {
@@ -236,9 +237,9 @@
 /* ===== Watermark logo on player (fades together with controls) ===== */
 .player-watermark {
   position: absolute;
-  top: 18px;
+  top: 70px;          /* below the close button area to avoid overlap */
   right: 22px;
-  height: 32px;
+  height: 28px;
   width: auto;
   opacity: 0;
   filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.6));
@@ -249,10 +250,10 @@
 }
 .player-frame:hover .player-watermark,
 .player-watermark.visible {
-  opacity: 0.85;
+  opacity: 0.78;
 }
 @media (max-width: 640px) {
-  .player-watermark { height: 24px; top: 12px; right: 14px; }
+  .player-watermark { height: 22px; top: 56px; right: 14px; }
 }
 
 /* ===== Ad Modal ===== */

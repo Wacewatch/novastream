@@ -11,7 +11,9 @@ import {
   PictureInPicture2,
   Loader2,
   RotateCcw,
+  Link as LinkIcon,
 } from "lucide-react";
+import { toast } from "sonner";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const LOGO_URL = "https://i.imgur.com/HrbEzpm.png";
@@ -215,6 +217,33 @@ export default function VideoPlayer({ channel, streamUrl, onClose, onRetry }) {
     }
   };
 
+  const copyEmbedUrl = async () => {
+    if (!channel?.id) return;
+    const embedUrl = `${window.location.origin}/embed/${encodeURIComponent(channel.id)}`;
+    try {
+      await navigator.clipboard.writeText(embedUrl);
+      toast.success("URL embed copiée", {
+        description: embedUrl,
+        duration: 3500,
+      });
+    } catch (_e) {
+      // Fallback: select+copy via a hidden textarea (older browsers / non-https)
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = embedUrl;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+        toast.success("URL embed copiée");
+      } catch {
+        toast.error("Impossible de copier l'URL");
+      }
+    }
+  };
+
   const showControls = () => {
     setControlsVisible(true);
     if (hideTimer.current) clearTimeout(hideTimer.current);
@@ -311,6 +340,15 @@ export default function VideoPlayer({ channel, streamUrl, onClose, onRetry }) {
 
             <div className="flex-1" />
 
+            <button
+              onClick={copyEmbedUrl}
+              className="player-btn"
+              data-testid="video-embed-btn"
+              aria-label="Copier l'URL embed"
+              title="Copier l'URL embed"
+            >
+              <LinkIcon size={20} />
+            </button>
             <button onClick={togglePip} className="player-btn hidden sm:inline-flex" data-testid="video-pip-btn" aria-label="Picture-in-Picture">
               <PictureInPicture2 size={20} />
             </button>
