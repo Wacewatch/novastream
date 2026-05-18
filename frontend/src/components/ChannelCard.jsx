@@ -1,5 +1,5 @@
 import { useState, memo } from "react";
-import { Tv } from "lucide-react";
+import { Tv, Eye } from "lucide-react";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 
@@ -10,8 +10,14 @@ const SOURCE_TAGS = {
   satellite: "SAT",
   terrestrial: "DVB-T",
   iptv: "IPTV",
-  hd: "HD",
-  fhd: "FHD",
+};
+
+// Quality tag styling
+const QUALITY_LABELS = {
+  "4K": { label: "4K", cls: "q-4k" },
+  UHD: { label: "UHD", cls: "q-4k" },
+  FHD: { label: "FHD", cls: "q-fhd" },
+  HD: { label: "HD", cls: "q-hd" },
 };
 
 function ChannelCard({ channel, onClick }) {
@@ -21,7 +27,9 @@ function ChannelCard({ channel, onClick }) {
     ? (channel.logo.startsWith("http") ? channel.logo : `${BACKEND_URL}${channel.logo}`)
     : "";
 
-  const tag = SOURCE_TAGS[channel.source];
+  const sourceTag = SOURCE_TAGS[channel.source];
+  const quality = channel.quality && QUALITY_LABELS[channel.quality];
+  const viewers = channel.viewers || 0;
 
   return (
     <button
@@ -31,9 +39,14 @@ function ChannelCard({ channel, onClick }) {
       aria-label={`Lancer ${channel.name}`}
     >
       <div className="absolute top-3 right-3 z-10 flex items-center gap-1.5">
-        {tag && (
+        {sourceTag && (
           <span className={`source-tag source-${channel.source}`} data-testid={`source-tag-${channel.source}`}>
-            {tag}
+            {sourceTag}
+          </span>
+        )}
+        {quality && (
+          <span className={`quality-tag ${quality.cls}`} data-testid={`quality-tag-${channel.quality}`}>
+            {quality.label}
           </span>
         )}
         <span className="live-badge">
@@ -46,22 +59,31 @@ function ChannelCard({ channel, onClick }) {
         {!imgError && logoSrc ? (
           <img
             src={logoSrc}
-            alt={channel.name}
+            alt=""
             className="channel-logo"
             onError={() => setImgError(true)}
             loading="lazy"
           />
         ) : (
-          <div className="flex flex-col items-center gap-2">
-            <Tv size={28} className="text-white/40" />
-            <span className="channel-fallback">{channel.name}</span>
-          </div>
+          <Tv size={42} className="text-white/30" strokeWidth={1.4} />
         )}
       </div>
 
-      <div className="absolute inset-x-0 bottom-0 px-3 py-2.5 bg-gradient-to-t from-black/90 via-black/60 to-transparent">
-        <p className="text-white text-sm font-semibold truncate">{channel.name}</p>
-        <p className="text-white/50 text-[11px] truncate uppercase tracking-wider mt-0.5">
+      <div className="absolute inset-x-0 bottom-0 px-3 py-2.5 bg-gradient-to-t from-black/95 via-black/70 to-transparent">
+        <div className="flex items-center justify-between gap-2 mb-1">
+          <p className="text-white text-sm font-semibold truncate flex-1">{channel.name}</p>
+          {viewers > 0 && (
+            <span
+              className="viewers-badge"
+              data-testid={`viewers-count-${channel.id}`}
+              title={`${viewers} spectateur${viewers > 1 ? "s" : ""} actuellement`}
+            >
+              <Eye size={11} />
+              {viewers}
+            </span>
+          )}
+        </div>
+        <p className="text-white/50 text-[11px] truncate uppercase tracking-wider">
           {channel.categories?.[0] || "TV"}
         </p>
       </div>

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import axios from "axios";
-import { Search, Globe2, Loader2, Tv2 } from "lucide-react";
+import { Search, Globe2, Loader2, Tv2, Users } from "lucide-react";
 import ChannelCard from "@/components/ChannelCard";
 import AdUnlockModal from "@/components/AdUnlockModal";
 import VideoPlayer from "@/components/VideoPlayer";
@@ -76,6 +76,7 @@ export default function NovaStream() {
   const [search, setSearch] = useState("");
   const [channels, setChannels] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [stats, setStats] = useState({ total_24h: 0, live_total: 0 });
 
   // Playback state
   const [pendingChannel, setPendingChannel] = useState(null); // showing ad modal
@@ -97,6 +98,20 @@ export default function NovaStream() {
         toast.error("Impossible de charger les pays");
       }
     })();
+  }, []);
+
+  // Live stats — total 24h viewers + currently watching. Refresh every 20 s.
+  useEffect(() => {
+    let mounted = true;
+    const fetchStats = async () => {
+      try {
+        const r = await axios.get(`${API}/stats`);
+        if (mounted) setStats(r.data || { total_24h: 0, live_total: 0 });
+      } catch (_) { /* silent */ }
+    };
+    fetchStats();
+    const id = setInterval(fetchStats, 20000);
+    return () => { mounted = false; clearInterval(id); };
   }, []);
 
   // Load channels when filters change
@@ -191,6 +206,15 @@ export default function NovaStream() {
           </div>
 
           <div className="ml-auto md:ml-0 shrink-0 flex items-center gap-2">
+            <div
+              className="hidden lg:flex items-center gap-2 px-3 py-2 rounded-full glass-pill border-white/10"
+              data-testid="viewers-stat-24h"
+              title="Spectateurs uniques sur les dernières 24 heures"
+            >
+              <Users size={14} className="text-[#ff2e63]" />
+              <span className="text-sm font-bold tabular-nums">{stats.total_24h.toLocaleString("fr-FR")}</span>
+              <span className="text-[11px] text-white/55 uppercase tracking-wider">vues / 24 h</span>
+            </div>
             <a
               href="/docs"
               className="hidden sm:inline-flex items-center gap-1.5 text-sm text-white/70 hover:text-white px-3 py-2 rounded-full glass-pill border-white/10 transition-colors"
@@ -259,10 +283,26 @@ export default function NovaStream() {
             </h1>
             <p className="text-white/55 mt-2 text-sm sm:text-base">Choisissez une chaîne pour démarrer la diffusion immédiatement.</p>
           </div>
-          <div className="flex items-center gap-2 glass-pill px-4 py-2 rounded-full self-start sm:self-end" data-testid="channels-counter">
-            <Tv2 size={16} className="text-[#ff2e63]" />
-            <span className="text-sm font-semibold">{channels.length}</span>
-            <span className="text-sm text-white/60">chaînes</span>
+          <div className="flex items-center gap-2 self-start sm:self-end">
+            {stats.live_total > 0 && (
+              <div
+                className="flex items-center gap-2 glass-pill px-4 py-2 rounded-full"
+                data-testid="viewers-live-total"
+                title="Spectateurs actuellement en train de regarder"
+              >
+                <span className="relative flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#ff2e63] opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-[#ff2e63]"></span>
+                </span>
+                <span className="text-sm font-semibold tabular-nums">{stats.live_total}</span>
+                <span className="text-sm text-white/60">en direct</span>
+              </div>
+            )}
+            <div className="flex items-center gap-2 glass-pill px-4 py-2 rounded-full" data-testid="channels-counter">
+              <Tv2 size={16} className="text-[#ff2e63]" />
+              <span className="text-sm font-semibold">{channels.length}</span>
+              <span className="text-sm text-white/60">chaînes</span>
+            </div>
           </div>
         </div>
       </section>

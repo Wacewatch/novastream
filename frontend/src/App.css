@@ -127,6 +127,52 @@
   padding: 0 8px;
 }
 
+/* ===== Quality tag (HD/FHD/4K) ===== */
+.quality-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border-radius: 6px;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  border: 1px solid transparent;
+  backdrop-filter: blur(6px);
+}
+.quality-tag.q-hd {
+  color: #7cd7ff;
+  background: rgba(56, 189, 248, 0.16);
+  border-color: rgba(56, 189, 248, 0.40);
+}
+.quality-tag.q-fhd {
+  color: #c5b3ff;
+  background: rgba(167, 139, 250, 0.18);
+  border-color: rgba(167, 139, 250, 0.45);
+}
+.quality-tag.q-4k {
+  color: #ffd166;
+  background: linear-gradient(135deg, rgba(255, 209, 102, 0.20), rgba(255, 46, 99, 0.22));
+  border-color: rgba(255, 209, 102, 0.55);
+  text-shadow: 0 0 8px rgba(255, 209, 102, 0.40);
+}
+
+/* ===== Viewers badge on cards ===== */
+.viewers-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.92);
+  background: rgba(255, 46, 99, 0.20);
+  border: 1px solid rgba(255, 46, 99, 0.40);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
 /* ===== Category pills ===== */
 .cat-pill {
   white-space: nowrap;

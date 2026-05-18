@@ -8,6 +8,7 @@ import logging
 import asyncio
 import time
 import re
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
 from urllib.parse import quote
@@ -80,6 +81,66 @@ HLS_PLAYLIST_TTL = 2.0
 _hls_cache: Dict[str, Tuple[bytes, str, float]] = {}
 _hls_locks: Dict[str, asyncio.Lock] = {}
 
+# ===== View tracking =====
+# A "view" is recorded each time the FE resolves a stream URL via
+# /api/stream/{id}. Stored in MongoDB so it survives restarts. A TTL index on
+# `ts` removes documents older than 24h automatically.
+LIVE_WINDOW = timedelta(minutes=5)   # what counts as "currently watching"
+STATS_TTL = 8.0                       # cache stats aggregation for 8 s
+_stats_cache: Dict[str, Any] = {"data": None, "exp": 0.0}
+_stats_lock = asyncio.Lock()
+
+async def _ensure_views_index() -> None:
+    try:
+        await db.views.create_index("ts", expireAfterSeconds=24 * 3600)
+        await db.views.create_index([("channel_id", 1), ("ts", -1)])
+    except Exception as e:
+        logger.warning(f"views index init failed: {e}")
+
+async def _record_view(channel_id: str) -> None:
+    try:
+        await db.views.insert_one({
+            "channel_id": channel_id,
+            "ts": datetime.now(timezone.utc),
+        })
+    except Exception as e:
+        logger.warning(f"record view failed: {e}")
+
+async def _compute_stats() -> Dict[str, Any]:
+    """Aggregate live and 24h view counts. Cached for STATS_TTL seconds."""
+    now = time.time()
+    if _stats_cache["data"] and _stats_cache["exp"] > now:
+        return _stats_cache["data"]
+    async with _stats_lock:
+        if _stats_cache["data"] and _stats_cache["exp"] > time.time():
+            return _stats_cache["data"]
+        live_threshold = datetime.now(timezone.utc) - LIVE_WINDOW
+        # 24h total (the TTL index keeps the collection at 24h naturally)
+        try:
+            total_24h = await db.views.count_documents({})
+        except Exception:
+            total_24h = 0
+        # Per-channel live counts
+        per_channel: Dict[str, int] = {}
+        try:
+            pipeline = [
+                {"$match": {"ts": {"$gte": live_threshold}}},
+                {"$group": {"_id": "$channel_id", "n": {"$sum": 1}}},
+            ]
+            async for row in db.views.aggregate(pipeline):
+                per_channel[row["_id"]] = row["n"]
+        except Exception as e:
+            logger.warning(f"stats aggregate failed: {e}")
+        live_total = sum(per_channel.values())
+        data = {
+            "total_24h": total_24h,
+            "live_total": live_total,
+            "per_channel": per_channel,
+        }
+        _stats_cache["data"] = data
+        _stats_cache["exp"] = time.time() + STATS_TTL
+        return data
+
 # Category keyword mapping (French-leaning)
 CATEGORY_KEYWORDS = {
     "Sport": ["sport", "bein", "rmc sport", "eurosport", "canal+ sport", "infosport", "l'equipe", "lequipe", "espn", "dazn", "ligue 1", "ligue1"],
@@ -114,6 +175,135 @@ def _extract_country(group: str) -> str:
             return part or "default"
     return raw
 
+# ===== TV-LOGO repository lookup =====
+# We use the public github.com/tv-logo/tv-logos repository which contains ~200
+# French channel logos (and many for other countries). At startup we fetch the
+# directory listing for the countries we care about and build a slug -> URL
+# map. Per-channel logo guessing is then a fast in-memory lookup, no network
+# call. Unknown channels fall back to the empty string (FE shows TV icon).
+TV_LOGO_BASE = "https://raw.githubusercontent.com/tv-logo/tv-logos/main/countries"
+TV_LOGO_API = "https://api.github.com/repos/tv-logo/tv-logos/contents/countries"
+
+# Country display name -> (github folder slug, file suffix code)
+_LOGO_COUNTRY_MAP = {
+    "France": ("france", "fr"),
+    "Germany": ("germany", "de"),
+    "Italy": ("italy", "it"),
+    "Spain": ("spain", "es"),
+    "United Kingdom": ("united-kingdom", "uk"),
+    "United States": ("united-states", "us"),
+    "Portugal": ("portugal", "pt"),
+    "Netherlands": ("netherlands", "nl"),
+    "Belgium": ("belgium", "be"),
+    "Switzerland": ("switzerland", "ch"),
+    "Poland": ("poland", "pl"),
+    "Turkey": ("turkey", "tr"),
+    "Greece": ("greece", "gr"),
+    "Austria": ("austria", "at"),
+    "Sweden": ("sweden", "se"),
+    "Denmark": ("denmark", "dk"),
+    "Norway": ("norway", "no"),
+    "Finland": ("finland", "fi"),
+    "Ireland": ("ireland", "ie"),
+    "Romania": ("romania", "ro"),
+    "Brazil": ("brazil", "br"),
+    "Mexico": ("mexico", "mx"),
+    "Canada": ("canada", "ca"),
+    "Australia": ("australia", "au"),
+    "India": ("india", "in"),
+    "Russia": ("russia", "ru"),
+    "Ukraine": ("ukraine", "ua"),
+    "Albania": ("albania", "al"),
+}
+
+# country -> { slug_without_country_suffix: filename } loaded at startup
+_LOGO_INDEX: Dict[str, Dict[str, str]] = {}
+
+def _slugify(text: str) -> str:
+    """Channel-name slug: lowercase, accent-stripped, kebab-case, '+' -> 'plus'."""
+    import unicodedata
+    s = unicodedata.normalize("NFKD", text or "").encode("ascii", "ignore").decode("ascii")
+    s = s.lower()
+    s = s.replace("+", " plus ").replace("&", " and ")
+    s = re.sub(r"[^a-z0-9]+", "-", s)
+    s = re.sub(r"-+", "-", s).strip("-")
+    return s
+
+# Words stripped from candidate slugs before lookup (resolution/quality/region/etc.)
+_SLUG_STOPWORDS = {
+    "hd", "fhd", "uhd", "4k", "sd",
+    "channel", "tv", "the",
+    "backup", "main", "alt", "only",
+}
+
+def _candidate_slugs(name: str) -> List[str]:
+    """Generate ordered candidate slugs for a channel display name."""
+    base = _slugify(name)
+    if not base:
+        return []
+    parts = [p for p in base.split("-") if p]
+    cand = ["-".join(parts)]
+    pruned = [p for p in parts if p not in _SLUG_STOPWORDS]
+    if pruned and pruned != parts:
+        cand.append("-".join(pruned))
+    if pruned and pruned[-1].isdigit() and len(pruned) > 1:
+        cand.append("-".join(pruned[:-1]))
+    seen = set()
+    out = []
+    for s in cand:
+        if s and s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out
+
+def _guess_logo(name: str, country: str) -> str:
+    info = _LOGO_COUNTRY_MAP.get(country)
+    if not info:
+        return ""
+    folder, _code = info
+    index = _LOGO_INDEX.get(country)
+    if not index:
+        return ""
+    for slug in _candidate_slugs(name):
+        fname = index.get(slug)
+        if fname:
+            return f"{TV_LOGO_BASE}/{folder}/{fname}"
+    return ""
+
+async def _refresh_logo_index() -> None:
+    """Populate _LOGO_INDEX by listing each country's folder once at startup.
+    Failure is non-fatal (we just won't have logos for that country)."""
+    cx = await get_http_client()
+    for display, (folder, code) in _LOGO_COUNTRY_MAP.items():
+        try:
+            r = await cx.get(f"{TV_LOGO_API}/{folder}", timeout=15.0)
+            if r.status_code != 200:
+                continue
+            payload = r.json()
+            files = payload if isinstance(payload, list) else []
+            cc_suffix = f"-{code}"
+            slug_map: Dict[str, str] = {}
+            for f in files:
+                fname = f.get("name") or ""
+                if not fname.endswith(".png"):
+                    continue
+                stem = fname[:-4]
+                if stem.endswith(cc_suffix):
+                    key = stem[: -len(cc_suffix)]
+                else:
+                    key = stem
+                slug_map[key] = fname
+                # Also index without inner language markers sometimes present.
+                for marker in ("-french", "-deutsch", "-italiano", "-espanol"):
+                    if marker in key:
+                        slug_map[key.replace(marker, "")] = fname
+            _LOGO_INDEX[display] = slug_map
+            logger.info(f"logo index {display}: {len(slug_map)} entries")
+        except Exception as e:
+            logger.warning(f"logo index failed for {display}: {e}")
+
+
+
 # Channel name suffix -> source label.
 # Vavoo encodes the broadcast source as a 1-letter suffix at the end of the
 # channel name (".b" / ".c" / ".s" mostly).
@@ -128,6 +318,21 @@ _SOURCE_LABELS = {
 }
 
 _NAME_SUFFIX_RE = re.compile(r"\s\.([A-Za-z]{1,3})\s*$")
+
+# Quality keywords (longer first to avoid HD matching FHD)
+_QUALITY_PATTERNS = [
+    ("4K",  re.compile(r"\b(?:4K|UHD)\b", re.I)),
+    ("FHD", re.compile(r"\b(?:FHD|FULLHD|FULL\s?HD|1080P)\b", re.I)),
+    ("HD",  re.compile(r"\b(?:HD|720P)\b", re.I)),
+]
+
+def _detect_quality(name: str) -> Optional[str]:
+    if not name:
+        return None
+    for label, rx in _QUALITY_PATTERNS:
+        if rx.search(name):
+            return label
+    return None
 
 def _clean_name_and_source(raw_name: str) -> Tuple[str, Optional[str]]:
     name = (raw_name or "").strip()
@@ -236,14 +441,17 @@ async def _load_catalog(base: str, sig: str) -> List[Dict[str, Any]]:
                 raw_name = item.get("name") or "Chaîne"
                 name, source = _clean_name_and_source(raw_name)
                 group = item.get("group") or ""
+                country = _extract_country(group)
+                quality = _detect_quality(name)
                 channels.append({
                     "id": cid,
                     "url": item["url"],
                     "name": name,
                     "source": source,         # "basic" / "cable" / "satellite" / ...
-                    "logo": item.get("logo") or "",
+                    "quality": quality,        # "HD" / "FHD" / "4K" / None
+                    "logo": _guess_logo(name, country),
                     "group": group,
-                    "country": _extract_country(group),
+                    "country": country,
                     "categories": _categorize(name),
                 })
         cursor = data.get("nextCursor")
@@ -351,18 +559,28 @@ async def list_channels(
     if search:
         s = search.lower()
         out = [c for c in out if s in c["name"].lower()]
-    # Sanitize output. Upstream logo CDN (logo.huhu.to) is broken (returns 404)
-    # so we omit logos entirely to keep the browser console clean. The FE shows
-    # a TV-icon fallback which looks consistent.
+    stats = await _compute_stats()
+    per_ch = stats.get("per_channel", {})
     cleaned = [{
         "id": c["id"],
         "name": c["name"],
         "source": c.get("source"),
-        "logo": "",
+        "quality": c.get("quality"),
+        "logo": c.get("logo") or "",
         "country": c["country"],
         "categories": c["categories"],
+        "viewers": per_ch.get(c["id"], 0),
     } for c in out[:limit]]
     return {"total": len(cleaned), "channels": cleaned}
+
+@api_router.get("/stats")
+async def get_stats():
+    """Public real-time stats: total views in last 24h + currently live viewers."""
+    stats = await _compute_stats()
+    return {
+        "total_24h": stats["total_24h"],
+        "live_total": stats["live_total"],
+    }
 
 # ----------------- Public API (v1) -----------------
 def _public_channel(c: Dict[str, Any], base_url: str) -> Dict[str, Any]:
@@ -445,6 +663,9 @@ async def get_stream_url(channel_id: str):
     if not channel:
         raise HTTPException(status_code=404, detail="Chaîne introuvable")
     upstream = await resolve_stream(channel["url"])
+    # Track this as a view (non-blocking). The frontend calls this endpoint
+    # every time a user actually starts watching (after the ad unlock).
+    asyncio.create_task(_record_view(channel_id))
     return {
         "id": channel_id,
         "name": channel["name"],
@@ -560,6 +781,9 @@ async def startup_warmup():
     Done in a background task so the server starts immediately."""
     async def _warmup():
         try:
+            # First build the logo index so the catalog can attach real URLs
+            await _refresh_logo_index()
+            await _ensure_views_index()
             await get_signature()
             channels = await get_channels()
             logger.info(f"warmup done: {len(channels)} channels cached")

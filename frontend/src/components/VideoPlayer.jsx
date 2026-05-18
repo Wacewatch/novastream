@@ -16,14 +16,12 @@ import {
   ChevronLeft,
   PictureInPicture2,
   Link as LinkIcon,
-  Gauge,
   Wand2,
 } from "lucide-react";
 import { toast } from "sonner";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const LOGO_URL = "https://i.imgur.com/V8YmT4z.png";
-const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2];
 
 export default function VideoPlayer({ channel, streamUrl, onClose, onRetry }) {
   const videoRef = useRef(null);
@@ -43,10 +41,9 @@ export default function VideoPlayer({ channel, streamUrl, onClose, onRetry }) {
 
   // Menu state
   const [menuOpen, setMenuOpen] = useState(false);
-  const [menuView, setMenuView] = useState("root"); // root | quality | speed
+  const [menuView, setMenuView] = useState("root"); // root | quality
   const [qualityLevels, setQualityLevels] = useState([]); // HLS levels
   const [currentLevel, setCurrentLevel] = useState(-1);   // -1 = auto
-  const [speed, setSpeed] = useState(1);
 
   const attach = useCallback(() => {
     if (!streamUrl || !videoRef.current) return () => {};
@@ -243,6 +240,9 @@ export default function VideoPlayer({ channel, streamUrl, onClose, onRetry }) {
   };
 
   const handleRetry = () => {
+    // Immediate visual feedback while parent re-resolves
+    setError(null);
+    setLoading(true);
     if (onRetry) onRetry();
     else setRetryToken((t) => t + 1);
   };
@@ -274,13 +274,6 @@ export default function VideoPlayer({ channel, streamUrl, onClose, onRetry }) {
     if (hlsRef.current) {
       hlsRef.current.currentLevel = level;
       setCurrentLevel(level);
-    }
-  };
-
-  const setPlaybackSpeed = (s) => {
-    if (videoRef.current) {
-      videoRef.current.playbackRate = s;
-      setSpeed(s);
     }
   };
 
@@ -418,23 +411,6 @@ export default function VideoPlayer({ channel, streamUrl, onClose, onRetry }) {
 
                       <button
                         className="menu-item"
-                        onClick={() => setMenuView("speed")}
-                        data-testid="menu-speed"
-                      >
-                        <span className="flex items-center gap-2">
-                          <Gauge size={16} />
-                          Vitesse
-                        </span>
-                        <span className="menu-value">
-                          {speed}x
-                          <ChevronRight size={14} />
-                        </span>
-                      </button>
-
-                      <div className="menu-separator" />
-
-                      <button
-                        className="menu-item"
                         onClick={() => { handleRetry(); setMenuOpen(false); }}
                         data-testid="menu-reload"
                       >
@@ -496,26 +472,6 @@ export default function VideoPlayer({ channel, streamUrl, onClose, onRetry }) {
                         >
                           {formatLevel(lv)}
                           {currentLevel === lv.index && <Check size={14} className="check" />}
-                        </button>
-                      ))}
-                    </>
-                  )}
-
-                  {menuView === "speed" && (
-                    <>
-                      <button className="menu-back" onClick={() => setMenuView("root")}>
-                        <ChevronLeft size={14} />
-                        Vitesse
-                      </button>
-                      {SPEEDS.map((s) => (
-                        <button
-                          key={s}
-                          className={`menu-radio ${speed === s ? "active" : ""}`}
-                          onClick={() => setPlaybackSpeed(s)}
-                          data-testid={`speed-${s}`}
-                        >
-                          {s}x{s === 1 && <span className="text-white/40 text-xs ml-1">normal</span>}
-                          {speed === s && <Check size={14} className="check" />}
                         </button>
                       ))}
                     </>
