@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, memo } from "react";
 import { Tv } from "lucide-react";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
@@ -14,7 +14,7 @@ const SOURCE_TAGS = {
   fhd: "FHD",
 };
 
-export default function ChannelCard({ channel, onClick }) {
+function ChannelCard({ channel, onClick }) {
   const [imgError, setImgError] = useState(!channel.logo);
 
   const logoSrc = channel.logo
@@ -26,7 +26,7 @@ export default function ChannelCard({ channel, onClick }) {
   return (
     <button
       onClick={onClick}
-      className="channel-card glass reveal text-left"
+      className="channel-card channel-card-solid text-left"
       data-testid={`channel-card-${channel.id}`}
       aria-label={`Lancer ${channel.name}`}
     >
@@ -68,3 +68,5 @@ export default function ChannelCard({ channel, onClick }) {
     </button>
   );
 }
+
+export default memo(ChannelCard);

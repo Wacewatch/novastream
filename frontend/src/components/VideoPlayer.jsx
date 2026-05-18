@@ -362,10 +362,6 @@ export default function VideoPlayer({ channel, streamUrl, onClose, onRetry }) {
               {isPlaying ? <Pause size={20} /> : <Play size={20} />}
             </button>
 
-            <button onClick={handleRetry} className="player-btn" data-testid="video-retry-btn" aria-label="Réessayer">
-              <RotateCcw size={20} />
-            </button>
-
             <div className="flex items-center gap-2">
               <button onClick={toggleMute} className="player-btn" data-testid="video-mute-btn" aria-label="Son">
                 {muted || volume === 0 ? <VolumeX size={20} /> : <Volume2 size={20} />}
@@ -403,20 +399,22 @@ export default function VideoPlayer({ channel, streamUrl, onClose, onRetry }) {
                 <div className="player-menu" data-testid="video-menu">
                   {menuView === "root" && (
                     <>
-                      <button
-                        className="menu-item"
-                        onClick={() => setMenuView("quality")}
-                        data-testid="menu-quality"
-                      >
-                        <span className="flex items-center gap-2">
-                          <Wand2 size={16} />
-                          Qualité
-                        </span>
-                        <span className="menu-value">
-                          {currentQualityLabel}
-                          <ChevronRight size={14} />
-                        </span>
-                      </button>
+                      {qualityLevels.length > 1 && (
+                        <button
+                          className="menu-item"
+                          onClick={() => setMenuView("quality")}
+                          data-testid="menu-quality"
+                        >
+                          <span className="flex items-center gap-2">
+                            <Wand2 size={16} />
+                            Qualité
+                          </span>
+                          <span className="menu-value">
+                            {currentQualityLabel}
+                            <ChevronRight size={14} />
+                          </span>
+                        </button>
+                      )}
 
                       <button
                         className="menu-item"
@@ -434,6 +432,17 @@ export default function VideoPlayer({ channel, streamUrl, onClose, onRetry }) {
                       </button>
 
                       <div className="menu-separator" />
+
+                      <button
+                        className="menu-item"
+                        onClick={() => { handleRetry(); setMenuOpen(false); }}
+                        data-testid="menu-reload"
+                      >
+                        <span className="flex items-center gap-2">
+                          <RotateCcw size={16} />
+                          Recharger le flux
+                        </span>
+                      </button>
 
                       <button
                         className="menu-item"

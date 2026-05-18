@@ -93,13 +93,23 @@
   border-radius: 18px;
   overflow: hidden;
   cursor: pointer;
-  transition: transform 0.35s cubic-bezier(0.2, 0.8, 0.2, 1), border-color 0.35s, background 0.35s, box-shadow 0.35s;
+  transition: transform 0.25s cubic-bezier(0.2, 0.8, 0.2, 1), border-color 0.25s, background 0.25s, box-shadow 0.25s;
+}
+/* Cheap solid variant for grid cards — avoids per-card backdrop-filter blur
+   which becomes very expensive when hundreds of cards are on screen. */
+.channel-card-solid {
+  background: rgba(20, 22, 32, 0.78);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+  /* Skip painting off-screen cards entirely — big win on long grids. */
+  content-visibility: auto;
+  contain-intrinsic-size: 200px;
 }
 .channel-card:hover {
-  transform: translateY(-4px) scale(1.02);
+  transform: translateY(-3px) scale(1.015);
   border-color: rgba(255, 46, 99, 0.45);
-  background: rgba(255, 255, 255, 0.07);
-  box-shadow: 0 18px 40px rgba(255, 46, 99, 0.18), 0 8px 32px rgba(0, 0, 0, 0.5);
+  background: rgba(34, 28, 40, 0.85);
+  box-shadow: 0 14px 32px rgba(255, 46, 99, 0.18), 0 6px 24px rgba(0, 0, 0, 0.5);
 }
 .channel-logo {
   width: 70%;
