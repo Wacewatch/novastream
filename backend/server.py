@@ -197,7 +197,14 @@ async def _load_catalog(base: str, sig: str) -> List[Dict[str, Any]]:
         data = r.json()
         for item in (data.get("items") or []):
             if item.get("type") == "iptv" and item.get("url"):
-                cid = str((item.get("ids") or {}).get("id") or item.get("id") or item.get("url"))
+                raw_cid = str((item.get("ids") or {}).get("id") or item.get("id") or "")
+                # Always derive a stable, unique ID from the upstream URL (the
+                # upstream catalog has many entries sharing the same `id` for
+                # different variants — that broke React keys and caused the
+                # wrong VideoPlayer instance to be mounted on click).
+                import hashlib
+                url_hash = hashlib.md5(item["url"].encode("utf-8")).hexdigest()[:14]
+                cid = f"{raw_cid}-{url_hash}" if raw_cid else url_hash
                 name = item.get("name") or "Chaîne"
                 group = item.get("group") or ""
                 channels.append({
@@ -223,10 +230,21 @@ async def get_channels(force: bool = False) -> List[Dict[str, Any]]:
     for base in UPSTREAM_BASES:
         try:
             ch = await _load_catalog(base, sig)
-            _cache["channels"] = ch
+            # Final dedup pass: guarantee unique ids
+            seen: Dict[str, int] = {}
+            unique: List[Dict[str, Any]] = []
+            for c in ch:
+                base_id = c["id"]
+                if base_id in seen:
+                    seen[base_id] += 1
+                    c = {**c, "id": f"{base_id}-{seen[base_id]}"}
+                else:
+                    seen[base_id] = 0
+                unique.append(c)
+            _cache["channels"] = unique
             _cache["channels_exp"] = now + 300
-            logger.info(f"channels loaded: {len(ch)}")
-            return ch
+            logger.info(f"channels loaded: {len(unique)}")
+            return unique
         except Exception as e:
             logger.warning(f"catalog failed {base}: {e}")
             last_err = e
@@ -423,8 +441,13 @@ async def hls_proxy(u: str):
     # Segments (.ts, .key, .m4s, …): stream directly, NO cache
     try:
         cx = await get_http_client()
-        upstream_req = cx.build_request("GET", u, headers={"User-Agent": USER_AGENT_STREAM})
-        r = await cx.send(upstream_req, stream=True, timeout=30.0)
+        upstream_req = cx.build_request(
+            "GET",
+            u,
+            headers={"User-Agent": USER_AGENT_STREAM},
+            timeout=httpx.Timeout(30.0, connect=10.0),
+        )
+        r = await cx.send(upstream_req, stream=True)
         if r.status_code >= 400:
             await r.aclose()
             raise HTTPException(status_code=502, detail=f"Erreur amont: HTTP {r.status_code}")
@@ -483,6 +506,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.on_event("startup")
+async def startup_warmup():
+    """Pre-warm the catalog cache so the very first /api/channels call is fast.
+    Done in a background task so the server starts immediately."""
+    async def _warmup():
+        try:
+            await get_signature()
+            channels = await get_channels()
+            logger.info(f"warmup done: {len(channels)} channels cached")
+        except Exception as e:
+            logger.warning(f"warmup failed (will retry on first request): {e}")
+    asyncio.create_task(_warmup())
 
 @app.on_event("shutdown")
 async def shutdown_db_client():

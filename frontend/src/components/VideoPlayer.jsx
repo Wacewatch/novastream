@@ -44,7 +44,10 @@ export default function VideoPlayer({ channel, streamUrl, onClose, onRetry }) {
 
     if (Hls.isSupported()) {
       hls = new Hls({
-        enableWorker: true,
+        // Worker disabled: in some preview/iframe contexts the hls.js worker
+        // bundle is fetched from a cross-origin URL which triggers opaque
+        // "Script error." events that crash the React error overlay.
+        enableWorker: false,
         lowLatencyMode: true,
         // Live broadcast tuning: start fast, stay smooth even under load
         backBufferLength: 30,
@@ -69,16 +72,27 @@ export default function VideoPlayer({ channel, streamUrl, onClose, onRetry }) {
       });
       hls.on(Hls.Events.ERROR, (_e, data) => {
         if (destroyed) return;
-        if (data.fatal) {
-          // Try graceful recovery first
-          if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-            try { hls.startLoad(); return; } catch (_) { /* fall through */ }
+        try {
+          if (data.fatal) {
+            // Try graceful recovery first
+            if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+              try {
+                hls.startLoad();
+                return;
+              } catch (_err) { /* fall through */ }
+            }
+            if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+              try {
+                hls.recoverMediaError();
+                return;
+              } catch (_err) { /* fall through */ }
+            }
+            setError("Flux temporairement indisponible.");
+            setLoading(false);
           }
-          if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-            try { hls.recoverMediaError(); return; } catch (_) { /* fall through */ }
-          }
-          setError("Flux temporairement indisponible.");
-          setLoading(false);
+        } catch (_outer) {
+          // swallow any unexpected throw from the error path so it doesn't
+          // bubble up to window.onerror as an opaque "Script error."
         }
       });
     } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
