@@ -110,7 +110,7 @@ export default function NovaStream() {
       } catch (_) { /* silent */ }
     };
     fetchStats();
-    const id = setInterval(fetchStats, 20000);
+    const id = setInterval(fetchStats, 5000);
     return () => { mounted = false; clearInterval(id); };
   }, []);
 
@@ -173,7 +173,13 @@ export default function NovaStream() {
     setStreamUrl(null);
   };
 
-  const visibleChannels = useMemo(() => channels, [channels]);
+  const visibleChannels = useMemo(() => {
+    const live = stats?.per_channel || {};
+    return channels.map((c) => {
+      const v = live[c.id];
+      return v != null && v !== c.viewers ? { ...c, viewers: v } : c;
+    });
+  }, [channels, stats]);
 
   return (
     <div className="relative min-h-screen text-white">

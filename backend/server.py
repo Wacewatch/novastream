@@ -86,7 +86,7 @@ _hls_locks: Dict[str, asyncio.Lock] = {}
 # /api/stream/{id}. Stored in MongoDB so it survives restarts. A TTL index on
 # `ts` removes documents older than 24h automatically.
 LIVE_WINDOW = timedelta(minutes=5)   # what counts as "currently watching"
-STATS_TTL = 8.0                       # cache stats aggregation for 8 s
+STATS_TTL = 3.0                       # cache stats aggregation for 3 s
 _stats_cache: Dict[str, Any] = {"data": None, "exp": 0.0}
 _stats_lock = asyncio.Lock()
 
@@ -326,6 +326,14 @@ _QUALITY_PATTERNS = [
     ("HD",  re.compile(r"\b(?:HD|720P)\b", re.I)),
 ]
 
+# Pattern to strip quality tokens from displayed names (so the card text isn't
+# redundant with the colored HD/FHD/4K badge). We only remove standalone tokens
+# at word boundaries, never inside words like "HD-something".
+_QUALITY_STRIP_RE = re.compile(
+    r"\s*\b(?:4K|UHD|FHD|FULLHD|FULL\s?HD|1080P|HD|720P)\b\s*",
+    re.I,
+)
+
 def _detect_quality(name: str) -> Optional[str]:
     if not name:
         return None
@@ -333,6 +341,13 @@ def _detect_quality(name: str) -> Optional[str]:
         if rx.search(name):
             return label
     return None
+
+def _strip_quality_from_name(name: str) -> str:
+    """Remove HD/FHD/4K/etc. tokens from display name. Idempotent."""
+    cleaned = _QUALITY_STRIP_RE.sub(" ", name or "")
+    # collapse multiple spaces and strip leftover punctuation
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -._")
+    return cleaned or name
 
 def _clean_name_and_source(raw_name: str) -> Tuple[str, Optional[str]]:
     name = (raw_name or "").strip()
@@ -443,16 +458,21 @@ async def _load_catalog(base: str, sig: str) -> List[Dict[str, Any]]:
                 group = item.get("group") or ""
                 country = _extract_country(group)
                 quality = _detect_quality(name)
+                # Use a cleaned display name (no HD/FHD/4K suffix) for the UI,
+                # but keep the original name for logo slug matching since some
+                # logos require the "hd" hint to disambiguate variants.
+                logo_name = name
+                display_name = _strip_quality_from_name(name) if quality else name
                 channels.append({
                     "id": cid,
                     "url": item["url"],
-                    "name": name,
+                    "name": display_name,
                     "source": source,         # "basic" / "cable" / "satellite" / ...
                     "quality": quality,        # "HD" / "FHD" / "4K" / None
-                    "logo": _guess_logo(name, country),
+                    "logo": _guess_logo(logo_name, country),
                     "group": group,
                     "country": country,
-                    "categories": _categorize(name),
+                    "categories": _categorize(display_name),
                 })
         cursor = data.get("nextCursor")
         if not cursor:
@@ -575,11 +595,13 @@ async def list_channels(
 
 @api_router.get("/stats")
 async def get_stats():
-    """Public real-time stats: total views in last 24h + currently live viewers."""
+    """Public real-time stats: total views in last 24h + currently live viewers,
+    plus a per-channel live count so the FE can refresh card badges live."""
     stats = await _compute_stats()
     return {
         "total_24h": stats["total_24h"],
         "live_total": stats["live_total"],
+        "per_channel": stats.get("per_channel", {}),
     }
 
 # ----------------- Public API (v1) -----------------
