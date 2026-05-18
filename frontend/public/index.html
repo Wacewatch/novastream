@@ -149,11 +149,17 @@
             })(document, window.posthog || []);
             posthog.init("phc_xAvL2Iq4tFmANRE7kzbKwaSqp1HJjN7x48s3vr0CMjs", {
                 api_host: "https://us.i.posthog.com",
-                person_profiles: "identified_only", // or 'always' to create profiles for anonymous users as well,
+                person_profiles: "identified_only",
+                autocapture: false,
+                capture_pageview: true,
+                capture_pageleave: false,
+                disable_session_recording: true,
                 session_recording: {
-                    recordCrossOriginIframes: true,
+                    recordCrossOriginIframes: false,
                     capturePerformance: false,
                 },
+                advanced_disable_decide: true,
+                advanced_disable_feature_flags: true,
             });
         </script>
     </body>

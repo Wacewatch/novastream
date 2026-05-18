@@ -117,3 +117,9 @@ French live-TV streaming app (Vavoo-backed). User reported flaky UX (no loader, 
   - Déclenche un `refreshProfile()` automatique si la session est là mais le profil est vide.
   - Cap de 4 s sur le loader pour éviter un blocage définitif.
 
+
+## Session 2026-02-18 (part 4) — Nettoyage des erreurs réseau
+- **Erreurs DevTools `e/?ip=0&_=...&ver=1.374.2`** identifiées comme des appels PostHog (session_recording, autocapture) bloqués par l'ad-blocker de l'utilisateur. PostHog ré-essaye 3× chaque appel d'où l'inflation des entrées `retry_count=N`.
+- **Fix dans `/app/frontend/public/index.html`** : la config PostHog désactive désormais `session_recording` (la source principale du bruit), `autocapture`, `capture_pageleave`, `advanced_disable_decide` et `advanced_disable_feature_flags`. Le pageview basique est conservé.
+- Vérification : 0 requête bloquée détectée par Playwright après le fix.
+
