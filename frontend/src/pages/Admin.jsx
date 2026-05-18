@@ -78,6 +78,21 @@ export default function Admin() {
     }
   }, [isAdmin, reloadUsers, reloadKeys]);
 
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return users;
+    return users.filter((u) => (u.email || "").toLowerCase().includes(q));
+  }, [users, search]);
+
+  const stats = useMemo(() => {
+    const total = users.length;
+    const admins = users.filter((u) => u.role === "admin").length;
+    const vips = users.filter((u) => u.role === "vip" || u.is_vip).length;
+    const members = total - admins - vips;
+    const usedKeys = vipKeys.filter((k) => k.used).length;
+    return { total, admins, vips, members, usedKeys, totalKeys: vipKeys.length };
+  }, [users, vipKeys]);
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center text-white">
@@ -99,12 +114,6 @@ export default function Admin() {
       </div>
     );
   }
-
-  const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    if (!q) return users;
-    return users.filter((u) => (u.email || "").toLowerCase().includes(q));
-  }, [users, search]);
 
   const setUserRole = async (u, newRole) => {
     const updates = newRole === "vip"
@@ -154,15 +163,6 @@ export default function Admin() {
   const copyKey = (k) => {
     navigator.clipboard?.writeText(k).then(() => toast.success("Clé copiée"));
   };
-
-  const stats = useMemo(() => {
-    const total = users.length;
-    const admins = users.filter((u) => u.role === "admin").length;
-    const vips = users.filter((u) => u.role === "vip" || u.is_vip).length;
-    const members = total - admins - vips;
-    const usedKeys = vipKeys.filter((k) => k.used).length;
-    return { total, admins, vips, members, usedKeys, totalKeys: vipKeys.length };
-  }, [users, vipKeys]);
 
   return (
     <div className="relative min-h-screen text-white">

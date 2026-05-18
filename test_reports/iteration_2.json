@@ -1,0 +1,50 @@
+{
+  "summary": "Comprehensive test of LiveWatch Supabase integration. Backend pytest: 17/17 passing (8 NovaStream + 9 new Supabase/extras). Frontend: Home, FavoritesProvider counter sync, favorites filter, Multiview 2x2/3x3/4x4 + picker + iframe embed all working. CRITICAL BUG: /dashboard infinite spinner after fresh signup — page never resolves to profile-card even after 25s, meaning AuthContext loading stays true OR Supabase user_profiles fetch hangs. Also React hydration warning: <FavoriteButton> button is nested inside <ChannelCard> button (invalid HTML).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/countries, /api/stream/{id}", "issue": "Occasional 502 / upstream resolution failures (~5-10%) due to vavoo/kool upstream variability. Retry-once strategy passes."},
+      {"endpoint": "/api/hls", "issue": "Some upstream playlists return non-#EXTM3U content (e.g. 'Unavailable 3') and the proxy rewrites it as a single /api/hls?u=... line — proxy passes a 200 but body is degraded. Consider returning 502 if the upstream playlist is missing #EXTM3U."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "ChannelCard + FavoriteButton", "issue": "React hydration error: '<button> cannot be a descendant of <button>'. ChannelCard renders as <button> and contains <FavoriteButton> which is also a <button>. Convert ChannelCard outer element to <div role='button' tabIndex={0}> or move FavoriteButton outside the card button.", "selector": "[data-testid^='channel-card-'] [data-testid^='fav-btn-']", "priority": "HIGH"},
+      {"component": "Dashboard.jsx", "issue": "Infinite loading spinner after a fresh signup → /dashboard. Profile-card never appears (waited 25s). Console shows no fetch error. Likely root cause: AuthContext.fetchProfile uses supabase.from('user_profiles').select(...).eq('id', userId).single() — if the user_profiles row was NOT auto-created for new signups (missing DB trigger handle_new_user) AND/OR if Supabase RLS blocks the SELECT, the call may resolve with PGRST116 and setLoading(false) should run — but the UI clearly stays in the `if (loading) <Loader2 />` branch. Need to: (1) ensure a user_profiles row is inserted on auth.users insert (trigger), (2) add a timeout/fallback in AuthProvider so loading flips to false even if fetchProfile rejects/hangs.", "selector": "[data-testid='profile-card']", "priority": "CRITICAL"}
+    ],
+    "integration_issues": [
+      {"flow": "Signup → Dashboard", "issue": "User signs up successfully (URL transitions /login → /dashboard) but Dashboard never renders profile content. Blocks all dashboard features (favorites display, VIP redemption, profile card).", "affected_selectors": ["[data-testid='profile-card']", "[data-testid='vip-redeem-section']", "[data-testid='favorites-section']"]},
+      {"flow": "Admin denial", "issue": "Not testable because Dashboard infinite-loader prevented confirming the same loading-state issue isn't also blocking /admin. Manual code review of Admin.jsx (lines 174+) shows it uses the same useAuth() loading flag — so it would have the same problem."}
+    ],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_novastream_api.py",
+    "/app/backend/tests/test_supabase_and_extras.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "CRITICAL: Fix Dashboard infinite spinner. Add a safety timeout in AuthProvider so setLoading(false) runs even if fetchProfile hangs/throws. Inspect Supabase project to ensure user_profiles row is auto-created via DB trigger on auth.users insert; if not, create the row from the frontend after a successful signUp.",
+    "HIGH: Fix <button>-inside-<button> nesting (ChannelCard wraps FavoriteButton). Use <div role='button' tabIndex={0} onKeyDown> for the card or stop event-bubbling and move FavoriteButton as a sibling positioned absolutely.",
+    "MEDIUM: When /api/hls upstream is degraded (no #EXTM3U), return 502 instead of an empty rewritten line.",
+    "LOW: Add a retry hint toast for /api/stream/{id} 502s in the player UI."
+  ],
+  "critical_code_review_comments": [
+    "AuthContext.jsx: No timeout/error path that flips `loading` to false; a failing/hanging fetchProfile pegs the entire app in a spinner. Wrap the IIFE in a 5s safety race (Promise.race).",
+    "Dashboard.jsx / Admin.jsx both early-return on `if (loading)` — they should also handle a rejected profile fetch (show a retry button instead of spinning forever).",
+    "ChannelCard.jsx uses <button> as root + nested <FavoriteButton> — invalid HTML (logged twice in console). Will break a11y and may regress in React 19 strict.",
+    "AuthContext.fetchProfile uses .single() which throws when zero rows — handled, but consider .maybeSingle() to be explicit.",
+    "server.py /api/admin/vip-keys/generate: catches schema mismatch by retrying without `created_by` — leaves orphan inserts on partial failure. Prefer a single explicit schema."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_novastream_api.py",
+    "/app/backend/tests/test_supabase_and_extras.py"
+  ],
+  "success_rate": {"backend": "100%", "frontend": "60%"},
+  "test_credentials": "Disposable signup pattern qa+{timestamp}@livewatchtest.dev / Test1234! (created qa+1779145151@livewatchtest.dev and qa+1779145202@livewatchtest.dev during this run; can be cleaned up via Supabase admin).",
+  "seed_data_creation": "Two disposable Supabase auth users created via signup. No backend MongoDB seed.",
+  "retest_needed": true,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Backend is solid. Two new pytest files cover the Supabase/extra endpoints and a 10-way concurrent /api/hls single-flight check (all passing). FRONT-END BLOCKING ISSUE: Dashboard hangs on Loader2 after signup. To repro: open /dashboard in a fresh browser → redirected to /login → signup with qa+{ts}@livewatchtest.dev / Test1234! → after signup it navigates to /dashboard but profile-card never appears. Also two console hydration warnings about button-nested-in-button from ChannelCard+FavoriteButton. Once main agent fixes both, re-run: home favorites sync (PASSES today), /multiview embed (PASSES), /dashboard render with role=Membre, /admin denial message for non-admin, VIP key redemption form visibility.",
+  "rca of the issue": "Dashboard infinite-spinner RCA — Dashboard.jsx line 68: `if (loading) return <Loader2/>`. `loading` comes from AuthContext which only flips false inside the initial-mount IIFE after `await supabase.auth.getSession()` then `await fetchProfile()` complete. If the user_profiles row does not exist (no DB trigger creating it on signup) AND the Supabase JS .single() call rejects with PGRST116, the catch sets profile=null but setLoading(false) IS reached. However observed behaviour shows loading stuck → most likely RLS on user_profiles is blocking the SELECT for the user and the call is hanging (Supabase JS retries on network error). Mitigation: (a) add Promise.race timeout in AuthProvider, (b) create handle_new_user() trigger in Supabase to insert a default user_profiles row, (c) switch .single() to .maybeSingle(), (d) guarantee permissive SELECT-own-row RLS policy."
+}
