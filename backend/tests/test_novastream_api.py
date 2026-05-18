@@ -5,7 +5,7 @@ import pytest
 import requests
 from urllib.parse import unquote
 
-BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://tv-stream-france.preview.emergentagent.com").rstrip("/")
+BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://site-boost-27.preview.emergentagent.com").rstrip("/")
 API = f"{BASE_URL}/api"
 
 FORBIDDEN_WORDS = ["vavoo", "kool.to"]
