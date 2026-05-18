@@ -812,6 +812,228 @@ def _absolute_url(uri: str, base: str) -> str:
     from urllib.parse import urljoin
     return urljoin(base, uri)
 
+# =====================================================================
+# SUPABASE INTEGRATION
+# Auth-gated endpoints used by the React frontend for:
+#   - VIP key redemption (uses service role to bypass user_profiles RLS)
+#   - Admin: generate VIP keys
+#   - Channels by IDs (used by the dashboard to render favorites)
+# =====================================================================
+from fastapi import Header
+from pydantic import BaseModel, Field
+import secrets
+import string
+
+SUPABASE_URL = (os.environ.get("SUPABASE_URL") or "").rstrip("/")
+SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
+SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+
+
+def _supabase_configured() -> bool:
+    return bool(SUPABASE_URL and SUPABASE_ANON_KEY and SUPABASE_SERVICE_ROLE_KEY)
+
+
+async def _supabase_get_user(jwt: str) -> Dict[str, Any]:
+    """Validate a user JWT via Supabase /auth/v1/user. Returns the user dict."""
+    if not jwt:
+        raise HTTPException(status_code=401, detail="Token manquant")
+    if not _supabase_configured():
+        raise HTTPException(status_code=500, detail="Supabase non configuré côté serveur")
+    cx = await get_http_client()
+    try:
+        r = await cx.get(
+            f"{SUPABASE_URL}/auth/v1/user",
+            headers={"apikey": SUPABASE_ANON_KEY, "Authorization": f"Bearer {jwt}"},
+            timeout=10.0,
+        )
+        if r.status_code != 200:
+            raise HTTPException(status_code=401, detail="Session invalide ou expirée")
+        return r.json()
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"Erreur Supabase auth: {e}")
+
+
+def _service_headers(extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    h = {
+        "apikey": SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+        "Content-Type": "application/json",
+    }
+    if extra:
+        h.update(extra)
+    return h
+
+
+async def _supabase_query(method: str, path: str, *, params: Optional[Dict[str, Any]] = None,
+                          json: Any = None, prefer: Optional[str] = None) -> httpx.Response:
+    """Low-level Supabase REST call using service_role key (bypasses RLS)."""
+    cx = await get_http_client()
+    extra = {}
+    if prefer:
+        extra["Prefer"] = prefer
+    r = await cx.request(
+        method,
+        f"{SUPABASE_URL}/rest/v1/{path.lstrip('/')}",
+        params=params,
+        json=json,
+        headers=_service_headers(extra),
+        timeout=15.0,
+    )
+    return r
+
+
+async def _require_admin(jwt: str) -> Dict[str, Any]:
+    """Validate user JWT AND check their profile.role == 'admin'."""
+    user = await _supabase_get_user(jwt)
+    uid = user.get("id")
+    if not uid:
+        raise HTTPException(status_code=401, detail="Utilisateur invalide")
+    r = await _supabase_query(
+        "GET", "user_profiles",
+        params={"id": f"eq.{uid}", "select": "id,role,is_vip"},
+    )
+    if r.status_code != 200 or not r.json():
+        raise HTTPException(status_code=403, detail="Profil introuvable")
+    profile = r.json()[0]
+    if profile.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Réservé aux administrateurs")
+    return {"user": user, "profile": profile}
+
+
+def _extract_bearer(authorization: Optional[str]) -> str:
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Authorization header manquant")
+    parts = authorization.split(" ", 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        raise HTTPException(status_code=401, detail="Format Authorization invalide")
+    return parts[1].strip()
+
+
+# ---------- Models ----------
+class RedeemVipRequest(BaseModel):
+    key: str = Field(..., min_length=4, max_length=128)
+
+
+class GenerateKeysRequest(BaseModel):
+    count: int = Field(1, ge=1, le=50)
+
+
+class ChannelsByIdsRequest(BaseModel):
+    ids: List[str] = Field(default_factory=list, max_length=500)
+
+
+# ---------- Endpoints ----------
+@api_router.post("/auth/redeem-vip")
+async def redeem_vip(body: RedeemVipRequest, authorization: Optional[str] = Header(None)):
+    """Mark a VIP key as used by the calling user, then upgrade the user's
+    profile to role='vip' / is_vip=true. Uses the service role so RLS does not
+    block the role escalation."""
+    jwt = _extract_bearer(authorization)
+    user = await _supabase_get_user(jwt)
+    uid = user.get("id")
+    user_email = user.get("email")
+
+    raw_key = body.key.strip()
+
+    # 1) Find the key (must be unused)
+    r = await _supabase_query(
+        "GET", "vip_keys",
+        params={"key": f"eq.{raw_key}", "select": "id,key,used,used_by"},
+    )
+    if r.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"Erreur Supabase: {r.text}")
+    rows = r.json()
+    if not rows:
+        return {"success": False, "error": "Clé VIP introuvable"}
+    key_row = rows[0]
+    if key_row.get("used"):
+        return {"success": False, "error": "Cette clé a déjà été utilisée"}
+
+    # 2) Mark the key used
+    now_iso = datetime.now(timezone.utc).isoformat()
+    r2 = await _supabase_query(
+        "PATCH", "vip_keys",
+        params={"id": f"eq.{key_row['id']}", "used": "is.false"},
+        json={"used": True, "used_by": uid, "used_at": now_iso},
+        prefer="return=representation",
+    )
+    if r2.status_code not in (200, 204):
+        raise HTTPException(status_code=502, detail=f"Échec MAJ clé: {r2.text}")
+    updated = r2.json() if r2.content else []
+    if not updated:
+        return {"success": False, "error": "Clé déjà consommée"}
+
+    # 3) Upgrade user_profile (upsert in case the profile row does not yet exist)
+    profile_payload = {
+        "id": uid,
+        "email": user_email,
+        "role": "vip",
+        "is_vip": True,
+        "vip_granted_at": now_iso,
+    }
+    r3 = await _supabase_query(
+        "POST", "user_profiles",
+        json=profile_payload,
+        prefer="resolution=merge-duplicates,return=representation",
+    )
+    if r3.status_code not in (200, 201):
+        r3b = await _supabase_query(
+            "PATCH", "user_profiles",
+            params={"id": f"eq.{uid}"},
+            json={"role": "vip", "is_vip": True, "vip_granted_at": now_iso},
+            prefer="return=representation",
+        )
+        if r3b.status_code not in (200, 204):
+            raise HTTPException(status_code=502, detail=f"Échec MAJ profil: {r3b.text}")
+
+    return {"success": True, "role": "vip"}
+
+
+@api_router.post("/admin/vip-keys/generate")
+async def admin_generate_vip_keys(body: GenerateKeysRequest, authorization: Optional[str] = Header(None)):
+    """Generate N random VIP keys (only admins)."""
+    jwt = _extract_bearer(authorization)
+    ctx = await _require_admin(jwt)
+    admin_uid = ctx["user"]["id"]
+
+    def _new_key() -> str:
+        alphabet = string.ascii_uppercase + string.digits
+        groups = ["".join(secrets.choice(alphabet) for _ in range(4)) for _ in range(3)]
+        return "VIP-" + "-".join(groups)
+
+    rows = [{"key": _new_key(), "used": False, "created_by": admin_uid} for _ in range(body.count)]
+    r = await _supabase_query("POST", "vip_keys", json=rows, prefer="return=representation")
+    if r.status_code not in (200, 201):
+        # `created_by` column may not exist in this schema — retry without it
+        rows2 = [{"key": row["key"], "used": False} for row in rows]
+        r = await _supabase_query("POST", "vip_keys", json=rows2, prefer="return=representation")
+        if r.status_code not in (200, 201):
+            raise HTTPException(status_code=502, detail=f"Échec création clés: {r.text[:200]}")
+    created = r.json() if r.content else []
+    return {"created": len(created), "keys": [c.get("key") for c in created]}
+
+
+@api_router.post("/channels/by-ids")
+async def channels_by_ids(body: ChannelsByIdsRequest):
+    """Return channel metadata for a list of IDs (used by dashboard favorites)."""
+    if not body.ids:
+        return {"channels": []}
+    all_channels = await get_channels()
+    wanted = set(body.ids)
+    out = []
+    for c in all_channels:
+        if c["id"] in wanted:
+            out.append({
+                "id": c["id"],
+                "name": c["name"],
+                "country": c["country"],
+                "categories": c["categories"],
+                "logo": c.get("logo") or "",
+            })
+    return {"channels": out}
+
+
+
 # ----------------- App setup -----------------
 app.include_router(api_router)
 

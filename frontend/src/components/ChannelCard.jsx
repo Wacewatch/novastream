@@ -1,5 +1,6 @@
 import { useState, memo } from "react";
 import { Tv, Eye } from "lucide-react";
+import FavoriteButton from "@/components/FavoriteButton";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 
@@ -38,6 +39,10 @@ function ChannelCard({ channel, onClick }) {
       data-testid={`channel-card-${channel.id}`}
       aria-label={`Lancer ${channel.name}`}
     >
+      <div className="absolute top-3 left-3 z-10">
+        <FavoriteButton channelId={channel.id} size={14} />
+      </div>
+
       <div className="absolute top-3 right-3 z-10 flex items-center gap-1.5">
         {sourceTag && (
           <span className={`source-tag source-${channel.source}`} data-testid={`source-tag-${channel.source}`}>

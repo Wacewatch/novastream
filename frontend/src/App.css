@@ -898,3 +898,33 @@
   border-radius: 999px;
 }
 .mv-picker-list::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.22); }
+
+
+/* Favorite heart button */
+.fav-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: rgba(255, 255, 255, 0.7);
+  cursor: pointer;
+  transition: transform 0.15s ease, background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+  backdrop-filter: blur(6px);
+}
+.fav-btn:hover {
+  background: rgba(255, 46, 99, 0.2);
+  border-color: rgba(255, 46, 99, 0.4);
+  color: #ff2e63;
+  transform: scale(1.06);
+}
+.fav-btn.is-fav {
+  background: rgba(255, 46, 99, 0.18);
+  border-color: rgba(255, 46, 99, 0.5);
+}
+.fav-btn.is-fav:hover {
+  background: rgba(255, 46, 99, 0.3);
+}

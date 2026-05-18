@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import axios from "axios";
-import { Search, Globe2, Loader2, Tv2, Users } from "lucide-react";
+import { Search, Globe2, Loader2, Tv2, Users, Heart } from "lucide-react";
 import ChannelCard from "@/components/ChannelCard";
 import AdUnlockModal from "@/components/AdUnlockModal";
 import VideoPlayer from "@/components/VideoPlayer";
+import UserMenu from "@/components/UserMenu";
+import { useFavorites } from "@/hooks/useFavorites";
 import {
   Select,
   SelectContent,
@@ -77,6 +79,8 @@ export default function NovaStream() {
   const [channels, setChannels] = useState([]);
   const [loading, setLoading] = useState(true);
   const [stats, setStats] = useState({ total_24h: 0, live_total: 0 });
+  const [onlyFavorites, setOnlyFavorites] = useState(false);
+  const { favorites, isFavorite } = useFavorites();
 
   // Playback state
   const [pendingChannel, setPendingChannel] = useState(null); // showing ad modal
@@ -175,11 +179,15 @@ export default function NovaStream() {
 
   const visibleChannels = useMemo(() => {
     const live = stats?.per_channel || {};
-    return channels.map((c) => {
+    const base = channels.map((c) => {
       const v = live[c.id];
       return v != null && v !== c.viewers ? { ...c, viewers: v } : c;
     });
-  }, [channels, stats]);
+    if (onlyFavorites) {
+      return base.filter((c) => isFavorite(c.id));
+    }
+    return base;
+  }, [channels, stats, onlyFavorites, isFavorite]);
 
   return (
     <div className="relative min-h-screen text-white">
@@ -230,6 +238,22 @@ export default function NovaStream() {
               <Tv2 size={14} className="text-[#ff2e63]" />
               Multi
             </a>
+            <button
+              onClick={() => setOnlyFavorites((v) => !v)}
+              className={`hidden sm:inline-flex items-center gap-1.5 text-sm px-3 py-2 rounded-full glass-pill border-white/10 transition-colors ${
+                onlyFavorites ? "text-[#ff2e63] border-[#ff2e63]/40" : "text-white/70 hover:text-white"
+              }`}
+              data-testid="favorites-filter-btn"
+              title={onlyFavorites ? "Afficher toutes les chaînes" : "Afficher mes favoris"}
+            >
+              <Heart
+                size={14}
+                fill={onlyFavorites ? "#ff2e63" : "transparent"}
+                color={onlyFavorites ? "#ff2e63" : "currentColor"}
+                strokeWidth={onlyFavorites ? 0 : 2}
+              />
+              <span>{favorites.length}</span>
+            </button>
             <a
               href="/docs"
               className="hidden sm:inline-flex items-center gap-1.5 text-sm text-white/70 hover:text-white px-3 py-2 rounded-full glass-pill border-white/10 transition-colors"
@@ -254,6 +278,7 @@ export default function NovaStream() {
                 ))}
               </SelectContent>
             </Select>
+            <UserMenu />
           </div>
         </div>
 
