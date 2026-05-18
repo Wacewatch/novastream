@@ -79,7 +79,11 @@ _resolve_locks: Dict[str, asyncio.Lock] = {}
 # on the same channel. Segments (.ts) are NOT cached (they would explode RAM).
 HLS_PLAYLIST_TTL = 2.0
 _hls_cache: Dict[str, Tuple[bytes, str, float]] = {}
-_hls_locks: Dict[str, asyncio.Lock] = {}
+# Single-flight: when N viewers ask for the same expired playlist simultaneously,
+# only ONE upstream fetch is launched (as a Task). All other viewers await the
+# same Task and resume IN PARALLEL when it resolves. This avoids the serialized
+# wake-up of asyncio.Lock under high concurrency (1000+ viewers).
+_hls_inflight: Dict[str, "asyncio.Task[Tuple[bytes, str, float]]"] = {}
 
 # ===== View tracking =====
 # A "view" is recorded each time the FE resolves a stream URL via
@@ -698,7 +702,8 @@ async def get_stream_url(channel_id: str):
 async def hls_proxy(u: str):
     """Proxy HLS playlists & segments. Playlists are micro-cached (2 s) so
     that thousands of concurrent viewers on the same channel result in a
-    single upstream fetch every 2 s."""
+    single upstream fetch every 2 s. Uses a single-flight Task so all
+    waiting viewers wake up in parallel (not serialized like a Lock)."""
     now = time.time()
     # Quick test: is this a playlist URL (.m3u8)?
     looks_like_playlist = ".m3u8" in u.lower().split("?")[0]
@@ -707,26 +712,24 @@ async def hls_proxy(u: str):
         cached = _hls_cache.get(u)
         if cached and cached[2] > now:
             return Response(content=cached[0], media_type=cached[1])
-        lock = _hls_locks.setdefault(u, asyncio.Lock())
-        async with lock:
-            cached = _hls_cache.get(u)
-            if cached and cached[2] > time.time():
-                return Response(content=cached[0], media_type=cached[1])
-            try:
-                cx = await get_http_client()
-                r = await cx.get(u, headers={"User-Agent": USER_AGENT_STREAM}, timeout=15.0)
-                ct = r.headers.get("content-type", "").lower()
-                is_m3u8 = ("mpegurl" in ct) or ("application/vnd.apple" in ct) or looks_like_playlist
-                if is_m3u8:
-                    text = r.text
-                    rewritten = _rewrite_m3u8(text, u).encode("utf-8")
-                    media = "application/vnd.apple.mpegurl"
-                    _hls_cache[u] = (rewritten, media, time.time() + HLS_PLAYLIST_TTL)
-                    return Response(content=rewritten, media_type=media)
-                # Fallback: not really a playlist, stream binary
-                return Response(content=r.content, media_type=r.headers.get("content-type", "application/octet-stream"))
-            except httpx.HTTPError as e:
-                raise HTTPException(status_code=502, detail=f"Erreur de flux: {e}")
+
+        # Single-flight pattern: 1 upstream fetch shared by ALL waiting viewers.
+        # We schedule the fetch as a standalone Task (decoupled from any
+        # particular request) so a client disconnect does not cancel the fetch.
+        task = _hls_inflight.get(u)
+        if task is None or task.done():
+            task = asyncio.create_task(_fetch_playlist(u))
+            _hls_inflight[u] = task
+
+        try:
+            entry = await asyncio.shield(task)
+            return Response(content=entry[0], media_type=entry[1])
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=502, detail=f"Erreur de flux: {e}")
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Erreur de flux: {e}")
 
     # Segments (.ts, .key, .m4s, …): stream directly, NO cache
     try:
@@ -756,6 +759,29 @@ async def hls_proxy(u: str):
 
 async def _stream_bytes(data: bytes):
     yield data
+
+async def _fetch_playlist(u: str) -> Tuple[bytes, str, float]:
+    """Background single-flight fetcher for an HLS playlist URL. Called as
+    a Task so its lifetime is independent of any incoming request. Populates
+    `_hls_cache[u]` on success and pops itself from `_hls_inflight` at the end."""
+    try:
+        cx = await get_http_client()
+        r = await cx.get(u, headers={"User-Agent": USER_AGENT_STREAM}, timeout=15.0)
+        ct = r.headers.get("content-type", "").lower()
+        is_m3u8 = ("mpegurl" in ct) or ("application/vnd.apple" in ct) or (".m3u8" in u.lower().split("?")[0])
+        if is_m3u8:
+            text = r.text
+            rewritten = _rewrite_m3u8(text, u).encode("utf-8")
+            media = "application/vnd.apple.mpegurl"
+            entry: Tuple[bytes, str, float] = (rewritten, media, time.time() + HLS_PLAYLIST_TTL)
+            _hls_cache[u] = entry
+            return entry
+        # Not really a playlist — return body but DON'T cache it
+        media2 = r.headers.get("content-type", "application/octet-stream")
+        return (r.content, media2, time.time())
+    finally:
+        # Remove ourselves so the next miss can schedule a fresh fetch
+        _hls_inflight.pop(u, None)
 
 def _rewrite_m3u8(playlist: str, base_url: str) -> str:
     out_lines = []
