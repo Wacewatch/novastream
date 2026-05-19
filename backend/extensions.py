@@ -104,7 +104,12 @@ def _normalize_id(v: Any) -> str:
 
 
 def _extract_channel_rows(raw: Any) -> List[Dict[str, Any]]:
-    """Accepts livewatch [{name, id, url}] OR simpler [{id, title}] formats."""
+    """Accepts livewatch [{name, id, url}] OR simpler [{id, title}] formats.
+    Preserves the upstream `url` field as `embed_url` when present (player10.json
+    returns `https://player.cfbu247.sbs/embed/<slug>` which is the working iframe).
+    NOTE: player10.json returns id=0 for every row — we ignore numeric extraction
+    from the URL (slugs only) and rely on name-matching against the static catalog.
+    """
     if isinstance(raw, dict):
         for k in ("channels", "data", "items", "list"):
             if isinstance(raw.get(k), list):
@@ -116,19 +121,22 @@ def _extract_channel_rows(raw: Any) -> List[Dict[str, Any]]:
     for row in raw:
         if not isinstance(row, dict):
             continue
-        cid = _normalize_id(row.get("id") or row.get("channel_id") or row.get("ID"))
+        raw_id = row.get("id") or row.get("channel_id") or row.get("ID")
+        cid = _normalize_id(raw_id) if raw_id not in (0, "0", None, "") else ""
         name = (row.get("title") or row.get("name") or row.get("channel_name") or "").strip()
         if not name:
             continue
-        # Extract id from URL if missing (livewatch format: /stream-12345.php)
+        url = (row.get("url") or row.get("link") or "").strip()
+        # Only treat numeric-segment-in-path as an id if it looks like /stream-12345
+        # (we explicitly skip URLs like .../embed/<slug> where any digit comes from
+        # the host name, e.g. cfbu247).
         if not cid:
-            url = row.get("url") or row.get("link") or ""
-            m = re.search(r"(\d+)", str(url))
+            m = re.search(r"(?:stream[-_]|premium|channel[-_/])(\d+)", str(url), re.I)
             if m:
                 cid = m.group(1)
-        if not cid:
-            continue
-        out.append({"id": cid, "name": name})
+        # cid may still be empty here — the catalog refresh will resolve it via
+        # name-matching against the static catalog.
+        out.append({"id": cid, "name": name, "embed_url": url})
     return out
 
 
@@ -190,18 +198,36 @@ async def _refresh_daddy_catalog(force: bool = False) -> None:
     for c in DADDY_STATIC_CHANNELS:
         name_to_id[c["name"].lower().strip()] = c["id"]
 
-    # If the external channels JSON ids are sequential (0,1,2…) we ignore them
-    # and match by NAME against the static catalog to get the real daddylive id.
+    def _normalize_name_key(s: str) -> str:
+        # Loose normalisation for fallback name matching (case + non-alnum stripped).
+        return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
+
+    # Loose name index too (handles minor punctuation differences).
+    loose_name_to_id: Dict[str, str] = {
+        _normalize_name_key(c["name"]): c["id"] for c in DADDY_STATIC_CHANNELS
+    }
+
+    # Player10.json returns id=0 for all rows. We rely on NAME matching against the
+    # static catalog to recover a real numeric id (which is also the key in the
+    # m3u8 map).
     def _resolve_real_id(row: Dict[str, Any]) -> Optional[str]:
         rid = _normalize_id(row.get("id"))
-        # If the row id is already a "real" daddylive id (matches an m3u8 entry), keep it.
         if rid and rid in m3u8_map:
             return rid
-        # Else look up by lowercase name.
-        nid = name_to_id.get(row["name"].lower().strip())
+        nm = (row.get("name") or "").lower().strip()
+        nid = name_to_id.get(nm)
         if nid:
             return nid
-        # Fallback to numeric extraction from URL.
+        nid = loose_name_to_id.get(_normalize_name_key(nm))
+        if nid:
+            return nid
+        # Fallback: synthesise a stable slug-based id from the embed URL so
+        # channels missing from the static catalog are still exposed (with
+        # iframe-only playback — no m3u8 mapping).
+        url = (row.get("embed_url") or "").strip()
+        m = re.search(r"/embed/([^/?#]+)", url)
+        if m:
+            return f"slug-{m.group(1)}"
         return rid or None
 
     enriched: List[Dict[str, Any]] = []
@@ -212,19 +238,21 @@ async def _refresh_daddy_catalog(force: bool = False) -> None:
             if not real_id:
                 continue
             m3u8 = m3u8_map.get(real_id)
-            if not m3u8:
-                continue
             if real_id in seen_ids:
                 continue
             seen_ids.add(real_id)
             meta = _daddy_categorize(r["name"])
+            # Prefer the upstream URL from player10.json (working iframe on
+            # player.cfbu247.sbs) over the constructed daddylive.li embed.
+            iframe_url = (r.get("embed_url") or "").strip() or daddy_embed_url(real_id)
             enriched.append({
                 "id": real_id,
                 "name": r["name"],
                 "category": meta["category"],
                 "country": meta["country"],
-                "m3u8": m3u8,
-                "embed_url": daddy_embed_url(real_id),
+                "m3u8": m3u8 or "",
+                "embed_url": iframe_url,
+                "has_m3u8": bool(m3u8),
             })
 
     # Fallback: also include any static-catalog channel that has a m3u8 entry
@@ -242,7 +270,9 @@ async def _refresh_daddy_catalog(force: bool = False) -> None:
             "category": c["category"],
             "country": c["country"],
             "m3u8": m3u8,
+            # No upstream embed URL available — use the legacy constructed one.
             "embed_url": daddy_embed_url(c["id"]),
+            "has_m3u8": True,
         })
 
     # Sort by country then name (stable, predictable)
