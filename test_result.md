@@ -122,7 +122,7 @@ backend:
         -comment: "Added /api/v1/public/countries, /api/v1/public/categories, /api/v1/public/channels (filters: country/category/search/limit 1-5000), /api/v1/public/channel/{id}. Each channel response includes id, name, country, categories, stream_url (absolute) and embed_url (absolute) derived from X-Forwarded-* headers."
         -working: true
         -agent: "testing"
-        -comment: "✅ ALL PUBLIC API v1 ENDPOINTS WORKING CORRECTLY. Tested: (1) /api/v1/public/countries returns 17 countries including France. (2) /api/v1/public/categories returns 8 categories. (3) /api/v1/public/channels?country=France&limit=5 returns exactly 5 France channels with correct structure (id, name, country='France', categories[], stream_url, embed_url). (4) All stream_url start with https://quad-view-page.preview.emergentagent.com/api/stream/{id} and embed_url with /embed/{id} - X-Forwarded-* headers honored correctly. (5) Filter by category=Sport returns only Sport channels. (6) Filter by search=tf1 returns only channels with 'tf1' in name. (7) /api/v1/public/channel/{valid_id} returns correct single channel data. (8) /api/v1/public/channel/INVALID_ID returns 404 with correct French error message 'Chaîne introuvable'."
+        -comment: "✅ ALL PUBLIC API v1 ENDPOINTS WORKING CORRECTLY. Tested: (1) /api/v1/public/countries returns 17 countries including France. (2) /api/v1/public/categories returns 8 categories. (3) /api/v1/public/channels?country=France&limit=5 returns exactly 5 France channels with correct structure (id, name, country='France', categories[], stream_url, embed_url). (4) All stream_url start with https://novastream-tv.preview.emergentagent.com/api/stream/{id} and embed_url with /embed/{id} - X-Forwarded-* headers honored correctly. (5) Filter by category=Sport returns only Sport channels. (6) Filter by search=tf1 returns only channels with 'tf1' in name. (7) /api/v1/public/channel/{valid_id} returns correct single channel data. (8) /api/v1/public/channel/INVALID_ID returns 404 with correct French error message 'Chaîne introuvable'."
 
   - task: "Performance: shared httpx client, resolve cache (240s) and HLS playlist micro-cache (2s) with per-key locks"
     implemented: true
@@ -270,7 +270,7 @@ agent_communication:
     -message: |
         ✅ BACKEND TESTING COMPLETE - ALL TESTS PASSED (16/16)
         
-        Comprehensive test suite executed against https://quad-view-page.preview.emergentagent.com
+        Comprehensive test suite executed against https://novastream-tv.preview.emergentagent.com
         Created /app/backend_test.py with full validation coverage.
         
         Test Results Summary:
@@ -320,4 +320,4 @@ agent_communication:
            response time of the 2nd call is sub-50ms).
         Do NOT test playback in a real browser — focus on API correctness,
         caching effectiveness, and concurrency safety. Use the public preview
-        URL: https://quad-view-page.preview.emergentagent.com
+        URL: https://novastream-tv.preview.emergentagent.com

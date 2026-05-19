@@ -17,7 +17,7 @@ from urllib.parse import unquote, urlparse, parse_qs
 from typing import Dict, Any, List
 
 # Public preview URL
-BASE_URL = "https://quad-view-page.preview.emergentagent.com"
+BASE_URL = "https://novastream-tv.preview.emergentagent.com"
 
 class TestResults:
     def __init__(self):
