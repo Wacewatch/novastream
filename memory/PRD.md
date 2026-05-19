@@ -123,3 +123,44 @@ French live-TV streaming app (Vavoo-backed). User reported flaky UX (no loader, 
 - **Fix dans `/app/frontend/public/index.html`** : la config PostHog désactive désormais `session_recording` (la source principale du bruit), `autocapture`, `capture_pageleave`, `advanced_disable_decide` et `advanced_disable_feature_flags`. Le pageview basique est conservé.
 - Vérification : 0 requête bloquée détectée par Playwright après le fix.
 
+
+
+## Session 2026-02-19 — DaddyTV + Sports + Football: SPA tab refactor
+
+### Major refactor
+- **`NovaStream.jsx` is now a single-page tab container** for TV / DaddyTV / Sports.
+  - `activeTab` state (`tv` | `daddy` | `sports`) + `sportsSubTab` (`sports` | `football` | `info`) — clicking the 3 hub cards switches content WITHOUT React Router navigation. Header & hub buttons stay visible.
+  - Single `pending` state drives a single `AdUnlockModal` for all 5 playback kinds (`tv`, `daddy`, `info`, `sports`, `football`). Server/source switching mutates the per-overlay state only → ad cannot replay.
+- **New tab components** under `/app/frontend/src/components/tabs/`:
+  - `DaddyTab.jsx` — filterable channel grid (search/country/category), groups by country with "Voir les N chaînes" expansion.
+  - `SportsTab.jsx` — streamed.pk matches (Populaires + Live + Tous).
+  - `FootballTab.jsx` — RapidAPI matches (LIVE + Upcoming, league filter).
+  - `InfoTab.jsx` — tv247 planning. Clicking a channel resolves it against the DaddyTV catalog (by id → by normalized name → fuzzy startsWith → /api/daddy/channel/{id}) then triggers the standard ad-modal → iframe-player flow.
+- **`VideoPlayer.jsx`** now accepts optional `servers`/`activeServerId`/`onSwitchServer` props. When present, a "Serveur" entry appears in the kebab menu — used by the Football overlay so users can flip servers in-place.
+- **Deleted** `/app/frontend/src/pages/DaddyTV.jsx` and `/app/frontend/src/pages/Sports.jsx`. Legacy routes `/daddy` and `/sports` now `<Navigate to="/" replace />`.
+
+### UI cleanup (per user feedback)
+- TV button label: "TV — Chaînes en direct" (removed "vavoo").
+- DaddyTV button: no more "PUB" badge. Subtitle: "Chaînes mondiales en direct" (no 800-channel cap text).
+- Sports button: no more "PUB" badge.
+- Removed the "Direct • 🇫🇷 France / Toutes vos chaînes en direct…" intro paragraph entirely.
+- Country dropdown + category pills moved into their own row BELOW the hub buttons (`[data-testid="tv-controls"]`); visible only when TV tab is active.
+
+### Backend
+- DaddyTV catalog now dynamically merges:
+  1. external channels JSON (default: `daddylive.li/player/player10.json`)
+  2. external m3u8 JSON (default: `player.cfbu247.sbs/allchannel.json`)
+  3. static fallback from `daddy_channels.py`
+  Catalog cached in-memory 5 min. `/api/daddy/stream/{id}` returns a `/api/football/proxy?url=…` URL for the matched m3u8.
+- Admin endpoints: `GET/PATCH /api/admin/daddy/config` (enabled, channels_url, m3u8_url) and `POST /api/admin/daddy/test` (dry-run with stats: total/matched/sample).
+- Admin UI: new "Configuration DaddyTV" section in `/admin` with channels_url + m3u8_url inputs, toggle, Test/Save/Restore-defaults buttons, and live test result panel.
+
+### Tests
+- `testing_agent_v3_fork` iter_5 → backend 13/13 pytest (`/app/backend/tests/test_daddy_sports_football.py`), frontend 14/14 SPA assertions. AdUnlockModal opens correctly on football click. No regressions, no console errors.
+- Known external: cfbu247.sbs upstream currently returns 502 → frontend defaults to the iframe `embed_url` path for DaddyTV/Info, which keeps playback reliable.
+
+### Backlog (post-2026-02-19)
+- **P1** Split `extensions.py` (1371 LOC) into `routes/{daddy,sports,football,admin_daddy,admin_football}.py`. Same for `server.py`.
+- **P2** Length-difference threshold on InfoTab fuzzy name match to avoid short-prefix collisions (e.g. "tf1" vs "tf1 series films").
+- **P2** LRU cap on `_fb_servers_by_mid` index to bound memory if upstream returns nullish ids.
+- **P2** Surface clearer fallback message in the player when the DaddyTV HLS proxy returns 502 (auto-switch to iframe in-place).

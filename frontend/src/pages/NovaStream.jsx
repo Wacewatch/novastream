@@ -671,9 +671,9 @@ function pendingChannelLabel(p) {
 
 function SportsPickerInline({ match, streams, activeSource, loading, onSwitchSource, onPickStream, currentEmbedUrl }) {
   return (
-    <div className="hidden md:flex items-center gap-2 max-w-[55%] overflow-x-auto no-scrollbar">
+    <div className="flex items-center gap-2 max-w-full overflow-x-auto no-scrollbar">
       {(match.sources || []).length > 1 && (
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1 shrink-0">
           {match.sources.map((s, idx) => (
             <button
               key={`${s.source}-${idx}`}
@@ -688,9 +688,9 @@ function SportsPickerInline({ match, streams, activeSource, loading, onSwitchSou
         </div>
       )}
       {loading ? (
-        <Loader2 size={14} className="animate-spin text-emerald-400" />
+        <Loader2 size={14} className="animate-spin text-emerald-400 shrink-0" />
       ) : (
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1 shrink-0">
           {streams.slice(0, 6).map((stream, idx) => (
             <button
               key={idx}
