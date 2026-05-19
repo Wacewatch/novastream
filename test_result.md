@@ -506,7 +506,89 @@ agent_communication:
         All backend tasks marked as working=true, needs_retesting=false.
         No critical issues found. All new modules are production-ready.
 
-  - task: "DaddyTV DLStream resolver (HLS + iframe fallback)"
+  - task: "Football proxy (HLS) — streaming + Chrome UA + Range support"
+    implemented: true
+    working: true
+    file: "backend/extensions.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: |
+          Overhauled /api/football/proxy following the PHP daddytv.php technique:
+          - Detects DLStream hosts (cfbu247.sbs, zampledakis.shop, …) and uses
+            Chrome desktop UA + Referer https://chat.cfbu247.sbs/ on those, while
+            keeping the iPhone UA for the historical RapidAPI flow.
+          - m3u8 playlists are still buffered + URL-rewritten through the proxy,
+            BUT TS segments are now streamed via StreamingResponse with httpx
+            cx.stream() — no more loading 2-4 MB chunks into memory.
+          - Forwards Range header for partial-segment / seek requests.
+          - Forces Content-Type: video/mp2t for DLStream hosts and any path with
+            a known segment extension (.ts/.m4s/.aac/.js/.jpg/.pdf/.zst/.woff…)
+            — the upstream obfuscates TS chunks as images/JS, so HLS.js was
+            refusing them with the original content-type.
+          - Exposes CORS + accept-ranges + content-length passthrough headers.
+          - On upstream 5xx returns 502 promptly so the client error path fires
+            (we wired NET_MAX=3 retries on HLS.js then onError → iframe fallback).
+          curl bench: 30 popular DaddyTV channels — ~17/30 return valid m3u8+TS
+          (rest are 502 from upstream itself, not our proxy). Iframe fallback
+          handles those at the 30s watchdog timeout.
+        -working: true
+        -agent: "testing"
+        -comment: |
+          ✅ ALL FOOTBALL PROXY TESTS PASSED (19/19). Created /app/backend_test_football_proxy.py with comprehensive validation.
+          
+          Test Results:
+          1. ✅ GET /api/daddy/stream/35 → Returns stream_url containing /api/football/proxy?url=
+          2. ✅ Master playlist fetch:
+             - Status 200 ✅
+             - Content-Type: application/vnd.apple.mpegurl ✅
+             - Body starts with #EXTM3U ✅
+             - Contains URLs pointing to /api/football/proxy?url= ✅
+          3. ✅ Variant playlist fetch:
+             - Status 200 ✅
+             - Content-Type: application/vnd.apple.mpegurl ✅
+             - Contains 6 segment URLs ✅
+          4. ✅ Segment fetch:
+             - Status 200 ✅
+             - Content-Type: video/mp2t ✅
+             - Body starts with 0x47 (MPEG-TS sync byte) ✅
+             - Segment size: 3.4 MB ✅
+          5. ✅ Range request (bytes=0-1023):
+             - Returns 206 Partial Content ✅
+             - Returns exactly 1024 bytes ✅
+             - Response starts with 0x47 ✅
+          6. ✅ CORS headers: Access-Control-Allow-Origin: * ✅
+          7. ✅ Bad input validation:
+             - GET /api/football/proxy (no url) → 400 ✅
+             - GET /api/football/proxy?url=foo://bar → 400 ✅
+          8. ✅ Stress test: 20 back-to-back requests all return 200 (completed in 0.59s) ✅
+          9. ✅ Offline channel (id 60): Returns 502 with CORS headers ✅
+          
+          The football proxy overhaul is working perfectly. Streaming mode, Chrome UA for DLStream hosts, Range support, CORS headers, and error handling all verified.
+
+  - task: "DaddyTV 30s HLS watchdog + iframe fallback"
+    implemented: true
+    working: true
+    file: "frontend/src/pages/NovaStream.jsx, frontend/src/pages/DaddyEmbedPage.jsx, frontend/src/components/VideoPlayer.jsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        -working: true
+        -agent: "main"
+        -comment: |
+          - VideoPlayer: new onStarted prop (fires on first `playing` event) +
+            NET_MAX=3 retry budget for fatal NETWORK_ERROR, after which onError
+            fires so the parent can swap to iframe.
+          - NovaStream + DaddyEmbedPage now run a 30-second watchdog: if HLS
+            playback hasn't actually started, setDaddyHls(null) → component
+            renders the IframePlayer with proxyPlayerUrl from chat.cfbu247.sbs.
+          - Manual verification with channel id 60 (upstream returns 502):
+            after 30s the iframe (https://chat.cfbu247.sbs/api/proxy/player?token=…)
+            is rendered automatically.
     implemented: true
     working: true
     file: "backend/extensions.py"
@@ -585,3 +667,56 @@ agent_communication:
       
       The technique from Wacewatch repo has been successfully replicated.
       Backend is production-ready for DaddyTV DLStream resolver.
+
+
+agent_communication:
+    -agent: "testing"
+    -message: |
+      ✅ FOOTBALL PROXY ENDPOINT RETESTING COMPLETE - ALL TESTS PASSED (19/19)
+      
+      Comprehensive test suite executed against https://live-sports-hub-78.preview.emergentagent.com
+      Created /app/backend_test_football_proxy.py with full validation coverage.
+      
+      Test Results Summary:
+      
+      1. ✅ Stream URL Extraction: GET /api/daddy/stream/35 returns stream_url containing /api/football/proxy?url=
+      
+      2. ✅ Master Playlist (m3u8):
+         - Status 200, Content-Type: application/vnd.apple.mpegurl
+         - Body starts with #EXTM3U
+         - Contains URLs pointing back to /api/football/proxy?url=...
+      
+      3. ✅ Variant Playlist:
+         - Status 200, Content-Type: application/vnd.apple.mpegurl
+         - Contains 6 segment URLs
+      
+      4. ✅ Segment Fetch:
+         - Status 200, Content-Type: video/mp2t (forced for DLStream hosts)
+         - Body starts with 0x47 (MPEG-TS sync byte)
+         - Segment size: 3.4 MB
+      
+      5. ✅ Range Request Support:
+         - Range: bytes=0-1023 returns 206 Partial Content
+         - Returns exactly 1024 bytes
+         - Response starts with 0x47
+      
+      6. ✅ CORS Headers: Access-Control-Allow-Origin: * present on all responses
+      
+      7. ✅ Bad Input Validation:
+         - GET /api/football/proxy (no url) → 400
+         - GET /api/football/proxy?url=foo://bar → 400
+      
+      8. ✅ Stress Test: 20 back-to-back requests all return 200 (completed in 0.59s)
+         - DLStream cache + proxy stability verified
+      
+      9. ✅ Offline Channel (id 60): Returns 502 with CORS headers (upstream offline as expected)
+      
+      The football proxy overhaul is working perfectly:
+      - Streaming mode (StreamingResponse) working correctly
+      - Chrome UA for DLStream hosts (cfbu247.sbs, zampledakis.shop)
+      - Range header forwarding for partial-segment fetches
+      - Content-Type: video/mp2t forced for segment hosts
+      - CORS headers exposed correctly
+      - Error handling (502 for upstream failures)
+      
+      All backend tasks are now working correctly. No critical issues found.

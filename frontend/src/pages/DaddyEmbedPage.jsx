@@ -23,6 +23,16 @@ export default function DaddyEmbedPage() {
   const [unlocked, setUnlocked] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [started, setStarted] = useState(false);
+
+  // 30-second watchdog: if HLS hasn't started playing within 30s, swap to iframe.
+  useEffect(() => {
+    if (!unlocked || !streamUrl || useIframe || started) return;
+    const t = setTimeout(() => {
+      if (iframeUrl) setUseIframe(true);
+    }, 30000);
+    return () => clearTimeout(t);
+  }, [unlocked, streamUrl, useIframe, started, iframeUrl]);
 
   // Fetch channel metadata
   useEffect(() => {
@@ -124,6 +134,7 @@ export default function DaddyEmbedPage() {
           onClose={() => {/* no close in embed */}}
           onRetry={handleRetry}
           onError={handleHlsError}
+          onStarted={() => setStarted(true)}
         />
       )}
 

@@ -79,6 +79,23 @@ export default function NovaStream() {
   // DaddyTV / Info — iframe overlay (no server picker)
   const [daddyActive, setDaddyActive] = useState(null); // { id, name, embed_url, m3u8? }
   const [daddyHls, setDaddyHls] = useState(null);       // optional proxied HLS
+  const [daddyStarted, setDaddyStarted] = useState(false); // HLS playback has started ≥ 1 frame
+
+  // ── DaddyTV HLS watchdog ──────────────────────────────────────────────
+  // If the HLS playback hasn't actually started within 30 seconds of opening
+  // the overlay, automatically switch to the iframe fallback (proxyPlayerUrl).
+  // Triggers also on a hard error (caught via onError below).
+  useEffect(() => {
+    if (!daddyActive || !daddyHls || daddyStarted) return;
+    const t = setTimeout(() => {
+      // Still waiting? Switch to iframe if we have one.
+      if ((daddyActive?.iframe_url || daddyActive?.embed_url)) {
+        setDaddyHls(null);
+        toast.info("HLS lent (>30s) — passage à l'iframe…");
+      }
+    }, 30000);
+    return () => clearTimeout(t);
+  }, [daddyActive, daddyHls, daddyStarted]);
 
   // Sports (streamed.pk) — iframe overlay with right-side picker for sources
   const [sportsOpen, setSportsOpen] = useState(null);
@@ -214,6 +231,7 @@ export default function NovaStream() {
       // iframe (proxyPlayerUrl from chat.cfbu247.sbs which is iframe-friendly)
       // when HLS is unavailable or fails on the client.
       setResolving(true);
+      setDaddyStarted(false);
       try {
         const r = await axios.get(`${API}/daddy/stream/${encodeURIComponent(ch.id)}`);
         const data = r.data || {};
@@ -596,7 +614,8 @@ export default function NovaStream() {
         <VideoPlayer
           channel={{ id: daddyActive.id, name: daddyActive.name, country_code: "daddy" }}
           streamUrl={daddyHls}
-          onClose={() => { setDaddyActive(null); setDaddyHls(null); }}
+          onClose={() => { setDaddyActive(null); setDaddyHls(null); setDaddyStarted(false); }}
+          onStarted={() => setDaddyStarted(true)}
           onError={() => {
             // HLS failed: switch to iframe fallback if available.
             if (daddyActive?.iframe_url || daddyActive?.embed_url) {
@@ -608,6 +627,7 @@ export default function NovaStream() {
             try {
               const r = await axios.get(`${API}/daddy/stream/${encodeURIComponent(daddyActive.id)}`);
               if (r.data?.stream_url) {
+                setDaddyStarted(false);
                 setDaddyHls(`${r.data.stream_url}&_t=${Date.now()}`);
               } else {
                 setDaddyHls(null); // fall back to iframe

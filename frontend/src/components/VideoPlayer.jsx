@@ -30,6 +30,7 @@ export default function VideoPlayer({
   onClose,
   onRetry,
   onError = null,
+  onStarted = null,
   // Optional: enable in-player server switching (Sports / Football).
   // servers: [{ id, name, stream_url, url? }]
   // activeServerId: currently selected id
@@ -113,12 +114,25 @@ export default function VideoPlayer({
         setCurrentLevel(data.level);
       });
 
+      // Track network errors so we can give up after a few retries and let the
+      // parent (DaddyTV) switch to iframe fallback.
+      let netErrors = 0;
+      const NET_MAX = 3;
+
       hls.on(Hls.Events.ERROR, (_e, data) => {
         if (destroyed) return;
         try {
           if (data.fatal) {
             if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-              try { hls.startLoad(); return; } catch (_err) { /* noop */ }
+              netErrors += 1;
+              if (netErrors <= NET_MAX) {
+                try { hls.startLoad(); return; } catch (_err) { /* noop */ }
+              }
+              // After NET_MAX retries → notify parent (iframe fallback path).
+              setError("Flux temporairement indisponible.");
+              setLoading(false);
+              try { onError && onError(data); } catch (_) { /* noop */ }
+              return;
             }
             if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
               try { hls.recoverMediaError(); return; } catch (_err) { /* noop */ }
@@ -172,7 +186,10 @@ export default function VideoPlayer({
     const onPlay = () => setIsPlaying(true);
     const onPause = () => setIsPlaying(false);
     const onWaiting = () => setLoading(true);
-    const onPlaying = () => setLoading(false);
+    const onPlaying = () => {
+      setLoading(false);
+      try { onStarted && onStarted(); } catch (_) { /* noop */ }
+    };
     v.addEventListener("play", onPlay);
     v.addEventListener("pause", onPause);
     v.addEventListener("waiting", onWaiting);
@@ -183,7 +200,7 @@ export default function VideoPlayer({
       v.removeEventListener("waiting", onWaiting);
       v.removeEventListener("playing", onPlaying);
     };
-  }, []);
+  }, [onStarted]);
 
   useEffect(() => {
     const handler = () => setIsFullscreen(!!document.fullscreenElement);
