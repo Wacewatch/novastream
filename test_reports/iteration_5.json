@@ -1,0 +1,44 @@
+{
+  "summary": "Iteration 5 validates the DaddyTV/Sports/Football refactor and the SPA tab container in NovaStream.jsx. Backend: 13/13 pytest cases pass — /api/daddy/channels returns 1018 channels with countries+categories+embed_url; /api/daddy/channel/116 returns beIN SPORTS (id=116, embed_url ok); /api/daddy/stream/116 returns a proxied URL through /api/football/proxy; /api/admin/daddy/{config,test} + PATCH all return 401 without bearer (auth gating intact); /api/sports/matches has total/sports/sportCounts/liveCount/events shape; /api/sports/info returns days; /api/football/matches returns 75+ matches with leagues+live_count and at least one match exposes has_servers; /api/football/streams?mid=<id> returns servers with stream_url pointing to /api/football/proxy. Frontend: SPA tab container works perfectly — switching TV/DaddyTV/Sports does NOT reload the page (URL stays at /). Header stays visible across tabs. TV button label is exactly 'TV' + 'Chaînes en direct' (no 'vavoo'). DaddyTV and Sports buttons have NO 'PUB' badge. No 'Direct • France' / '800-channel' phrases on page. Country dropdown + category pills render BELOW the hub buttons on TV tab via [data-testid='tv-controls']. Sports tab exposes 3 sub-tabs (Sports / Football Live / Informations). Football click correctly opens the AdUnlockModal (screenshot captured: 'Débloquer le direct' with 'Débloquer la chaîne (Pub 1)' + 'Annuler' buttons). No console errors during SPA navigation.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_daddy_sports_football.py",
+    "/app/test_reports/pytest/iter5_results.xml"
+  ],
+  "action_items": [
+    "OPTIONAL: Could not directly verify the in-player 'Serveur' kebab menu interaction (requires clicking through the 2-step Ad gate which opens an external publicité tab). The VideoPlayer.jsx prop wiring (servers / activeServerId / onSwitchServer) was confirmed by code review at NovaStream.jsx lines 631-646 and the parent state mutation in footballSwitchServer (line 262-264) does NOT clear the 'pending' state, so ad replay on server switch is structurally impossible. Main agent can self-verify by unlocking once and toggling the in-player Serveur menu.",
+    "OPTIONAL: Could not directly verify the /admin 'Configuration DaddyTV' section (no admin Supabase JWT seeded in this env; /admin redirects unauthenticated users to /login as confirmed in iteration_4). Backend admin endpoints are fully wired (401 verified). Main agent should self-test the admin section UI after logging in.",
+    "OPTIONAL: Info tab → DaddyTV resolution by id or name was wired up (InfoTab.jsx resolveChannel: byId then byName then fuzzy then /api/daddy/channel/{id} fallback). Live verification of a full click→ad→iframe flow not executed end-to-end (requires Ad unlock).",
+    "INFO: The upstream cfbu247.sbs m3u8 endpoint reportedly returns 502 (per main agent context). Our /api/daddy/stream proxy URL is correctly formed but the iframe path (embed_url) is the default playback path in NovaStream.jsx — this is the right fallback design."
+  ],
+  "critical_code_review_comments": [
+    "GOOD: Single AdUnlockModal at NovaStream.jsx line 562 (driven by `pending` state) — same modal is reused for all 5 kinds (tv/daddy/info/sports/football). Server/source switch handlers (sportsSwitchSource line 245, footballSwitchServer line 262) mutate ONLY the *Open state, never `pending`, so the ad CANNOT replay on server switch. Architecturally sound.",
+    "GOOD: VideoPlayer servers/activeServerId/onSwitchServer prop contract is consistent — NovaStream passes them only for football overlay (line 635-637).",
+    "GOOD: handlePickSports / handlePickFootball pre-fetch streams BEFORE the ad unlocks (set loading state in `pending`), so when the user clicks 'unlock', the player opens with the first server already chosen — no extra loading delay.",
+    "GOOD: extensions.py separates concerns nicely (daddy / sports / football / admin) and uses fresh+stale (FRESH_TTL=30min, STALE_TTL=24h) for the RapidAPI football cache with key rotation + auto-ban on 429/403 until UTC midnight.",
+    "GOOD: /api/football/proxy correctly rewrites internal m3u8 URLs to loop back through the proxy with mobile Safari UA — required because the RapidAPI upstream is UA-gated and lacks CORS.",
+    "MEDIUM: extensions.py is now 1371 lines — exceeds the 700-line guideline. Should split into daddy_router.py / sports_router.py / football_router.py / admin_router.py modules. Same MEDIUM comment carries from server.py.",
+    "MINOR: InfoTab fuzzy match uses `.find(([k]) => k.startsWith(lower) || lower.startsWith(k))` — could collide on short common prefixes (e.g., 'tf1' matches 'tf1 series films'). Acceptable as it's after exact byName lookup, but consider a length-difference threshold (e.g., abs(len(k)-len(lower)) <= 6).",
+    "MINOR: DaddyTab grouping uses fixed slice(0,24) per country with no overflow indicator beyond a 'Voir les N chaînes de X' button — fine UX. No issue.",
+    "MINOR: _make_match_id falls back to a custom DJB-like hash of home|away|ts — collision risk is very low but if the upstream ever returns null ids consistently the in-memory _fb_servers_by_mid index could grow unbounded. Consider an LRU cap.",
+    "MINOR: SportsPickerInline is hidden on `<md` viewports (className 'hidden md:flex') — on mobile the user cannot switch source/server inside the sports overlay. Worth surfacing on mobile via the IframePlayer header."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_daddy_sports_football.py (NEW — 13 pytest cases covering DaddyTV, DaddyTV admin auth gate, Sports, Football)"
+  ],
+  "success_rate": {"backend": "100% (13/13 pytest)", "frontend": "100% (14/14 SPA assertions + AdUnlockModal visually confirmed on football click)"},
+  "test_credentials": "No admin user available in /app/memory/test_credentials.md (file does not exist). Admin UI flows not directly executed.",
+  "seed_data_creation": "None.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Backend extension endpoints (DaddyTV+Sports+Football) are fully green from the public preview URL. The SPA refactor in NovaStream.jsx is solid — single state container, no route navigation, single AdUnlockModal driven by `pending` state, and per-overlay server/source switching that bypasses the ad gate by design. The only paths NOT directly exercised end-to-end are: (a) clicking 'Débloquer la chaîne' to open the publicité tab (would navigate away from preview), and (b) /admin DaddyTV configuration UI (admin JWT not seeded). Both have been validated structurally via code review and via the 401 path on the backend. Iteration 5 backend regression file: /app/backend/tests/test_daddy_sports_football.py (also retain test_admin_stats_modules.py and test_novastream_api.py for full coverage).",
+  "rca of the issue": "N/A — no regressions found."
+}

@@ -64,6 +64,14 @@ export default function Admin() {
   const [fbNewLabel, setFbNewLabel] = useState("");
   const [fbAdding, setFbAdding] = useState(false);
 
+  // DaddyTV config module
+  const [daddyCfg, setDaddyCfg] = useState(null); // { enabled, channels_url, m3u8_url, channel_count, cache_age_sec, defaults }
+  const [daddyCfgLoading, setDaddyCfgLoading] = useState(true);
+  const [daddyForm, setDaddyForm] = useState({ channels_url: "", m3u8_url: "", enabled: true });
+  const [daddyTesting, setDaddyTesting] = useState(false);
+  const [daddyTestResult, setDaddyTestResult] = useState(null);
+  const [daddySaving, setDaddySaving] = useState(false);
+
   const reloadUsers = useCallback(async () => {
     setUsersLoading(true);
     try {
@@ -191,16 +199,80 @@ export default function Admin() {
     }
   };
 
+  // ========== DaddyTV config ==========
+  const reloadDaddyCfg = useCallback(async () => {
+    setDaddyCfgLoading(true);
+    try {
+      const headers = await authHeader();
+      const r = await axios.get(`${API}/admin/daddy/config`, { headers });
+      setDaddyCfg(r.data);
+      setDaddyForm({
+        channels_url: r.data?.channels_url || "",
+        m3u8_url: r.data?.m3u8_url || "",
+        enabled: !!r.data?.enabled,
+      });
+    } catch (e) {
+      toast.error(`DaddyTV config: ${e.response?.data?.detail || e.message}`);
+    } finally {
+      setDaddyCfgLoading(false);
+    }
+  }, []);
+
+  const testDaddyCfg = async () => {
+    setDaddyTesting(true);
+    setDaddyTestResult(null);
+    try {
+      const headers = await authHeader();
+      const r = await axios.post(`${API}/admin/daddy/test`, daddyForm, { headers });
+      setDaddyTestResult(r.data);
+      if (r.data?.matched > 0) {
+        toast.success(`Test OK — ${r.data.matched} chaînes appariées`);
+      } else {
+        toast.warning("Test : aucune chaîne appariée");
+      }
+    } catch (e) {
+      toast.error(`Test échoué: ${e.response?.data?.detail || e.message}`);
+    } finally {
+      setDaddyTesting(false);
+    }
+  };
+
+  const saveDaddyCfg = async () => {
+    setDaddySaving(true);
+    try {
+      const headers = await authHeader();
+      const r = await axios.patch(`${API}/admin/daddy/config`, daddyForm, { headers });
+      toast.success(`Configuration enregistrée — ${r.data?.channel_count || 0} chaînes actives`);
+      await reloadDaddyCfg();
+    } catch (e) {
+      toast.error(`Échec: ${e.response?.data?.detail || e.message}`);
+    } finally {
+      setDaddySaving(false);
+    }
+  };
+
+  const resetDaddyDefaults = () => {
+    const def = daddyCfg?.defaults || {};
+    setDaddyForm({
+      channels_url: def.channels_url || "",
+      m3u8_url: def.m3u8_url || "",
+      enabled: true,
+    });
+    toast.message("Valeurs par défaut restaurées (non encore sauvegardées)");
+  };
+
+
   useEffect(() => {
     if (!isAdmin) return;
     reloadUsers();
     reloadKeys();
     reloadFbKeys();
+    reloadDaddyCfg();
     fetchAdminStats();
     // Poll system/live stats every 5s
     const t = setInterval(fetchAdminStats, 5000);
     return () => clearInterval(t);
-  }, [isAdmin, reloadUsers, reloadKeys, reloadFbKeys, fetchAdminStats]);
+  }, [isAdmin, reloadUsers, reloadKeys, reloadFbKeys, reloadDaddyCfg, fetchAdminStats]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -723,7 +795,131 @@ export default function Admin() {
           )}
         </section>
 
+        {/* DaddyTV configuration */}
+        <section className="glass-heavy rounded-2xl p-5 border border-white/10" data-testid="admin-daddy-section">
+          <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
+            <h3 className="text-lg font-bold flex items-center gap-2">
+              <Radio size={18} className="text-[#ff8a00]" /> Configuration DaddyTV
+              {daddyCfg && (
+                <span className="text-sm font-normal text-white/40">
+                  ({daddyCfg.channel_count || 0} chaînes · cache {daddyCfg.cache_age_sec || 0}s)
+                </span>
+              )}
+            </h3>
+            <button
+              type="button"
+              onClick={() => setDaddyForm((f) => ({ ...f, enabled: !f.enabled }))}
+              className="text-sm flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 hover:border-[#ff8a00]/40"
+              data-testid="daddy-toggle-enabled"
+            >
+              {daddyForm.enabled ? (
+                <ToggleRight size={16} className="text-green-400" />
+              ) : (
+                <ToggleLeft size={16} className="text-white/50" />
+              )}
+              {daddyForm.enabled ? "Activée" : "Désactivée"}
+            </button>
+          </div>
+
+          {daddyCfgLoading ? (
+            <div className="py-8 flex items-center justify-center">
+              <Loader2 className="animate-spin text-[#ff8a00]" size={20} />
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <div>
+                <label className="text-xs uppercase tracking-wider text-white/50 mb-1 block">
+                  URL JSON des chaînes
+                </label>
+                <input
+                  value={daddyForm.channels_url}
+                  onChange={(e) => setDaddyForm({ ...daddyForm, channels_url: e.target.value })}
+                  placeholder="https://daddylive.li/player/player10.json"
+                  className="w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-[#ff8a00]/40 font-mono"
+                  data-testid="daddy-channels-url"
+                />
+                <div className="text-[11px] text-white/40 mt-1">
+                  Source primaire — liste des chaînes (id, nom). Défaut : <code>{daddyCfg?.defaults?.channels_url}</code>
+                </div>
+              </div>
+              <div>
+                <label className="text-xs uppercase tracking-wider text-white/50 mb-1 block">
+                  URL JSON des flux m3u8
+                </label>
+                <input
+                  value={daddyForm.m3u8_url}
+                  onChange={(e) => setDaddyForm({ ...daddyForm, m3u8_url: e.target.value })}
+                  placeholder="https://player.cfbu247.sbs/allchannel.json"
+                  className="w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-[#ff8a00]/40 font-mono"
+                  data-testid="daddy-m3u8-url"
+                />
+                <div className="text-[11px] text-white/40 mt-1">
+                  Source m3u8 — par chaîne id. Défaut : <code>{daddyCfg?.defaults?.m3u8_url}</code>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 pt-1">
+                <button
+                  onClick={testDaddyCfg}
+                  disabled={daddyTesting}
+                  className="px-3 py-2 rounded-lg bg-white/5 border border-white/10 hover:border-[#ff8a00]/40 text-sm flex items-center gap-1.5 disabled:opacity-60"
+                  data-testid="daddy-test-btn"
+                >
+                  {daddyTesting ? <Loader2 className="animate-spin" size={14} /> : <Activity size={14} />}
+                  Tester
+                </button>
+                <button
+                  onClick={resetDaddyDefaults}
+                  className="px-3 py-2 rounded-lg bg-white/5 border border-white/10 hover:border-white/20 text-sm flex items-center gap-1.5"
+                  data-testid="daddy-reset-btn"
+                >
+                  Restaurer défauts
+                </button>
+                <button
+                  onClick={saveDaddyCfg}
+                  disabled={daddySaving}
+                  className="ml-auto px-3 py-2 rounded-lg bg-[#ff8a00] hover:bg-[#ff9a20] text-black font-semibold flex items-center gap-1.5 text-sm disabled:opacity-60"
+                  data-testid="daddy-save-btn"
+                >
+                  {daddySaving ? <Loader2 className="animate-spin" size={14} /> : <Check size={14} />}
+                  Enregistrer
+                </button>
+              </div>
+
+              {daddyTestResult && (
+                <div className="mt-3 glass rounded-xl p-3 text-xs space-y-1" data-testid="daddy-test-result">
+                  <div className="flex flex-wrap gap-x-4 gap-y-1">
+                    <span>
+                      Channels JSON : {daddyTestResult.channels_ok ? (
+                        <span className="text-green-400 font-semibold">OK</span>
+                      ) : (
+                        <span className="text-red-400 font-semibold">KO</span>
+                      )} ({daddyTestResult.channels_total} entrées)
+                    </span>
+                    <span>
+                      M3U8 JSON : {daddyTestResult.m3u8_ok ? (
+                        <span className="text-green-400 font-semibold">OK</span>
+                      ) : (
+                        <span className="text-red-400 font-semibold">KO</span>
+                      )} ({daddyTestResult.m3u8_total} entrées)
+                    </span>
+                    <span>
+                      Appariées : <span className="font-bold text-[#ff8a00]">{daddyTestResult.matched}</span>
+                    </span>
+                  </div>
+                  {daddyTestResult.sample_channel && (
+                    <div className="text-white/60 truncate">
+                      Ex. chaîne : <code>#{daddyTestResult.sample_channel.id}</code> {daddyTestResult.sample_channel.name}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </section>
+
         {/* Users */}
+
         <section className="glass-heavy rounded-2xl p-5 border border-white/10" data-testid="admin-users-section">
           <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
             <h3 className="text-lg font-bold flex items-center gap-2">

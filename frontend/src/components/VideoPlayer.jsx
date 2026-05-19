@@ -17,13 +17,27 @@ import {
   PictureInPicture2,
   Link as LinkIcon,
   Wand2,
+  Server,
 } from "lucide-react";
 import { toast } from "sonner";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const LOGO_URL = "https://i.imgur.com/V8YmT4z.png";
 
-export default function VideoPlayer({ channel, streamUrl, onClose, onRetry }) {
+export default function VideoPlayer({
+  channel,
+  streamUrl,
+  onClose,
+  onRetry,
+  // Optional: enable in-player server switching (Sports / Football).
+  // servers: [{ id, name, stream_url, url? }]
+  // activeServerId: currently selected id
+  // onSwitchServer: (server) => void — parent updates streamUrl WITHOUT
+  // re-running the ad modal so users can flip servers freely.
+  servers = [],
+  activeServerId = null,
+  onSwitchServer = null,
+}) {
   const videoRef = useRef(null);
   const hlsRef = useRef(null);
   const containerRef = useRef(null);
@@ -41,7 +55,7 @@ export default function VideoPlayer({ channel, streamUrl, onClose, onRetry }) {
 
   // Menu state
   const [menuOpen, setMenuOpen] = useState(false);
-  const [menuView, setMenuView] = useState("root"); // root | quality
+  const [menuView, setMenuView] = useState("root"); // root | quality | servers
   const [qualityLevels, setQualityLevels] = useState([]); // HLS levels
   const [currentLevel, setCurrentLevel] = useState(-1);   // -1 = auto
 
@@ -392,6 +406,23 @@ export default function VideoPlayer({ channel, streamUrl, onClose, onRetry }) {
                 <div className="player-menu" data-testid="video-menu">
                   {menuView === "root" && (
                     <>
+                      {servers && servers.length > 1 && (
+                        <button
+                          className="menu-item"
+                          onClick={() => setMenuView("servers")}
+                          data-testid="menu-servers"
+                        >
+                          <span className="flex items-center gap-2">
+                            <Server size={16} />
+                            Serveur
+                          </span>
+                          <span className="menu-value">
+                            {(servers.find((s) => s.id === activeServerId)?.name) || "—"}
+                            <ChevronRight size={14} />
+                          </span>
+                        </button>
+                      )}
+
                       {qualityLevels.length > 1 && (
                         <button
                           className="menu-item"
@@ -441,6 +472,30 @@ export default function VideoPlayer({ channel, streamUrl, onClose, onRetry }) {
                           Copier l'URL embed
                         </span>
                       </button>
+                    </>
+                  )}
+
+                  {menuView === "servers" && (
+                    <>
+                      <button className="menu-back" onClick={() => setMenuView("root")} data-testid="servers-back">
+                        <ChevronLeft size={14} />
+                        Serveur
+                      </button>
+                      {(servers || []).map((srv) => (
+                        <button
+                          key={srv.id}
+                          className={`menu-radio ${activeServerId === srv.id ? "active" : ""}`}
+                          onClick={() => {
+                            onSwitchServer?.(srv);
+                            setMenuOpen(false);
+                            setMenuView("root");
+                          }}
+                          data-testid={`server-${srv.id}`}
+                        >
+                          {srv.name}
+                          {activeServerId === srv.id && <Check size={14} className="check" />}
+                        </button>
+                      ))}
                     </>
                   )}
 

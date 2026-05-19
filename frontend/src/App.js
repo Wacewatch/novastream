@@ -1,6 +1,6 @@
 import "@/App.css";
 import React from "react";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import NovaStream from "@/pages/NovaStream";
 import EmbedPage from "@/pages/EmbedPage";
 import ApiDocs from "@/pages/ApiDocs";
@@ -8,8 +8,6 @@ import MultiView from "@/pages/MultiView";
 import Login from "@/pages/Login";
 import Dashboard from "@/pages/Dashboard";
 import Admin from "@/pages/Admin";
-import DaddyTV from "@/pages/DaddyTV";
-import Sports from "@/pages/Sports";
 import { AuthProvider } from "@/context/AuthContext";
 import { FavoritesProvider } from "@/hooks/useFavorites";
 import { Toaster } from "sonner";
@@ -28,8 +26,9 @@ function App() {
               <Route path="/login" element={<Login />} />
               <Route path="/dashboard" element={<Dashboard />} />
               <Route path="/admin" element={<Admin />} />
-              <Route path="/daddy" element={<DaddyTV />} />
-              <Route path="/sports" element={<Sports />} />
+              {/* DaddyTV & Sports are now tabs inside NovaStream; legacy URLs redirect home */}
+              <Route path="/daddy" element={<Navigate to="/" replace />} />
+              <Route path="/sports" element={<Navigate to="/" replace />} />
             </Routes>
           </BrowserRouter>
           <Toaster theme="dark" position="bottom-right" />
