@@ -10,19 +10,22 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import quote, urlparse
 
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Query, Request
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from daddy_channels import (
-    DADDY_CHANNELS,
-    DADDY_BY_ID,
-    DADDY_CATEGORIES,
-    DADDY_COUNTRIES,
+    DADDY_CHANNELS as DADDY_STATIC_CHANNELS,
+    DADDY_BY_ID as DADDY_STATIC_BY_ID,
+    DADDY_CATEGORIES as DADDY_STATIC_CATEGORIES,
+    DADDY_COUNTRIES as DADDY_STATIC_COUNTRIES,
     daddy_embed_url,
 )
 
@@ -34,15 +37,17 @@ _get_http_client = None  # type: ignore
 _supabase_query = None  # type: ignore
 _require_admin = None   # type: ignore
 _extract_bearer = None  # type: ignore
+_db = None  # type: ignore  # Motor db
 
 
-def init_extensions(*, get_http_client, supabase_query, require_admin, extract_bearer):
+def init_extensions(*, get_http_client, supabase_query, require_admin, extract_bearer, db):
     """Wire helpers from server.py into the extensions module."""
-    global _get_http_client, _supabase_query, _require_admin, _extract_bearer
+    global _get_http_client, _supabase_query, _require_admin, _extract_bearer, _db
     _get_http_client = get_http_client
     _supabase_query = supabase_query
     _require_admin = require_admin
     _extract_bearer = extract_bearer
+    _db = db
 
 
 # A separate router that server.py will include into its existing api_router.
@@ -50,8 +55,221 @@ ext_router = APIRouter()
 
 
 # =====================================================================
-# DaddyTV
+# DaddyTV — dynamic version
+# Channels list + m3u8 list are fetched from external JSON URLs configurable
+# in the admin module (collection: app_config, doc _id="daddy"). Matched by id.
 # =====================================================================
+DADDY_DEFAULTS = {
+    "enabled": True,
+    "channels_url": "https://daddylive.li/player/player10.json",
+    "m3u8_url": "https://player.cfbu247.sbs/allchannel.json",
+}
+
+# Categorization fallback (we don't have country/category info in the external JSONs).
+from daddy_channels import _categorize as _daddy_categorize  # noqa: E402
+
+_daddy_cache: Dict[str, Any] = {"ts": 0.0, "channels": [], "by_id": {}}
+DADDY_TTL = 5 * 60.0  # 5 min
+
+
+async def _get_daddy_config() -> Dict[str, Any]:
+    if _db is None:
+        return dict(DADDY_DEFAULTS)
+    doc = await _db.app_config.find_one({"_id": "daddy"})
+    if not doc:
+        return dict(DADDY_DEFAULTS)
+    return {
+        "enabled": bool(doc.get("enabled", True)),
+        "channels_url": (doc.get("channels_url") or DADDY_DEFAULTS["channels_url"]).strip(),
+        "m3u8_url": (doc.get("m3u8_url") or DADDY_DEFAULTS["m3u8_url"]).strip(),
+    }
+
+
+async def _save_daddy_config(patch: Dict[str, Any]) -> Dict[str, Any]:
+    cfg = await _get_daddy_config()
+    cfg.update({k: v for k, v in patch.items() if k in {"enabled", "channels_url", "m3u8_url"}})
+    if _db is not None:
+        await _db.app_config.update_one(
+            {"_id": "daddy"},
+            {"$set": cfg, "$currentDate": {"updated_at": True}},
+            upsert=True,
+        )
+    # Reset cache so next call refetches
+    _daddy_cache["ts"] = 0.0
+    return cfg
+
+
+def _normalize_id(v: Any) -> str:
+    return str(v).strip() if v is not None else ""
+
+
+def _extract_channel_rows(raw: Any) -> List[Dict[str, Any]]:
+    """Accepts livewatch [{name, id, url}] OR simpler [{id, title}] formats."""
+    if isinstance(raw, dict):
+        for k in ("channels", "data", "items", "list"):
+            if isinstance(raw.get(k), list):
+                raw = raw[k]
+                break
+    if not isinstance(raw, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    for row in raw:
+        if not isinstance(row, dict):
+            continue
+        cid = _normalize_id(row.get("id") or row.get("channel_id") or row.get("ID"))
+        name = (row.get("title") or row.get("name") or row.get("channel_name") or "").strip()
+        if not name:
+            continue
+        # Extract id from URL if missing (livewatch format: /stream-12345.php)
+        if not cid:
+            url = row.get("url") or row.get("link") or ""
+            m = re.search(r"(\d+)", str(url))
+            if m:
+                cid = m.group(1)
+        if not cid:
+            continue
+        out.append({"id": cid, "name": name})
+    return out
+
+
+def _extract_m3u8_rows(raw: Any) -> Dict[str, str]:
+    """Accepts [{id, m3u8_link}] OR [{id, url}] OR {id: url} formats."""
+    if isinstance(raw, dict):
+        # Inner list?
+        for k in ("channels", "data", "items", "list"):
+            if isinstance(raw.get(k), list):
+                raw = raw[k]
+                break
+        else:
+            # Object form: {id: link}
+            if all(isinstance(v, str) for v in raw.values()):
+                return {_normalize_id(k): v for k, v in raw.items() if v}
+    if not isinstance(raw, list):
+        return {}
+    out: Dict[str, str] = {}
+    for row in raw:
+        if not isinstance(row, dict):
+            continue
+        cid = _normalize_id(row.get("id") or row.get("channel_id"))
+        link = (
+            row.get("m3u8_link") or row.get("m3u8") or row.get("link") or row.get("url") or ""
+        ).strip()
+        if cid and link:
+            out[cid] = link
+    return out
+
+
+async def _refresh_daddy_catalog(force: bool = False) -> None:
+    now = time.time()
+    if not force and _daddy_cache["channels"] and (now - _daddy_cache["ts"] < DADDY_TTL):
+        return
+    cfg = await _get_daddy_config()
+    if not cfg["enabled"]:
+        _daddy_cache["channels"] = []
+        _daddy_cache["by_id"] = {}
+        _daddy_cache["ts"] = now
+        return
+    ch_raw = None
+    m_raw = None
+    try:
+        if cfg["channels_url"]:
+            ch_raw = await _fetch_json(cfg["channels_url"], timeout=20.0)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("daddy channels fetch failed: %s", e)
+    try:
+        if cfg["m3u8_url"]:
+            m_raw = await _fetch_json(cfg["m3u8_url"], timeout=20.0)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("daddy m3u8 fetch failed: %s", e)
+
+    dyn_rows = _extract_channel_rows(ch_raw) if ch_raw is not None else []
+    m3u8_map = _extract_m3u8_rows(m_raw) if m_raw is not None else {}
+
+    # Build a name → real numeric id lookup from our static catalog.
+    name_to_id: Dict[str, str] = {}
+    for c in DADDY_STATIC_CHANNELS:
+        name_to_id[c["name"].lower().strip()] = c["id"]
+
+    # If the external channels JSON ids are sequential (0,1,2…) we ignore them
+    # and match by NAME against the static catalog to get the real daddylive id.
+    def _resolve_real_id(row: Dict[str, Any]) -> Optional[str]:
+        rid = _normalize_id(row.get("id"))
+        # If the row id is already a "real" daddylive id (matches an m3u8 entry), keep it.
+        if rid and rid in m3u8_map:
+            return rid
+        # Else look up by lowercase name.
+        nid = name_to_id.get(row["name"].lower().strip())
+        if nid:
+            return nid
+        # Fallback to numeric extraction from URL.
+        return rid or None
+
+    enriched: List[Dict[str, Any]] = []
+    seen_ids: set = set()
+    if dyn_rows:
+        for r in dyn_rows:
+            real_id = _resolve_real_id(r)
+            if not real_id:
+                continue
+            m3u8 = m3u8_map.get(real_id)
+            if not m3u8:
+                continue
+            if real_id in seen_ids:
+                continue
+            seen_ids.add(real_id)
+            meta = _daddy_categorize(r["name"])
+            enriched.append({
+                "id": real_id,
+                "name": r["name"],
+                "category": meta["category"],
+                "country": meta["country"],
+                "m3u8": m3u8,
+                "embed_url": daddy_embed_url(real_id),
+            })
+
+    # Fallback: also include any static-catalog channel that has a m3u8 entry
+    # but wasn't returned by the external channels JSON.
+    for c in DADDY_STATIC_CHANNELS:
+        if c["id"] in seen_ids:
+            continue
+        m3u8 = m3u8_map.get(c["id"])
+        if not m3u8:
+            continue
+        seen_ids.add(c["id"])
+        enriched.append({
+            "id": c["id"],
+            "name": c["name"],
+            "category": c["category"],
+            "country": c["country"],
+            "m3u8": m3u8,
+            "embed_url": daddy_embed_url(c["id"]),
+        })
+
+    # Sort by country then name (stable, predictable)
+    enriched.sort(key=lambda x: (x["country"], x["name"].lower()))
+
+    _daddy_cache["channels"] = enriched
+    _daddy_cache["by_id"] = {c["id"]: c for c in enriched}
+    _daddy_cache["ts"] = now
+
+
+async def _daddy_catalog() -> List[Dict[str, Any]]:
+    await _refresh_daddy_catalog()
+    return _daddy_cache["channels"]
+
+
+async def _daddy_meta() -> Dict[str, List[str]]:
+    items = await _daddy_catalog()
+    return {
+        "countries": sorted({c["country"] for c in items}),
+        "categories": sorted({c["category"] for c in items}),
+    }
+
+
+def _daddy_503(detail: str = "DaddyTV désactivé") -> HTTPException:
+    return HTTPException(status_code=503, detail=detail)
+
+
 @ext_router.get("/daddy/channels")
 async def daddy_list_channels(
     search: str = Query("", description="Name substring"),
@@ -59,42 +277,143 @@ async def daddy_list_channels(
     category: str = Query("", description="Filter by category"),
     limit: int = Query(0, ge=0, le=2000, description="0 = no limit"),
 ):
-    """List DaddyTV channels with optional filters."""
+    cfg = await _get_daddy_config()
+    if not cfg["enabled"]:
+        raise _daddy_503()
+    items = await _daddy_catalog()
     s = search.strip().lower()
     out: List[Dict[str, Any]] = []
-    for c in DADDY_CHANNELS:
+    for c in items:
         if country and c["country"] != country:
             continue
         if category and c["category"] != category:
             continue
         if s and s not in c["name"].lower():
             continue
-        out.append({**c, "embed_url": daddy_embed_url(c["id"])})
+        out.append({
+            "id": c["id"],
+            "name": c["name"],
+            "country": c["country"],
+            "category": c["category"],
+            "embed_url": c["embed_url"],
+        })
     if limit > 0:
         out = out[:limit]
+    meta = await _daddy_meta()
     return {
         "total": len(out),
-        "countries": DADDY_COUNTRIES,
-        "categories": DADDY_CATEGORIES,
+        "countries": meta["countries"],
+        "categories": meta["categories"],
         "channels": out,
     }
 
 
 @ext_router.get("/daddy/channel/{channel_id}")
 async def daddy_get_channel(channel_id: str):
-    c = DADDY_BY_ID.get(str(channel_id))
+    cfg = await _get_daddy_config()
+    if not cfg["enabled"]:
+        raise _daddy_503()
+    await _refresh_daddy_catalog()
+    c = _daddy_cache["by_id"].get(str(channel_id).strip())
     if not c:
         raise HTTPException(status_code=404, detail="Chaîne DaddyTV introuvable")
-    return {**c, "embed_url": daddy_embed_url(c["id"])}
+    return {
+        "id": c["id"],
+        "name": c["name"],
+        "country": c["country"],
+        "category": c["category"],
+        "embed_url": c["embed_url"],
+    }
 
 
 @ext_router.get("/daddy/embed/{channel_id}")
 async def daddy_embed(channel_id: str):
-    """Returns the embed URL to use as iframe src (no direct stream extraction).
-    The frontend then iframes ``daddylive.li/embed/...`` directly."""
-    if str(channel_id) not in DADDY_BY_ID:
+    cfg = await _get_daddy_config()
+    if not cfg["enabled"]:
+        raise _daddy_503()
+    await _refresh_daddy_catalog()
+    if str(channel_id).strip() not in _daddy_cache["by_id"]:
         raise HTTPException(status_code=404, detail="Chaîne DaddyTV introuvable")
     return {"id": channel_id, "embed_url": daddy_embed_url(channel_id)}
+
+
+@ext_router.get("/daddy/stream/{channel_id}")
+async def daddy_stream(channel_id: str, request: Request):
+    """Returns the internal HLS-proxied URL for the channel m3u8 (used by the
+    in-app VideoPlayer). Not exposed publicly — public API still uses embed_url.
+    """
+    cfg = await _get_daddy_config()
+    if not cfg["enabled"]:
+        raise _daddy_503()
+    await _refresh_daddy_catalog()
+    c = _daddy_cache["by_id"].get(str(channel_id).strip())
+    if not c:
+        raise HTTPException(status_code=404, detail="Chaîne DaddyTV introuvable")
+    base = _public_base(request)
+    proxied = f"{base}/api/football/proxy?url={quote(c['m3u8'], safe='')}"
+    return {
+        "id": c["id"],
+        "name": c["name"],
+        "stream_url": proxied,
+        "embed_url": c["embed_url"],
+    }
+
+
+# Admin: Daddy config
+class DaddyConfigPatch(BaseModel):
+    enabled: Optional[bool] = None
+    channels_url: Optional[str] = Field(None, max_length=500)
+    m3u8_url: Optional[str] = Field(None, max_length=500)
+
+
+@ext_router.get("/admin/daddy/config")
+async def admin_daddy_get(authorization: Optional[str] = Header(None)):
+    jwt = _extract_bearer(authorization)
+    await _require_admin(jwt)
+    cfg = await _get_daddy_config()
+    items = await _daddy_catalog()
+    return {
+        **cfg,
+        "defaults": DADDY_DEFAULTS,
+        "channel_count": len(items),
+        "cache_age_sec": int(time.time() - (_daddy_cache.get("ts") or 0)),
+    }
+
+
+@ext_router.patch("/admin/daddy/config")
+async def admin_daddy_patch(body: DaddyConfigPatch, authorization: Optional[str] = Header(None)):
+    jwt = _extract_bearer(authorization)
+    await _require_admin(jwt)
+    patch = {k: v for k, v in body.model_dump(exclude_none=True).items()}
+    cfg = await _save_daddy_config(patch)
+    await _refresh_daddy_catalog(force=True)
+    items = _daddy_cache["channels"]
+    return {"success": True, **cfg, "channel_count": len(items)}
+
+
+@ext_router.post("/admin/daddy/test")
+async def admin_daddy_test(body: DaddyConfigPatch, authorization: Optional[str] = Header(None)):
+    jwt = _extract_bearer(authorization)
+    await _require_admin(jwt)
+    cfg = await _get_daddy_config()
+    cu = (body.channels_url or cfg["channels_url"]).strip()
+    mu = (body.m3u8_url or cfg["m3u8_url"]).strip()
+    ch_raw = await _fetch_json(cu, timeout=20.0)
+    m_raw = await _fetch_json(mu, timeout=20.0)
+    ch_rows = _extract_channel_rows(ch_raw) if ch_raw is not None else []
+    m_map = _extract_m3u8_rows(m_raw) if m_raw is not None else {}
+    matched = sum(1 for r in ch_rows if r["id"] in m_map)
+    return {
+        "channels_url": cu,
+        "m3u8_url": mu,
+        "channels_ok": ch_raw is not None,
+        "m3u8_ok": m_raw is not None,
+        "channels_total": len(ch_rows),
+        "m3u8_total": len(m_map),
+        "matched": matched,
+        "sample_channel": ch_rows[0] if ch_rows else None,
+        "sample_m3u8": (list(m_map.items())[0] if m_map else None),
+    }
 
 
 # =====================================================================
@@ -743,15 +1062,12 @@ _FB_PROXY_UA = (
 
 
 def _proxify_fb(base: str, abs_url: str) -> str:
-    from urllib.parse import quote
     return f"{base}/api/football/proxy?url={quote(abs_url, safe='')}"
 
 
 @ext_router.get("/football/proxy")
 async def football_proxy(request: Request, url: str = Query("")):
-    from fastapi.responses import Response, StreamingResponse
-    from urllib.parse import urlparse
-    import re
+    from fastapi.responses import StreamingResponse  # noqa: F401
 
     if not url:
         return Response("Missing url", status_code=400)
@@ -963,53 +1279,78 @@ async def public_daddy_channels(
     category: str = "",
     limit: int = 0,
 ):
+    cfg = await _get_daddy_config()
+    if not cfg["enabled"]:
+        return {"total": 0, "countries": [], "categories": [], "channels": []}
+    items = await _daddy_catalog()
     s = (search or "").strip().lower()
     out: List[Dict[str, Any]] = []
-    for c in DADDY_CHANNELS:
+    for c in items:
         if country and c["country"] != country:
             continue
         if category and c["category"] != category:
             continue
         if s and s not in c["name"].lower():
             continue
-        out.append({**c, "embed_url": daddy_embed_url(c["id"])})
+        out.append({
+            "id": c["id"],
+            "name": c["name"],
+            "country": c["country"],
+            "category": c["category"],
+            "embed_url": c["embed_url"],
+        })
     if limit and limit > 0:
         out = out[: max(0, min(limit, 2000))]
+    meta = await _daddy_meta()
     return {
         "total": len(out),
-        "countries": DADDY_COUNTRIES,
-        "categories": DADDY_CATEGORIES,
+        "countries": meta["countries"],
+        "categories": meta["categories"],
         "channels": out,
     }
 
 
 @ext_router.get("/v1/public/daddy/channel/{channel_id}")
 async def public_daddy_channel(channel_id: str):
-    c = DADDY_BY_ID.get(str(channel_id))
+    cfg = await _get_daddy_config()
+    if not cfg["enabled"]:
+        raise HTTPException(status_code=503, detail="DaddyTV désactivé")
+    await _refresh_daddy_catalog()
+    c = _daddy_cache["by_id"].get(str(channel_id).strip())
     if not c:
         raise HTTPException(status_code=404, detail="Chaîne DaddyTV introuvable")
-    return {**c, "embed_url": daddy_embed_url(c["id"])}
+    return {
+        "id": c["id"],
+        "name": c["name"],
+        "country": c["country"],
+        "category": c["category"],
+        "embed_url": c["embed_url"],
+    }
 
 
 @ext_router.get("/v1/public/daddy/countries")
 async def public_daddy_countries():
+    items = await _daddy_catalog()
     counts: Dict[str, int] = {}
-    for c in DADDY_CHANNELS:
+    for c in items:
         counts[c["country"]] = counts.get(c["country"], 0) + 1
+    countries = sorted(counts.keys())
     return {
-        "total": len(DADDY_COUNTRIES),
-        "countries": [{"country": k, "count": counts[k]} for k in DADDY_COUNTRIES],
+        "total": len(countries),
+        "countries": [{"country": k, "count": counts[k]} for k in countries],
     }
 
 
 @ext_router.get("/v1/public/daddy/categories")
 async def public_daddy_categories():
+    items = await _daddy_catalog()
     counts: Dict[str, int] = {}
-    for c in DADDY_CHANNELS:
+    for c in items:
         counts[c["category"]] = counts.get(c["category"], 0) + 1
+    cats = sorted(counts.keys())
     return {
-        "total": len(DADDY_CATEGORIES),
-        "categories": [{"category": k, "count": counts[k]} for k in DADDY_CATEGORIES],
+        "total": len(cats),
+        "categories": [{"category": k, "count": counts[k]} for k in cats],
     }
 
 

@@ -571,7 +571,7 @@ async def list_channels(
     country: Optional[str] = Query(None),
     category: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
-    limit: int = Query(500, ge=1, le=2000),
+    limit: int = Query(0, ge=0, le=10000, description="0 = no limit"),
 ):
     channels = await get_channels()
     out = channels
@@ -585,6 +585,7 @@ async def list_channels(
         out = [c for c in out if s in c["name"].lower()]
     stats = await _compute_stats()
     per_ch = stats.get("per_channel", {})
+    sliced = out if limit == 0 else out[:limit]
     cleaned = [{
         "id": c["id"],
         "name": c["name"],
@@ -594,7 +595,7 @@ async def list_channels(
         "country": c["country"],
         "categories": c["categories"],
         "viewers": per_ch.get(c["id"], 0),
-    } for c in out[:limit]]
+    } for c in sliced]
     return {"total": len(cleaned), "channels": cleaned}
 
 @api_router.get("/stats")
@@ -1264,6 +1265,7 @@ init_extensions(
     supabase_query=_supabase_query,
     require_admin=_require_admin,
     extract_bearer=_extract_bearer,
+    db=db,
 )
 api_router.include_router(ext_router)
 

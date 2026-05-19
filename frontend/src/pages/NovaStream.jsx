@@ -126,7 +126,7 @@ export default function NovaStream() {
     (async () => {
       setLoading(true);
       try {
-        const params = { country, limit: 800 };
+        const params = { country, limit: 0 };
         if (category && category !== "Tous") params.category = category;
         if (search.trim()) params.search = search.trim();
         const r = await axios.get(`${API}/channels`, { params, signal: ctrl.signal });
