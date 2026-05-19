@@ -928,3 +928,211 @@
 .fav-btn.is-fav:hover {
   background: rgba(255, 46, 99, 0.3);
 }
+
+/* ===== Hub cards (TV / DaddyTV / Sports) ===== */
+.hub-card {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  padding: 0.95rem 1.05rem;
+  border-radius: 1rem;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  text-decoration: none;
+  transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease, box-shadow 0.18s ease;
+  backdrop-filter: blur(8px);
+  position: relative;
+}
+.hub-card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(255, 46, 99, 0.45);
+  background: rgba(255, 46, 99, 0.06);
+  box-shadow: 0 10px 30px -10px rgba(255, 46, 99, 0.25);
+}
+.hub-icon {
+  width: 46px;
+  height: 46px;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  box-shadow: 0 6px 18px -6px rgba(0, 0, 0, 0.5);
+  flex-shrink: 0;
+}
+.hub-chev {
+  color: rgba(255, 255, 255, 0.35);
+  font-size: 1.6rem;
+  font-weight: 300;
+  line-height: 1;
+  transition: transform 0.18s ease, color 0.18s ease;
+}
+.hub-card:hover .hub-chev {
+  color: #ff2e63;
+  transform: translateX(4px);
+}
+.badge-pub {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #facc15, #eab308);
+  color: #1f1f1f;
+  font-size: 0.62rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  line-height: 1.4;
+  text-transform: uppercase;
+}
+
+/* ===== Tabs (Sports page) ===== */
+.tab-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.5rem 0.95rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.7);
+  font-weight: 600;
+  font-size: 0.875rem;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.18s ease;
+}
+.tab-pill:hover {
+  border-color: rgba(255, 46, 99, 0.4);
+  color: white;
+}
+.tab-pill.is-active {
+  background: linear-gradient(135deg, #ff2e63, #ff5470);
+  border-color: rgba(255, 46, 99, 0.6);
+  color: white;
+  box-shadow: 0 6px 18px -6px rgba(255, 46, 99, 0.5);
+}
+
+/* ===== Match cards ===== */
+.match-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.85rem;
+  border-radius: 0.85rem;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  cursor: pointer;
+  transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease;
+  text-align: left;
+  width: 100%;
+}
+.match-card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(255, 46, 99, 0.4);
+  background: rgba(255, 46, 99, 0.06);
+}
+.match-card .league-tag {
+  display: inline-block;
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #fff;
+  background: rgba(59, 130, 246, 0.25);
+  border: 1px solid rgba(59, 130, 246, 0.4);
+  padding: 1px 6px;
+  border-radius: 4px;
+  width: fit-content;
+}
+.match-card.live .league-tag {
+  background: rgba(239, 68, 68, 0.25);
+  border-color: rgba(239, 68, 68, 0.45);
+  color: #fca5a5;
+}
+.team-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.team-row img {
+  width: 22px;
+  height: 22px;
+  object-fit: contain;
+}
+.team-row .team-name {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.85);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ===== iframe player shell (DaddyTV / matches) ===== */
+.iframe-shell {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  background: #000;
+  display: flex;
+  flex-direction: column;
+}
+.iframe-shell-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 1rem;
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0.85) 0%, rgba(0, 0, 0, 0.55) 100%);
+  color: white;
+  font-weight: 600;
+  z-index: 2;
+}
+.iframe-shell-bar button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.35rem 0.75rem;
+  border-radius: 0.5rem;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: white;
+  cursor: pointer;
+  font-size: 0.85rem;
+  transition: background 0.15s;
+}
+.iframe-shell-bar button:hover {
+  background: rgba(255, 46, 99, 0.25);
+  border-color: rgba(255, 46, 99, 0.4);
+}
+.iframe-shell-frame {
+  flex: 1;
+  border: 0;
+  width: 100%;
+  background: #000;
+}
+
+/* ===== Source picker for sports/football ===== */
+.source-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0.85rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: white;
+  font-weight: 600;
+  cursor: pointer;
+  font-size: 0.85rem;
+  transition: all 0.15s;
+}
+.source-chip:hover {
+  border-color: rgba(255, 46, 99, 0.5);
+  background: rgba(255, 46, 99, 0.12);
+}
+.source-chip.is-active {
+  background: linear-gradient(135deg, #ff2e63, #ff5470);
+  border-color: rgba(255, 46, 99, 0.7);
+}

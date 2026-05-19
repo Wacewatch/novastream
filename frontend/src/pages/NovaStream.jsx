@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import axios from "axios";
-import { Search, Globe2, Loader2, Tv2, Users, Heart } from "lucide-react";
+import { Search, Globe2, Loader2, Tv2, Users, Heart, Radio, Trophy } from "lucide-react";
 import ChannelCard from "@/components/ChannelCard";
 import AdUnlockModal from "@/components/AdUnlockModal";
 import VideoPlayer from "@/components/VideoPlayer";
@@ -347,8 +348,59 @@ export default function NovaStream() {
         </div>
       </section>
 
-      {/* Channel grid */}
-      <section className="max-w-7xl mx-auto px-4 sm:px-6 pb-20">
+      {/* Hub buttons — 3 sections: TV / DaddyTV / Sports */}
+      <section className="max-w-7xl mx-auto px-4 sm:px-6 pb-2" data-testid="hub-section">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4">
+          <a
+            href="#tv-grid"
+            data-testid="hub-tv"
+            className="hub-card group"
+            onClick={(e) => {
+              e.preventDefault();
+              const el = document.getElementById("tv-grid");
+              if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+            }}
+          >
+            <div className="hub-icon" style={{ background: "linear-gradient(135deg,#ff2e63 0%,#ff5470 100%)" }}>
+              <Tv2 size={24} />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="text-white font-extrabold text-lg leading-tight">TV</div>
+              <div className="text-white/55 text-xs mt-0.5 truncate">Chaînes en direct (Vavoo)</div>
+            </div>
+            <span className="hub-chev">›</span>
+          </a>
+
+          <Link to="/daddy" data-testid="hub-daddy" className="hub-card group">
+            <div className="hub-icon" style={{ background: "linear-gradient(135deg,#ff8a00 0%,#ff5400 100%)" }}>
+              <Radio size={24} />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2">
+                <span className="text-white font-extrabold text-lg leading-tight">DaddyTV</span>
+                <span className="badge-pub">PUB</span>
+              </div>
+              <div className="text-white/55 text-xs mt-0.5 truncate">800+ chaînes TV en direct</div>
+            </div>
+            <span className="hub-chev">›</span>
+          </Link>
+
+          <Link to="/sports" data-testid="hub-sports" className="hub-card group">
+            <div className="hub-icon" style={{ background: "linear-gradient(135deg,#10b981 0%,#059669 100%)" }}>
+              <Trophy size={24} />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2">
+                <span className="text-white font-extrabold text-lg leading-tight">Sports</span>
+                <span className="badge-pub">PUB</span>
+              </div>
+              <div className="text-white/55 text-xs mt-0.5 truncate">Matchs & événements live</div>
+            </div>
+            <span className="hub-chev">›</span>
+          </Link>
+        </div>
+      </section>
+      <section id="tv-grid" className="max-w-7xl mx-auto px-4 sm:px-6 pb-20 pt-6">
         {loading ? (
           <div className="flex items-center justify-center py-20" data-testid="loading-state">
             <Loader2 className="animate-spin text-[#ff2e63]" size={32} />

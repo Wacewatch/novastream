@@ -1256,6 +1256,18 @@ async def admin_global_stats(authorization: Optional[str] = Header(None)):
 
 
 
+# ----------------- Extensions (DaddyTV / Sports / Football / Admin keys) -----------------
+from extensions import ext_router, init_extensions  # noqa: E402
+
+init_extensions(
+    get_http_client=get_http_client,
+    supabase_query=_supabase_query,
+    require_admin=_require_admin,
+    extract_bearer=_extract_bearer,
+)
+api_router.include_router(ext_router)
+
+
 # ----------------- App setup -----------------
 app.include_router(api_router)
 

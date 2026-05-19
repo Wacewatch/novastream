@@ -23,6 +23,10 @@ import {
   Eye,
   Radio,
   Tv2,
+  Flame,
+  AlertTriangle,
+  ToggleRight,
+  ToggleLeft,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { supabase } from "@/lib/supabase";
@@ -52,6 +56,13 @@ export default function Admin() {
   const [liveStats, setLiveStats] = useState(null);
   const [referrers, setReferrers] = useState([]);
   const [globalStats, setGlobalStats] = useState(null);
+
+  // Football API keys module
+  const [fbKeys, setFbKeys] = useState([]);
+  const [fbKeysLoading, setFbKeysLoading] = useState(true);
+  const [fbNewKey, setFbNewKey] = useState("");
+  const [fbNewLabel, setFbNewLabel] = useState("");
+  const [fbAdding, setFbAdding] = useState(false);
 
   const reloadUsers = useCallback(async () => {
     setUsersLoading(true);
@@ -114,15 +125,82 @@ export default function Admin() {
     }
   }, []);
 
+  // ========== Football API Keys ==========
+  const reloadFbKeys = useCallback(async () => {
+    setFbKeysLoading(true);
+    try {
+      const headers = await authHeader();
+      const r = await axios.get(`${API}/admin/football-keys`, { headers });
+      setFbKeys(r.data?.keys || []);
+    } catch (e) {
+      toast.error(`Football API: ${e.response?.data?.detail || e.message}`);
+    } finally {
+      setFbKeysLoading(false);
+    }
+  }, []);
+
+  const addFbKey = async (e) => {
+    e?.preventDefault?.();
+    const key = fbNewKey.trim();
+    if (key.length < 20) {
+      toast.error("Clé invalide (min. 20 caractères)");
+      return;
+    }
+    setFbAdding(true);
+    try {
+      const headers = await authHeader();
+      await axios.post(
+        `${API}/admin/football-keys`,
+        { api_key: key, label: fbNewLabel.trim() || null, enabled: true },
+        { headers },
+      );
+      setFbNewKey("");
+      setFbNewLabel("");
+      toast.success("Clé RapidAPI ajoutée");
+      await reloadFbKeys();
+    } catch (err) {
+      toast.error(`Échec: ${err.response?.data?.detail || err.message}`);
+    } finally {
+      setFbAdding(false);
+    }
+  };
+
+  const toggleFbKey = async (k) => {
+    try {
+      const headers = await authHeader();
+      await axios.patch(
+        `${API}/admin/football-keys/${k.id}`,
+        { enabled: !k.enabled },
+        { headers },
+      );
+      await reloadFbKeys();
+    } catch (err) {
+      toast.error(`Échec: ${err.response?.data?.detail || err.message}`);
+    }
+  };
+
+  const deleteFbKey = async (id) => {
+    if (!window.confirm("Supprimer cette clé RapidAPI ?")) return;
+    try {
+      const headers = await authHeader();
+      await axios.delete(`${API}/admin/football-keys/${id}`, { headers });
+      toast.success("Clé supprimée");
+      await reloadFbKeys();
+    } catch (err) {
+      toast.error(`Échec: ${err.response?.data?.detail || err.message}`);
+    }
+  };
+
   useEffect(() => {
     if (!isAdmin) return;
     reloadUsers();
     reloadKeys();
+    reloadFbKeys();
     fetchAdminStats();
     // Poll system/live stats every 5s
     const t = setInterval(fetchAdminStats, 5000);
     return () => clearInterval(t);
-  }, [isAdmin, reloadUsers, reloadKeys, fetchAdminStats]);
+  }, [isAdmin, reloadUsers, reloadKeys, reloadFbKeys, fetchAdminStats]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -505,6 +583,137 @@ export default function Admin() {
                             <Trash2 size={12} />
                           </button>
                         )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+
+        {/* Football API Keys (RapidAPI) */}
+        <section className="glass-heavy rounded-2xl p-5 border border-white/10" data-testid="admin-fb-keys-section">
+          <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
+            <h3 className="text-lg font-bold flex items-center gap-2">
+              <Flame size={18} className="text-orange-400" /> Clés RapidAPI Football
+              <span className="text-sm font-normal text-white/40">({fbKeys.length})</span>
+            </h3>
+            <span className="text-xs text-white/45">
+              Table Supabase <code className="text-orange-300/80">football_api_keys</code>
+            </span>
+          </div>
+
+          <form onSubmit={addFbKey} className="flex flex-col sm:flex-row gap-2 mb-4">
+            <input
+              value={fbNewKey}
+              onChange={(e) => setFbNewKey(e.target.value)}
+              placeholder="Nouvelle clé X-RapidAPI-Key (ex: 593cf48882msh…)"
+              className="flex-1 px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-orange-400/40 font-mono"
+              data-testid="fb-new-key"
+            />
+            <input
+              value={fbNewLabel}
+              onChange={(e) => setFbNewLabel(e.target.value)}
+              placeholder="Libellé (optionnel)"
+              className="sm:w-44 px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-orange-400/40"
+              data-testid="fb-new-label"
+              maxLength={60}
+            />
+            <button
+              type="submit"
+              disabled={fbAdding}
+              className="px-3 py-2 rounded-lg bg-orange-400 hover:bg-orange-300 text-black font-semibold flex items-center justify-center gap-1.5 text-sm disabled:opacity-60"
+              data-testid="fb-add-btn"
+            >
+              {fbAdding ? <Loader2 className="animate-spin" size={14} /> : <Plus size={14} />}
+              Ajouter
+            </button>
+          </form>
+
+          {fbKeysLoading ? (
+            <div className="py-6 flex items-center justify-center">
+              <Loader2 className="animate-spin text-orange-400" size={20} />
+            </div>
+          ) : fbKeys.length === 0 ? (
+            <div className="rounded-xl border border-yellow-500/20 bg-yellow-500/5 p-4 text-sm text-yellow-300/90 flex items-start gap-2">
+              <AlertTriangle size={16} className="shrink-0 mt-0.5" />
+              <div>
+                Aucune clé RapidAPI configurée. Football Live utilise actuellement les clés fallback statiques (quota limité).
+                Ajoutez votre propre clé sur{" "}
+                <a
+                  href="https://rapidapi.com/Yewale/api/football-live-streaming-api"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="underline text-orange-300"
+                >
+                  rapidapi.com/Yewale/api/football-live-streaming-api
+                </a>.
+              </div>
+            </div>
+          ) : (
+            <div className="max-h-[360px] overflow-y-auto pr-1">
+              <table className="w-full text-sm" data-testid="fb-keys-table">
+                <thead className="text-white/50 text-xs uppercase tracking-wider sticky top-0 bg-[#0e0e14]">
+                  <tr>
+                    <th className="text-left py-2 px-2">Clé</th>
+                    <th className="text-left py-2 px-2 hidden md:table-cell">Libellé</th>
+                    <th className="text-center py-2 px-2">Statut</th>
+                    <th className="text-center py-2 px-2 hidden sm:table-cell">Succès / Erreurs</th>
+                    <th className="text-left py-2 px-2 hidden lg:table-cell">Dernier usage</th>
+                    <th className="text-right py-2 px-2">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {fbKeys.map((k) => (
+                    <tr key={k.id} className="border-t border-white/5 hover:bg-white/[0.02]" data-testid={`fb-row-${k.id}`}>
+                      <td className="py-2 px-2 font-mono text-xs text-orange-300/90">{k.api_key_masked}</td>
+                      <td className="py-2 px-2 text-xs text-white/70 hidden md:table-cell">{k.label || "—"}</td>
+                      <td className="py-2 px-2 text-center">
+                        {k.banned_today ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-red-500/15 text-red-400 text-xs" title={k.banned_reason || ""}>
+                            <AlertTriangle size={11} /> banni 24h
+                          </span>
+                        ) : k.enabled ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-green-500/15 text-green-400 text-xs">
+                            <Check size={11} /> activée
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-white/10 text-white/50 text-xs">
+                            désactivée
+                          </span>
+                        )}
+                      </td>
+                      <td className="py-2 px-2 text-center text-xs hidden sm:table-cell">
+                        <span className="text-green-400 font-semibold">{k.success_count}</span>
+                        <span className="text-white/30"> / </span>
+                        <span className="text-red-400 font-semibold">{k.error_count}</span>
+                      </td>
+                      <td className="py-2 px-2 text-xs text-white/50 hidden lg:table-cell">
+                        {k.last_used_at ? new Date(k.last_used_at).toLocaleString("fr-FR") : "—"}
+                        {k.last_error && (
+                          <div className="text-red-400/80 truncate max-w-[200px]" title={k.last_error}>
+                            ⚠ {k.last_error}
+                          </div>
+                        )}
+                      </td>
+                      <td className="py-2 px-2 text-right whitespace-nowrap">
+                        <button
+                          onClick={() => toggleFbKey(k)}
+                          className="player-btn w-7 h-7"
+                          title={k.enabled ? "Désactiver" : "Activer"}
+                          data-testid={`fb-toggle-${k.id}`}
+                        >
+                          {k.enabled ? <ToggleRight size={14} className="text-green-400" /> : <ToggleLeft size={14} className="text-white/50" />}
+                        </button>
+                        <button
+                          onClick={() => deleteFbKey(k.id)}
+                          className="player-btn w-7 h-7 ml-1 hover:bg-red-500/20"
+                          title="Supprimer"
+                          data-testid={`fb-del-${k.id}`}
+                        >
+                          <Trash2 size={12} />
+                        </button>
                       </td>
                     </tr>
                   ))}
