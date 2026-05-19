@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import axios from "axios";
 import { Search, Globe2, Loader2, Radio } from "lucide-react";
 import { toast } from "sonner";
+import FlagIcon from "@/components/FlagIcon";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -138,7 +139,10 @@ export default function DaddyTab({ onPick, initialChannelId, onAfterAutoOpen }) 
           {grouped.keys.map((cn) => (
             <div key={cn}>
               <div className="flex items-center gap-2 mb-3">
-                <h2 className="text-white text-lg font-extrabold">{cn}</h2>
+                <h2 className="text-white text-lg font-extrabold flex items-center gap-2">
+                  <FlagIcon country={cn} size={20} />
+                  {cn}
+                </h2>
                 <span className="text-xs text-white/40">({grouped.map[cn].length})</span>
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3">
@@ -179,8 +183,9 @@ function DaddyCard({ ch, onClick }) {
         </div>
       </div>
       <div className="text-sm font-semibold text-white truncate" title={ch.name}>{ch.name}</div>
-      <div className="text-[11px] text-white/50 mt-0.5 truncate">
-        {ch.category} · {ch.country}
+      <div className="text-[11px] text-white/50 mt-0.5 truncate flex items-center gap-1.5">
+        <FlagIcon country={ch.country} size={12} />
+        <span className="truncate">{ch.category} · {ch.country}</span>
       </div>
     </button>
   );

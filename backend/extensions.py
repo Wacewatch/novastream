@@ -367,25 +367,127 @@ async def daddy_embed(channel_id: str):
     return {"id": channel_id, "embed_url": daddy_embed_url(channel_id)}
 
 
+# -----------------------------------------------------------------------------
+# DLStream resolver (mirrors the daddy.php / Wacewatch /api/direct technique)
+# -----------------------------------------------------------------------------
+# We call https://chat.cfbu247.sbs/api/resolve-dlstream/{channel_id}
+# which returns {proxyPlaylistUrl, proxyPlayerUrl}. The proxyPlaylistUrl is a
+# valid HLS (.m3u8) that we then wrap through our own /api/football/proxy.
+# The proxyPlayerUrl is iframe-friendly (no frame-ancestors restriction),
+# unlike player.cfbu247.sbs which only allows tv247.us and self.
+DLSTREAM_BASE = "https://chat.cfbu247.sbs/api/resolve-dlstream"
+DLSTREAM_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Referer": "https://chat.cfbu247.sbs/",
+    "Accept": "application/json, */*",
+}
+DLSTREAM_TTL = 4 * 60.0  # 4 min
+_dlstream_cache: Dict[str, Tuple[Dict[str, str], float]] = {}
+_dlstream_locks: Dict[str, asyncio.Lock] = {}
+
+
+def _dlstream_lock(key: str) -> asyncio.Lock:
+    lk = _dlstream_locks.get(key)
+    if lk is None:
+        lk = asyncio.Lock()
+        _dlstream_locks[key] = lk
+    return lk
+
+
+async def _resolve_dlstream(channel_id: str) -> Optional[Dict[str, str]]:
+    """Resolve a DaddyTV numeric channel_id → {proxyPlaylistUrl, proxyPlayerUrl}.
+
+    Cached for DLSTREAM_TTL with a per-id lock to avoid thundering herd.
+    Returns None if the upstream resolver fails.
+    """
+    cid = str(channel_id).strip()
+    if not cid:
+        return None
+    now = time.time()
+    cached = _dlstream_cache.get(cid)
+    if cached and now - cached[1] < DLSTREAM_TTL:
+        return cached[0]
+    async with _dlstream_lock(cid):
+        cached = _dlstream_cache.get(cid)
+        if cached and time.time() - cached[1] < DLSTREAM_TTL:
+            return cached[0]
+        cx = await _get_http_client()
+        try:
+            r = await cx.get(
+                f"{DLSTREAM_BASE}/{cid}",
+                headers=DLSTREAM_HEADERS,
+                timeout=10.0,
+                follow_redirects=True,
+            )
+            if r.status_code != 200:
+                logger.warning("dlstream resolve %s -> HTTP %s", cid, r.status_code)
+                return None
+            data = r.json()
+            if not isinstance(data, dict):
+                return None
+            playlist = (data.get("proxyPlaylistUrl") or "").strip()
+            player = (data.get("proxyPlayerUrl") or "").strip()
+            if not playlist and not player:
+                return None
+            out = {"proxyPlaylistUrl": playlist, "proxyPlayerUrl": player}
+            _dlstream_cache[cid] = (out, time.time())
+            return out
+        except Exception as e:  # noqa: BLE001
+            logger.warning("dlstream resolve %s failed: %s", cid, e)
+            return None
+
+
 @ext_router.get("/daddy/stream/{channel_id}")
 async def daddy_stream(channel_id: str, request: Request):
-    """Returns the internal HLS-proxied URL for the channel m3u8 (used by the
-    in-app VideoPlayer). Not exposed publicly — public API still uses embed_url.
+    """Resolves the playable URLs for a DaddyTV channel.
+
+    Returns:
+        - stream_url: HLS playlist routed through our /api/football/proxy
+          (CORS-safe, segments cached, no Referer leak). PRIMARY.
+        - iframe_url: chat.cfbu247.sbs/api/proxy/player URL — iframe-friendly
+          fallback when HLS fails on the client.
+        - embed_url: kept for backward compat (same as iframe_url).
     """
     cfg = await _get_daddy_config()
     if not cfg["enabled"]:
         raise _daddy_503()
     await _refresh_daddy_catalog()
-    c = _daddy_cache["by_id"].get(str(channel_id).strip())
+    cid = str(channel_id).strip()
+    c = _daddy_cache["by_id"].get(cid)
     if not c:
         raise HTTPException(status_code=404, detail="Chaîne DaddyTV introuvable")
+
     base = _public_base(request)
-    proxied = f"{base}/api/football/proxy?url={quote(c['m3u8'], safe='')}"
+    stream_url = ""
+    iframe_url = ""
+
+    # 1) Prefer the DLStream resolver (matches the Wacewatch /api/direct flow).
+    #    Slug-IDs (from upstream player10.json with no static mapping) skip it.
+    if not cid.startswith("slug-"):
+        resolved = await _resolve_dlstream(cid)
+        if resolved:
+            if resolved.get("proxyPlaylistUrl"):
+                stream_url = f"{base}/api/football/proxy?url={quote(resolved['proxyPlaylistUrl'], safe='')}"
+            if resolved.get("proxyPlayerUrl"):
+                iframe_url = resolved["proxyPlayerUrl"]
+
+    # 2) Fallback to legacy m3u8 from allchannel.json if DLStream failed.
+    if not stream_url and c.get("m3u8"):
+        stream_url = f"{base}/api/football/proxy?url={quote(c['m3u8'], safe='')}"
+
+    # 3) Fallback iframe = original embed_url from player10.json (last resort).
+    if not iframe_url:
+        iframe_url = c.get("embed_url") or ""
+
     return {
         "id": c["id"],
         "name": c["name"],
-        "stream_url": proxied,
-        "embed_url": c["embed_url"],
+        "stream_url": stream_url,
+        "iframe_url": iframe_url,
+        "embed_url": iframe_url,  # backward compat
     }
 
 

@@ -1,15 +1,26 @@
 import { useMemo, useState, memo } from "react";
-import { Plus, Tv2, X as XIcon, Pencil, RotateCcw } from "lucide-react";
+import { Plus, Tv2, X as XIcon, Pencil, RotateCcw, Radio, Trophy } from "lucide-react";
 
 function MultiViewCell({ index, channel, onPick, onClear }) {
   const [reloadToken, setReloadToken] = useState(0);
 
   const embedSrc = useMemo(() => {
-    if (!channel?.id) return null;
-    // Same-origin embed page. cache-busting param avoids caching when reloading.
-    const base = `/embed/${encodeURIComponent(channel.id)}`;
-    return reloadToken ? `${base}?r=${reloadToken}` : base;
-  }, [channel?.id, reloadToken]);
+    if (!channel) return null;
+    // Prefer the explicit `src` (v2 multi-source cells), fall back to legacy
+    // `/embed/{id}` for older saved sessions.
+    const base = channel.src
+      || (channel.id ? `/embed/${encodeURIComponent(channel.id)}` : null);
+    if (!base) return null;
+    if (!reloadToken) return base;
+    return base.includes("?") ? `${base}&r=${reloadToken}` : `${base}?r=${reloadToken}`;
+  }, [channel, reloadToken]);
+
+  const KindIcon = useMemo(() => {
+    if (!channel) return Tv2;
+    if (channel.kind === "daddy") return Radio;
+    if (channel.kind === "sports") return Trophy;
+    return Tv2;
+  }, [channel]);
 
   const handleReload = (e) => {
     e.stopPropagation();
@@ -58,7 +69,7 @@ function MultiViewCell({ index, channel, onPick, onClear }) {
       <div className="mv-cell-overlay" data-testid={`mv-cell-overlay-${index}`}>
         <div className="mv-cell-overlay-inner">
           <span className="mv-overlay-name" title={channel.name}>
-            <Tv2 size={11} className="opacity-70" />
+            <KindIcon size={11} className="opacity-70" />
             {channel.name}
           </span>
           <div className="mv-overlay-actions">

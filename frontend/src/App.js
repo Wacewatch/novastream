@@ -3,6 +3,8 @@ import React from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import NovaStream from "@/pages/NovaStream";
 import EmbedPage from "@/pages/EmbedPage";
+import DaddyEmbedPage from "@/pages/DaddyEmbedPage";
+import SportsEmbedPage from "@/pages/SportsEmbedPage";
 import ApiDocs from "@/pages/ApiDocs";
 import MultiView from "@/pages/MultiView";
 import Login from "@/pages/Login";
@@ -21,6 +23,8 @@ function App() {
             <Routes>
               <Route path="/" element={<NovaStream />} />
               <Route path="/embed/:channelId" element={<EmbedPage />} />
+              <Route path="/embed/daddy/:channelId" element={<DaddyEmbedPage />} />
+              <Route path="/embed/sports/:source/:id" element={<SportsEmbedPage />} />
               <Route path="/docs" element={<ApiDocs />} />
               <Route path="/multiview" element={<MultiView />} />
               <Route path="/login" element={<Login />} />

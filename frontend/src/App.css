@@ -899,6 +899,36 @@
 }
 .mv-picker-list::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.22); }
 
+/* Source tabs inside multiview picker (TV / DaddyTV / Sports) */
+.mv-source-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.65);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.15s ease;
+  flex-shrink: 0;
+}
+.mv-source-tab:hover {
+  background: rgba(255, 255, 255, 0.07);
+  color: rgba(255, 255, 255, 0.9);
+}
+.mv-source-tab.is-active {
+  background: rgba(255, 255, 255, 0.06);
+  color: #fff;
+}
+
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; }
+
 
 /* Favorite heart button */
 .fav-btn {

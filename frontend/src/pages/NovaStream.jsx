@@ -9,6 +9,7 @@ import AdUnlockModal from "@/components/AdUnlockModal";
 import VideoPlayer from "@/components/VideoPlayer";
 import IframePlayer from "@/components/IframePlayer";
 import UserMenu from "@/components/UserMenu";
+import FlagIcon from "@/components/FlagIcon";
 import DaddyTab from "@/components/tabs/DaddyTab";
 import SportsTab from "@/components/tabs/SportsTab";
 import FootballTab from "@/components/tabs/FootballTab";
@@ -38,18 +39,8 @@ const DEFAULT_CATEGORIES = [
   "Musique",
 ];
 
-const COUNTRY_FLAGS = {
-  France: "🇫🇷", Germany: "🇩🇪", Italy: "🇮🇹", Spain: "🇪🇸",
-  "United Kingdom": "🇬🇧", "United States": "🇺🇸", Portugal: "🇵🇹",
-  Netherlands: "🇳🇱", Belgium: "🇧🇪", Switzerland: "🇨🇭", Poland: "🇵🇱",
-  Russia: "🇷🇺", Turkey: "🇹🇷", Romania: "🇷🇴", Greece: "🇬🇷",
-  Austria: "🇦🇹", Sweden: "🇸🇪", Denmark: "🇩🇰", Norway: "🇳🇴",
-  Finland: "🇫🇮", Albania: "🇦🇱", Arabia: "🇸🇦", Bulgaria: "🇧🇬",
-  Czech: "🇨🇿", Croatia: "🇭🇷", Hungary: "🇭🇺", Ireland: "🇮🇪",
-  Serbia: "🇷🇸", Ukraine: "🇺🇦", India: "🇮🇳", Brazil: "🇧🇷",
-  Mexico: "🇲🇽", Argentina: "🇦🇷", Canada: "🇨🇦", Australia: "🇦🇺",
-};
-const flagFor = (c) => COUNTRY_FLAGS[c] || "📺";
+const COUNTRY_FLAGS = {};
+const flagFor = (c) => COUNTRY_FLAGS[c] || "";
 
 const SPORTS_SUBTABS = [
   { id: "sports", label: "Sports", icon: Trophy },
@@ -219,12 +210,27 @@ export default function NovaStream() {
 
     if (kind === "daddy" || kind === "info") {
       const ch = payload;
-      // DaddyTV: prefer the original embed iframe by default. The HLS direct
-      // proxy (cfbu247.sbs) is often blocked / 502 on the public web, so the
-      // iframe stays the reliable path. The HLS fallback can be enabled later
-      // via the admin module if/when the upstream stabilises.
-      setDaddyActive(ch);
-      setDaddyHls(null);
+      // DaddyTV: try HLS resolution first (via /api/daddy/stream), fall back to
+      // iframe (proxyPlayerUrl from chat.cfbu247.sbs which is iframe-friendly)
+      // when HLS is unavailable or fails on the client.
+      setResolving(true);
+      try {
+        const r = await axios.get(`${API}/daddy/stream/${encodeURIComponent(ch.id)}`);
+        const data = r.data || {};
+        setDaddyActive({
+          ...ch,
+          embed_url: data.iframe_url || data.embed_url || ch.embed_url || "",
+          iframe_url: data.iframe_url || data.embed_url || ch.embed_url || "",
+        });
+        setDaddyHls(data.stream_url || null);
+      } catch (e) {
+        console.error(e);
+        // Fall back to the original embed_url from the channel card.
+        setDaddyActive(ch);
+        setDaddyHls(null);
+      } finally {
+        setResolving(false);
+      }
       return;
     }
 
@@ -436,7 +442,7 @@ export default function NovaStream() {
               <SelectContent className="glass-heavy border-white/10 max-h-[340px]">
                 {countries.map((c) => (
                   <SelectItem key={c} value={c} data-testid={`country-option-${c}`}>
-                    <span className="mr-2">{flagFor(c)}</span>
+                    <FlagIcon country={c} size={18} className="mr-2" />
                     {c}
                   </SelectItem>
                 ))}
@@ -591,17 +597,30 @@ export default function NovaStream() {
           channel={{ id: daddyActive.id, name: daddyActive.name, country_code: "daddy" }}
           streamUrl={daddyHls}
           onClose={() => { setDaddyActive(null); setDaddyHls(null); }}
+          onError={() => {
+            // HLS failed: switch to iframe fallback if available.
+            if (daddyActive?.iframe_url || daddyActive?.embed_url) {
+              setDaddyHls(null);
+              toast.info("Lecture HLS indisponible — passage à l'iframe…");
+            }
+          }}
           onRetry={async () => {
             try {
               const r = await axios.get(`${API}/daddy/stream/${encodeURIComponent(daddyActive.id)}`);
-              setDaddyHls(`${r.data.stream_url}&_t=${Date.now()}`);
-            } catch (_) { /* noop */ }
+              if (r.data?.stream_url) {
+                setDaddyHls(`${r.data.stream_url}&_t=${Date.now()}`);
+              } else {
+                setDaddyHls(null); // fall back to iframe
+              }
+            } catch (_) {
+              setDaddyHls(null); // fall back to iframe
+            }
           }}
         />
       )}
-      {daddyActive && !daddyHls && daddyActive.embed_url && (
+      {daddyActive && !daddyHls && (daddyActive.iframe_url || daddyActive.embed_url) && (
         <IframePlayer
-          src={daddyActive.embed_url}
+          src={daddyActive.iframe_url || daddyActive.embed_url}
           title={`${daddyActive.name} — DaddyTV`}
           onClose={() => setDaddyActive(null)}
         />

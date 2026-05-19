@@ -14,7 +14,7 @@ import time
 from typing import Dict, Any, List
 
 # Public preview URL
-BASE_URL = "https://novastream-tv.preview.emergentagent.com"
+BASE_URL = "https://live-sports-hub-78.preview.emergentagent.com"
 
 class TestResults:
     def __init__(self):

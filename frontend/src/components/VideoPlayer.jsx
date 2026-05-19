@@ -29,6 +29,7 @@ export default function VideoPlayer({
   streamUrl,
   onClose,
   onRetry,
+  onError = null,
   // Optional: enable in-player server switching (Sports / Football).
   // servers: [{ id, name, stream_url, url? }]
   // activeServerId: currently selected id
@@ -124,6 +125,7 @@ export default function VideoPlayer({
             }
             setError("Flux temporairement indisponible.");
             setLoading(false);
+            try { onError && onError(data); } catch (_) { /* noop */ }
           }
         } catch (_outer) {
           /* swallow */
@@ -140,6 +142,7 @@ export default function VideoPlayer({
         if (destroyed) return;
         setError("Flux temporairement indisponible.");
         setLoading(false);
+        try { onError && onError({ kind: "native" }); } catch (_) { /* noop */ }
       };
       video.addEventListener("loadedmetadata", onMeta);
       video.addEventListener("error", onErr);

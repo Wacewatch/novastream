@@ -1,8 +1,12 @@
 import { useEffect, useMemo, useState, useCallback } from "react";
 import { Link } from "react-router-dom";
 import axios from "axios";
-import { Search, Globe2, Grid3x3, ArrowLeft, Tv2, Trash2, Loader2, X as XIcon } from "lucide-react";
+import {
+  Search, Globe2, Grid3x3, ArrowLeft, Tv2, Trash2, Loader2,
+  X as XIcon, Radio, Trophy,
+} from "lucide-react";
 import MultiViewCell from "@/components/MultiViewCell";
+import FlagIcon from "@/components/FlagIcon";
 import {
   Select,
   SelectContent,
@@ -14,7 +18,7 @@ import { toast } from "sonner";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
-const STORAGE_KEY = "livewatch.multiview.v1";
+const STORAGE_KEY = "livewatch.multiview.v2";
 
 const LAYOUTS = [
   { id: 2, label: "2×2", cells: 4 },
@@ -22,18 +26,11 @@ const LAYOUTS = [
   { id: 4, label: "4×4", cells: 16 },
 ];
 
-const COUNTRY_FLAGS = {
-  France: "🇫🇷", Germany: "🇩🇪", Italy: "🇮🇹", Spain: "🇪🇸",
-  "United Kingdom": "🇬🇧", "United States": "🇺🇸", Portugal: "🇵🇹",
-  Netherlands: "🇳🇱", Belgium: "🇧🇪", Switzerland: "🇨🇭", Poland: "🇵🇱",
-  Russia: "🇷🇺", Turkey: "🇹🇷", Romania: "🇷🇴", Greece: "🇬🇷",
-  Austria: "🇦🇹", Sweden: "🇸🇪", Denmark: "🇩🇰", Norway: "🇳🇴", Finland: "🇫🇮",
-  Albania: "🇦🇱", Arabia: "🇸🇦", Bulgaria: "🇧🇬", Czech: "🇨🇿",
-  Croatia: "🇭🇷", Hungary: "🇭🇺", Ireland: "🇮🇪", Serbia: "🇷🇸",
-  Ukraine: "🇺🇦", India: "🇮🇳", Brazil: "🇧🇷", Mexico: "🇲🇽",
-  Argentina: "🇦🇷", Canada: "🇨🇦", Australia: "🇦🇺",
-};
-const flagFor = (c) => COUNTRY_FLAGS[c] || "📺";
+const SOURCE_TABS = [
+  { id: "tv", label: "TV", icon: Tv2, color: "#ff2e63" },
+  { id: "daddy", label: "DaddyTV", icon: Radio, color: "#ff8a00" },
+  { id: "sports", label: "Sports", icon: Trophy, color: "#10b981" },
+];
 
 function loadState() {
   try {
@@ -53,15 +50,32 @@ function saveState(state) {
   } catch (_) { /* noop */ }
 }
 
+// Migrate legacy v1 cells (which had no `kind` field) to v2.
+function loadLegacyState() {
+  try {
+    const raw = localStorage.getItem("livewatch.multiview.v1");
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return null;
+    const cells = (parsed.cells || []).map((c) => (c ? { ...c, kind: c.kind || "tv" } : null));
+    return { ...parsed, cells };
+  } catch (_) {
+    return null;
+  }
+}
+
 export default function MultiView() {
-  const initial = useMemo(() => loadState(), []);
+  const initial = useMemo(() => loadState() || loadLegacyState(), []);
   const [layout, setLayout] = useState(initial?.layout || 2);
-  // cells: array of {id, name, country, categories} | null
+
+  // cells: array of {kind, id, name, country?, src} | null
+  // src is the iframe URL the cell renders.
   const [cells, setCells] = useState(() => {
     const init = initial?.cells || [];
     const arr = new Array(16).fill(null);
     for (let i = 0; i < Math.min(16, init.length); i++) {
-      if (init[i] && init[i].id && init[i].name) arr[i] = init[i];
+      const c = init[i];
+      if (c && c.id && c.name && c.src) arr[i] = { ...c, kind: c.kind || "tv" };
     }
     return arr;
   });
@@ -69,19 +83,25 @@ export default function MultiView() {
   // Picker modal
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerTargetIndex, setPickerTargetIndex] = useState(-1);
+  const [pickerSource, setPickerSource] = useState(initial?.lastSource || "tv");
 
+  // TV-specific filters
   const [countries, setCountries] = useState(["France"]);
   const [country, setCountry] = useState(initial?.lastCountry || "France");
   const [search, setSearch] = useState("");
-  const [channels, setChannels] = useState([]);
-  const [channelsLoading, setChannelsLoading] = useState(false);
+  const [items, setItems] = useState([]);
+  const [itemsLoading, setItemsLoading] = useState(false);
+
+  // Daddy-specific filters
+  const [daddyCountries, setDaddyCountries] = useState([]);
+  const [daddyCountry, setDaddyCountry] = useState("");
 
   // Persist state
   useEffect(() => {
-    saveState({ layout, cells, lastCountry: country });
-  }, [layout, cells, country]);
+    saveState({ layout, cells, lastCountry: country, lastSource: pickerSource });
+  }, [layout, cells, country, pickerSource]);
 
-  // Fetch countries once
+  // Fetch countries once (TV)
   useEffect(() => {
     (async () => {
       try {
@@ -92,29 +112,95 @@ export default function MultiView() {
     })();
   }, []);
 
-  // Load channels list when picker is open + filters change
+  // Build the iframe src URL based on the source + item.
+  const buildSrc = (source, item) => {
+    if (source === "tv") return `/embed/${encodeURIComponent(item.id)}`;
+    if (source === "daddy") return `/embed/daddy/${encodeURIComponent(item.id)}`;
+    if (source === "sports") {
+      const first = (item.sources || [])[0];
+      if (!first) return "";
+      const t = encodeURIComponent(item.title || item.name || "Match");
+      return `/embed/sports/${encodeURIComponent(first.source)}/${encodeURIComponent(first.id)}?t=${t}`;
+    }
+    return "";
+  };
+
+  // Load list when picker is open + filters change
   useEffect(() => {
     if (!pickerOpen) return;
     const ctrl = new AbortController();
     let cancelled = false;
     (async () => {
-      setChannelsLoading(true);
+      setItemsLoading(true);
       try {
-        const params = { country, limit: 600 };
-        if (search.trim()) params.search = search.trim();
-        const r = await axios.get(`${API}/channels`, { params, signal: ctrl.signal });
-        if (cancelled) return;
-        setChannels(r.data.channels || []);
+        if (pickerSource === "tv") {
+          const params = { country, limit: 600 };
+          if (search.trim()) params.search = search.trim();
+          const r = await axios.get(`${API}/channels`, { params, signal: ctrl.signal });
+          if (cancelled) return;
+          const list = (r.data.channels || []).map((c) => ({
+            kind: "tv",
+            id: c.id,
+            name: c.name,
+            country: c.country,
+            categories: c.categories || [],
+            src: buildSrc("tv", c),
+          }));
+          setItems(list);
+        } else if (pickerSource === "daddy") {
+          const params = { limit: 800 };
+          if (daddyCountry) params.country = daddyCountry;
+          if (search.trim()) params.search = search.trim();
+          const r = await axios.get(`${API}/daddy/channels`, { params, signal: ctrl.signal });
+          if (cancelled) return;
+          setDaddyCountries(r.data.countries || []);
+          const list = (r.data.channels || []).map((c) => ({
+            kind: "daddy",
+            id: c.id,
+            name: c.name,
+            country: c.country,
+            category: c.category,
+            src: buildSrc("daddy", c),
+          }));
+          setItems(list);
+        } else if (pickerSource === "sports") {
+          const r = await axios.get(`${API}/sports/matches`, { signal: ctrl.signal });
+          if (cancelled) return;
+          const events = r.data.events || [];
+          const q = search.trim().toLowerCase();
+          const filtered = q
+            ? events.filter((e) =>
+                (e.title || "").toLowerCase().includes(q)
+                || (e.sport || "").toLowerCase().includes(q)
+                || (e.league || "").toLowerCase().includes(q),
+              )
+            : events;
+          const list = filtered
+            .filter((e) => (e.sources || []).length > 0)
+            .slice(0, 400)
+            .map((e) => ({
+              kind: "sports",
+              id: e.id,
+              name: e.title || `${e.home || ""} vs ${e.away || ""}`,
+              country: e.sport || "",
+              category: e.league || "",
+              meta: { sport: e.sport, league: e.league, time: e.time, isLive: e.isLive },
+              sources: e.sources,
+              src: buildSrc("sports", e),
+            }));
+          setItems(list);
+        }
       } catch (e) {
         if (e.name !== "CanceledError" && e.code !== "ERR_CANCELED") {
-          toast.error("Erreur lors du chargement des chaînes");
+          console.error(e);
+          toast.error("Erreur de chargement");
         }
       } finally {
-        if (!cancelled) setChannelsLoading(false);
+        if (!cancelled) setItemsLoading(false);
       }
     })();
     return () => { cancelled = true; ctrl.abort(); };
-  }, [pickerOpen, country, search]);
+  }, [pickerOpen, pickerSource, country, search, daddyCountry]);
 
   const visibleCells = layout * layout;
 
@@ -129,15 +215,21 @@ export default function MultiView() {
     setPickerTargetIndex(-1);
   }, []);
 
-  const assignChannel = useCallback((ch) => {
+  const assignItem = useCallback((item) => {
     if (pickerTargetIndex < 0) return;
+    if (!item.src) {
+      toast.error("Cette source n'a pas de flux disponible");
+      return;
+    }
     setCells((prev) => {
       const next = prev.slice();
       next[pickerTargetIndex] = {
-        id: ch.id,
-        name: ch.name,
-        country: ch.country,
-        categories: ch.categories || [],
+        kind: item.kind,
+        id: item.id,
+        name: item.name,
+        country: item.country || "",
+        category: item.category || item.categories?.[0] || "",
+        src: item.src,
       };
       return next;
     });
@@ -163,6 +255,9 @@ export default function MultiView() {
     gridTemplateColumns: `repeat(${layout}, minmax(0, 1fr))`,
     gridTemplateRows: `repeat(${layout}, minmax(0, 1fr))`,
   };
+
+  // Country list for the current picker source
+  const activeCountries = pickerSource === "tv" ? countries : daddyCountries;
 
   return (
     <div className="relative min-h-screen text-white flex flex-col">
@@ -228,11 +323,11 @@ export default function MultiView() {
           style={gridStyle}
           data-testid={`mv-grid-${layout}x${layout}`}
         >
-          {cells.slice(0, visibleCells).map((ch, idx) => (
+          {cells.slice(0, visibleCells).map((cell, idx) => (
             <MultiViewCell
-              key={`cell-${idx}-${ch?.id || "empty"}`}
+              key={`cell-${idx}-${cell?.kind || "x"}-${cell?.id || "empty"}`}
               index={idx}
-              channel={ch}
+              channel={cell}
               onPick={() => openPicker(idx)}
               onClear={() => clearCell(idx)}
             />
@@ -252,12 +347,31 @@ export default function MultiView() {
               <div className="flex items-center gap-2">
                 <Grid3x3 size={16} className="text-[#ff2e63]" />
                 <h3 className="text-white font-semibold">
-                  Choisir une chaîne — Slot {pickerTargetIndex + 1}
+                  Choisir une source — Slot {pickerTargetIndex + 1}
                 </h3>
               </div>
               <button onClick={closePicker} className="player-btn" data-testid="mv-picker-close">
                 <XIcon size={18} />
               </button>
+            </div>
+
+            {/* Source tabs */}
+            <div className="px-4 pb-3 pt-1 flex gap-2 overflow-x-auto no-scrollbar border-b border-white/5">
+              {SOURCE_TABS.map((t) => {
+                const Icon = t.icon;
+                const active = pickerSource === t.id;
+                return (
+                  <button
+                    key={t.id}
+                    onClick={() => { setPickerSource(t.id); setSearch(""); }}
+                    data-testid={`mv-picker-tab-${t.id}`}
+                    className={`mv-source-tab ${active ? "is-active" : ""}`}
+                    style={active ? { color: t.color, borderColor: `${t.color}66` } : undefined}
+                  >
+                    <Icon size={14} /> {t.label}
+                  </button>
+                );
+              })}
             </div>
 
             <div className="mv-picker-filters">
@@ -266,54 +380,92 @@ export default function MultiView() {
                 <input
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
-                  placeholder="Rechercher une chaîne…"
+                  placeholder={
+                    pickerSource === "sports"
+                      ? "Rechercher un match, sport ou ligue…"
+                      : "Rechercher une chaîne…"
+                  }
                   data-testid="mv-picker-search"
                   autoFocus
                   className="w-full pl-9 pr-3 py-2 rounded-full glass-pill text-sm text-white placeholder:text-white/40 focus:outline-none focus:border-white/20"
                 />
               </div>
-              <Select value={country} onValueChange={setCountry}>
-                <SelectTrigger
-                  data-testid="mv-picker-country"
-                  className="glass-pill border-white/10 rounded-full px-3 py-2 h-auto text-sm gap-2 min-w-[140px]"
+
+              {(pickerSource === "tv" || pickerSource === "daddy") && (
+                <Select
+                  value={pickerSource === "daddy" ? (daddyCountry || "__all__") : country}
+                  onValueChange={(v) => {
+                    if (pickerSource === "daddy") {
+                      setDaddyCountry(v === "__all__" ? "" : v);
+                    } else {
+                      setCountry(v);
+                    }
+                  }}
                 >
-                  <Globe2 size={14} className="text-white/60" />
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent className="glass-heavy border-white/10 max-h-[340px]">
-                  {countries.map((c) => (
-                    <SelectItem key={c} value={c} data-testid={`mv-country-option-${c}`}>
-                      <span className="mr-2">{flagFor(c)}</span>{c}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+                  <SelectTrigger
+                    data-testid="mv-picker-country"
+                    className="glass-pill border-white/10 rounded-full px-3 py-2 h-auto text-sm gap-2 min-w-[160px]"
+                  >
+                    <Globe2 size={14} className="text-white/60" />
+                    <SelectValue placeholder={pickerSource === "daddy" ? "Tous les pays" : undefined} />
+                  </SelectTrigger>
+                  <SelectContent className="glass-heavy border-white/10 max-h-[340px]">
+                    {pickerSource === "daddy" && (
+                      <SelectItem value="__all__">Tous les pays</SelectItem>
+                    )}
+                    {activeCountries.map((c) => (
+                      <SelectItem key={c} value={c} data-testid={`mv-country-option-${c}`}>
+                        <span className="inline-flex items-center gap-2">
+                          <FlagIcon country={c} size={18} />
+                          {c}
+                        </span>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
             </div>
 
             <div className="mv-picker-list" data-testid="mv-picker-list">
-              {channelsLoading ? (
+              {itemsLoading ? (
                 <div className="flex items-center justify-center py-10">
                   <Loader2 className="animate-spin text-[#ff2e63]" size={26} />
                 </div>
-              ) : channels.length === 0 ? (
-                <div className="text-center text-white/50 py-10 text-sm">Aucune chaîne trouvée.</div>
+              ) : items.length === 0 ? (
+                <div className="text-center text-white/50 py-10 text-sm">Aucun résultat.</div>
               ) : (
                 <div className="mv-picker-grid">
-                  {channels.map((ch) => (
+                  {items.map((it) => (
                     <button
-                      key={ch.id}
-                      onClick={() => assignChannel(ch)}
+                      key={`${it.kind}-${it.id}`}
+                      onClick={() => assignItem(it)}
                       className="mv-picker-item"
-                      data-testid={`mv-picker-item-${ch.id}`}
-                      title={ch.name}
+                      data-testid={`mv-picker-item-${it.kind}-${it.id}`}
+                      title={it.name}
                     >
                       <div className="mv-picker-item-icon">
-                        <Tv2 size={18} className="text-white/50" />
+                        {it.kind === "tv" && <Tv2 size={18} className="text-white/50" />}
+                        {it.kind === "daddy" && <Radio size={18} className="text-[#ff8a00]" />}
+                        {it.kind === "sports" && <Trophy size={18} className="text-emerald-400" />}
                       </div>
                       <div className="min-w-0 flex-1">
-                        <p className="text-sm font-semibold truncate">{ch.name}</p>
-                        <p className="text-[11px] text-white/45 truncate uppercase tracking-wider">
-                          {ch.categories?.[0] || "TV"}
+                        <p className="text-sm font-semibold truncate">{it.name}</p>
+                        <p className="text-[11px] text-white/45 truncate uppercase tracking-wider flex items-center gap-1.5">
+                          {it.kind === "tv" && (
+                            <>
+                              <FlagIcon country={it.country} size={12} />
+                              {it.categories?.[0] || "TV"}
+                            </>
+                          )}
+                          {it.kind === "daddy" && (
+                            <>
+                              <FlagIcon country={it.country} size={12} />
+                              {it.category || "Daddy"}
+                            </>
+                          )}
+                          {it.kind === "sports" && (
+                            <>{it.meta?.sport || "Sport"} · {it.meta?.time || ""}</>
+                          )}
                         </p>
                       </div>
                     </button>
