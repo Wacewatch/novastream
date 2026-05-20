@@ -293,7 +293,7 @@ frontend:
 metadata:
   created_by: "main_agent"
   version: "1.0"
-  test_sequence: 2
+  test_sequence: 3
   run_ui: false
 
 test_plan:
@@ -720,3 +720,121 @@ agent_communication:
       - Error handling (502 for upstream failures)
       
       All backend tasks are now working correctly. No critical issues found.
+
+
+  - task: "DaddyTV proxy SPLIT: dedicated /api/daddy/proxy endpoint (Chrome UA, Referer, streaming, Range, video/mp2t forcing, host allow-list)"
+    implemented: true
+    working: true
+    file: "backend/extensions.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: |
+          SPLIT proxy logic into two dedicated endpoints:
+          - /api/football/proxy: UNCHANGED, exclusively for RapidAPI football streams (iPhone UA, buffered)
+          - /api/daddy/proxy: NEW endpoint, exclusively for DaddyTV (Chrome UA, Referer https://chat.cfbu247.sbs/, streaming via StreamingResponse, Range forwarding, video/mp2t content-type forcing for obfuscated segments, host allow-list)
+          
+          /api/daddy/stream/{id} now returns stream_url with /api/daddy/proxy?url= (NOT /api/football/proxy).
+        -working: true
+        -agent: "testing"
+        -comment: |
+          ✅ ALL DADDY PROXY SPLIT TESTS PASSED (9/9). Created /app/backend_test_daddy_proxy.py with comprehensive validation.
+          
+          Test Results:
+          1. ✅ GET /api/daddy/stream/35 → Returns stream_url containing /api/daddy/proxy?url= (NOT /api/football/proxy)
+             - All required keys present: id, name, stream_url, iframe_url, embed_url
+             - iframe_url starts with "https://chat.cfbu247.sbs/api/proxy/player?token="
+             - embed_url equals iframe_url (backward compat)
+          
+          2. ✅ Master playlist fetch:
+             - Status 200 ✅
+             - Content-Type: application/vnd.apple.mpegurl ✅
+             - Body starts with #EXTM3U ✅
+             - Contains URLs pointing to /api/daddy/proxy?url= ✅
+          
+          3. ✅ Variant playlist fetch:
+             - Status 200 ✅
+             - Content-Type: application/vnd.apple.mpegurl ✅
+             - Contains 6 segment URLs ✅
+          
+          4. ✅ Segment fetch:
+             - Status 200 ✅
+             - Content-Type: video/mp2t ✅ (forced even though upstream may say image/jpeg)
+             - Body starts with 0x47 (MPEG-TS sync byte) ✅
+             - Access-Control-Allow-Origin: * ✅
+             - Segment size: 2.51 MB ✅
+          
+          5. ✅ Range request (bytes=0-1023):
+             - Returns 206 Partial Content ✅
+             - Returns exactly 1024 bytes ✅
+             - Response starts with 0x47 ✅
+          
+          6. ✅ Open-relay protection:
+             - GET /api/daddy/proxy?url=https://google.com/ → 400 "Host not allowed" ✅
+             - GET /api/daddy/proxy (no url) → 400 "Missing url" ✅
+             - GET /api/daddy/proxy?url=foo://bar → 400 "Invalid url" ✅
+          
+          7. ✅ /api/football/proxy UNCHANGED:
+             - GET /api/football/proxy (no url) → 400 "Missing url" ✅
+             - GET /api/football/proxy?url=https://chat.cfbu247.sbs/ → 502 (no crash, expected for DaddyTV URL on football endpoint) ✅
+          
+          8. ✅ GET /api/daddy/stream/9999999 → 404 ✅
+          
+          9. ✅ GET /api/daddy/channels?limit=5 → 200 with 5 channels (no regression) ✅
+          
+          The proxy split is working perfectly:
+          - /api/daddy/proxy uses Chrome UA (not iPhone)
+          - Referer: https://chat.cfbu247.sbs/
+          - Streaming mode (StreamingResponse, not buffered)
+          - Range header forwarding for partial-segment fetches
+          - Content-Type: video/mp2t forced for DLStream hosts
+          - Host allow-list prevents open-relay abuse
+          - /api/football/proxy remains unchanged (iPhone UA, buffered)
+          
+          All backend tasks are now working correctly. No critical issues found.
+
+agent_communication:
+    -agent: "main"
+    -message: |
+      PROXY SPLIT IMPLEMENTATION COMPLETE:
+      
+      Split the proxy logic into two dedicated endpoints:
+      1. /api/football/proxy - UNCHANGED, exclusively for RapidAPI football streams
+         - iPhone User-Agent
+         - Buffered responses
+         - Uses _proxify_fb helper
+      
+      2. /api/daddy/proxy - NEW endpoint, exclusively for DaddyTV
+         - Chrome desktop User-Agent
+         - Referer: https://chat.cfbu247.sbs/
+         - Streaming mode (StreamingResponse with httpx cx.stream())
+         - Range header forwarding for HLS seek
+         - Forces Content-Type: video/mp2t for obfuscated segments (DLStream CDN serves TS chunks as .js/.jpg/.pdf)
+         - Host allow-list (cfbu247.sbs, zampledakis.shop, etc.) prevents open-relay abuse
+         - Uses _proxify_daddy helper
+      
+      /api/daddy/stream/{id} now returns stream_url with /api/daddy/proxy?url= (NOT /api/football/proxy).
+      
+      Please test all 9 scenarios from the review request.
+    -agent: "testing"
+    -message: |
+      ✅ DADDY PROXY SPLIT TESTING COMPLETE - ALL TESTS PASSED (9/9)
+      
+      Comprehensive test suite executed against https://live-sports-hub-78.preview.emergentagent.com
+      Created /app/backend_test_daddy_proxy.py with full validation coverage.
+      
+      Key Findings:
+      1. Proxy split working perfectly - /api/daddy/proxy and /api/football/proxy are now separate
+      2. /api/daddy/stream/35 correctly returns stream_url with /api/daddy/proxy (NOT /api/football/proxy)
+      3. Master and variant playlists correctly rewritten to use /api/daddy/proxy
+      4. Segments correctly forced to video/mp2t content-type (even when upstream says image/jpeg)
+      5. MPEG-TS sync byte (0x47) verified in segment content
+      6. Range requests working (206 Partial Content with exact byte range)
+      7. Open-relay protection working (google.com blocked, invalid URLs blocked)
+      8. /api/football/proxy unchanged (still returns 400 for missing url)
+      9. No regressions on existing endpoints
+      
+      The proxy split implementation is production-ready. All test scenarios from the review request passed successfully.

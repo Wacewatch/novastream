@@ -445,8 +445,9 @@ async def daddy_stream(channel_id: str, request: Request):
     """Resolves the playable URLs for a DaddyTV channel.
 
     Returns:
-        - stream_url: HLS playlist routed through our /api/football/proxy
-          (CORS-safe, segments cached, no Referer leak). PRIMARY.
+        - stream_url: HLS playlist routed through our /api/daddy/proxy
+          (Chrome UA + chat.cfbu247.sbs Referer + streamed segments + Range
+          forwarding + forced video/mp2t content-type). PRIMARY.
         - iframe_url: chat.cfbu247.sbs/api/proxy/player URL — iframe-friendly
           fallback when HLS fails on the client.
         - embed_url: kept for backward compat (same as iframe_url).
@@ -470,13 +471,13 @@ async def daddy_stream(channel_id: str, request: Request):
         resolved = await _resolve_dlstream(cid)
         if resolved:
             if resolved.get("proxyPlaylistUrl"):
-                stream_url = f"{base}/api/football/proxy?url={quote(resolved['proxyPlaylistUrl'], safe='')}"
+                stream_url = f"{base}/api/daddy/proxy?url={quote(resolved['proxyPlaylistUrl'], safe='')}"
             if resolved.get("proxyPlayerUrl"):
                 iframe_url = resolved["proxyPlayerUrl"]
 
     # 2) Fallback to legacy m3u8 from allchannel.json if DLStream failed.
     if not stream_url and c.get("m3u8"):
-        stream_url = f"{base}/api/football/proxy?url={quote(c['m3u8'], safe='')}"
+        stream_url = f"{base}/api/daddy/proxy?url={quote(c['m3u8'], safe='')}"
 
     # 3) Fallback iframe = original embed_url from player10.json (last resort).
     if not iframe_url:
@@ -489,6 +490,195 @@ async def daddy_stream(channel_id: str, request: Request):
         "iframe_url": iframe_url,
         "embed_url": iframe_url,  # backward compat
     }
+
+
+# =====================================================================
+# DaddyTV / DLStream HLS proxy — strictly for the orange DaddyTV button.
+# Mirrors the daddytv.php technique (Chrome UA + Referer + URL rewriting
+# of the m3u8 + streamed binary passthrough with Range + content-type
+# forcing for obfuscated segments). DO NOT route RapidAPI football traffic
+# through this — use /api/football/proxy for that.
+# =====================================================================
+_DADDY_PROXY_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+_DADDY_REFERER = "https://chat.cfbu247.sbs/"
+
+# Segment file extensions — the DLStream CDN obfuscates HLS chunks behind
+# .js / .jpg / .pdf / .zst / .png / .woff to bypass content filters, so we
+# treat any non-m3u8 response on those hosts as a TS segment.
+_DADDY_SEG_EXT_RE = re.compile(
+    r"\.(ts|m4s|mp4|aac|key|js|jpg|jpeg|png|pdf|zst|woff2?|gif|webp)(\?|$)",
+    re.I,
+)
+# Domains served by the DaddyTV / DLStream pipeline. Anything else is rejected
+# so this proxy can't be abused as an open-relay.
+_DADDY_HOST_ALLOW_RE = re.compile(
+    r"(cfbu247\.sbs|zempovlantis\.online|zampledakis\.shop|jimpenopisonline\.online"
+    r"|daddylive\.li|daddylivehd\.|wikisport\.best|cdn-ed\.\w+|streamtp\d?\.)",
+    re.I,
+)
+
+
+def _proxify_daddy(base: str, abs_url: str) -> str:
+    return f"{base}/api/daddy/proxy?url={quote(abs_url, safe='')}"
+
+
+@ext_router.get("/daddy/proxy")
+@ext_router.head("/daddy/proxy")
+async def daddy_proxy(request: Request, url: str = Query("")):
+    """HLS / segment proxy dedicated to the DaddyTV (orange button) flow.
+
+    Replicates the PHP daddytv.php behaviour:
+      * Chrome desktop UA + Referer https://chat.cfbu247.sbs/.
+      * Buffers + rewrites m3u8 playlists so every URL loops back here.
+      * Streams binary segments via httpx cx.stream() (no in-memory buffer).
+      * Forwards Range / If-None-Match for HLS seek + caching.
+      * Forces Content-Type: video/mp2t for obfuscated segments (image/js/pdf).
+    """
+    from fastapi.responses import StreamingResponse
+
+    if not url:
+        return Response("Missing url", status_code=400)
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            return Response("Invalid url", status_code=400)
+    except Exception:
+        return Response("Invalid url", status_code=400)
+
+    # Open-relay guard: only proxy known DaddyTV / DLStream domains. We're
+    # permissive (substring match) because the CDN rotates segment domains.
+    if not _DADDY_HOST_ALLOW_RE.search(parsed.netloc):
+        # Allow if host ends with .sbs / .shop / .online (DLStream rotation
+        # pattern) to avoid breaking on a domain change.
+        if not re.search(r"\.(sbs|shop|online|space|click|site)$", parsed.netloc, re.I):
+            return Response("Host not allowed", status_code=400)
+
+    cx = await _get_http_client()
+    headers = {
+        "User-Agent": _DADDY_PROXY_UA,
+        "Referer": _DADDY_REFERER,
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9,fr;q=0.8",
+        "Accept-Encoding": "identity",
+    }
+    range_hdr = request.headers.get("range")
+    if range_hdr:
+        headers["Range"] = range_hdr
+
+    is_m3u8_url = (
+        bool(re.search(r"\.m3u8(\?|$)", parsed.path, re.I))
+        or "/playlist" in parsed.path
+    )
+
+    # ── m3u8 playlist: fetch + rewrite ───────────────────────────────────
+    if is_m3u8_url:
+        try:
+            upstream = await cx.get(url, headers=headers, follow_redirects=True, timeout=12.0)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("daddy proxy (m3u8) upstream failed: %s", e)
+            return Response("Proxy error", status_code=502)
+        if upstream.status_code != 200:
+            return Response(
+                f"Upstream {upstream.status_code}",
+                status_code=502,
+                headers={"Access-Control-Allow-Origin": "*"},
+            )
+        try:
+            text = upstream.text
+        except Exception:
+            text = upstream.content.decode("utf-8", errors="ignore")
+        base = _public_base(request)
+        base_url = re.sub(r"[^/]*(\?.*)?$", "", url)
+
+        def rewrite_line(line: str) -> str:
+            line = line.rstrip("\r")
+            if not line or line.startswith("#"):
+                def _r(m):
+                    u = m.group(1)
+                    abs_u = u if re.match(r"^https?://", u, re.I) else base_url + u.lstrip("/")
+                    return f'URI="{_proxify_daddy(base, abs_u)}"'
+                return re.sub(r'URI="([^"]+)"', _r, line)
+            abs_u = line if re.match(r"^https?://", line, re.I) else base_url + line.lstrip("/")
+            return _proxify_daddy(base, abs_u)
+
+        rewritten = "\n".join(rewrite_line(ln) for ln in text.split("\n"))
+        return Response(
+            content=rewritten,
+            media_type="application/vnd.apple.mpegurl",
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate",
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Headers": "*",
+                "Access-Control-Expose-Headers": "*",
+            },
+        )
+
+    # ── Segment / binary passthrough (streamed) ──────────────────────────
+    try:
+        upstream_req = cx.stream(
+            "GET", url,
+            headers=headers,
+            follow_redirects=True,
+            timeout=httpx.Timeout(connect=8.0, read=30.0, write=10.0, pool=10.0),
+        )
+        upstream = await upstream_req.__aenter__()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("daddy proxy (seg) upstream failed: %s", e)
+        return Response("Proxy error", status_code=502)
+
+    if upstream.status_code >= 400:
+        body = await upstream.aread()
+        await upstream.aclose()
+        await upstream_req.__aexit__(None, None, None)
+        return Response(
+            body[:512] or f"Upstream {upstream.status_code}",
+            status_code=502 if upstream.status_code >= 500 else upstream.status_code,
+            headers={"Access-Control-Allow-Origin": "*"},
+        )
+
+    # Force video/mp2t for obfuscated segments served as image/js/pdf/etc.
+    if _DADDY_SEG_EXT_RE.search(parsed.path) or "chat.cfbu247.sbs" in parsed.netloc or "zampledakis" in parsed.netloc:
+        ct_out = "video/iso.segment" if parsed.path.lower().endswith(".m4s") else "video/mp2t"
+    else:
+        ct_out = upstream.headers.get("content-type") or "application/octet-stream"
+
+    out_headers = {
+        "Cache-Control": "public, max-age=30, s-maxage=60",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Headers": "*",
+        "Access-Control-Expose-Headers": "*",
+        "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+    }
+    for h in ("content-length", "accept-ranges", "content-range", "last-modified", "etag"):
+        v = upstream.headers.get(h)
+        if v:
+            out_headers[h.title()] = v
+
+    resp_status = upstream.status_code
+
+    async def _stream():
+        try:
+            async for chunk in upstream.aiter_bytes(chunk_size=64 * 1024):
+                yield chunk
+        finally:
+            try:
+                await upstream.aclose()
+            except Exception:
+                pass
+            try:
+                await upstream_req.__aexit__(None, None, None)
+            except Exception:
+                pass
+
+    return StreamingResponse(
+        _stream(),
+        status_code=resp_status,
+        media_type=ct_out,
+        headers=out_headers,
+    )
 
 
 # Admin: Daddy config
@@ -1187,66 +1377,28 @@ async def football_streams(mid: str = Query("", description="Match id from /foot
 # HLS proxy: relays the upstream .m3u8 + segments, rewriting internal URLs so
 # they loop back through this proxy. Required because the RapidAPI streams need
 # a specific User-Agent and don't expose proper CORS headers.
-_FB_PROXY_UA_IPHONE = (
+#
+# IMPORTANT — scope:
+#   • /api/football/proxy  → RapidAPI football streams only (iPhone Safari UA).
+#                            DO NOT add unrelated logic here. It's tied to the
+#                            admin RapidAPI key rotation.
+#   • /api/daddy/proxy     → DaddyTV / DLStream (Chrome UA + chat.cfbu247.sbs
+#                            Referer + streaming + Range + masqueraded-segment
+#                            content-type forcing). See the separate handler
+#                            further down in this file.
+_FB_PROXY_UA = (
     "Mozilla/5.0 (iPhone; CPU iPhone OS 18_3_2 like Mac OS X) "
     "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3.1 Mobile/15E148 Safari/604.1"
 )
-_FB_PROXY_UA_CHROME = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-)
-
-# Hosts known to be part of the DaddyTV / DLStream pipeline (chat.cfbu247.sbs
-# resolver + the obfuscated segment CDNs). For those we use a desktop Chrome
-# UA + Referer https://chat.cfbu247.sbs/ — matching the PHP / Wacewatch flow.
-# Other hosts (RapidAPI streams, etc.) keep the iPhone Safari UA they need.
-_DLSTREAM_REFERER = "https://chat.cfbu247.sbs/"
-
-
-def _proxy_headers_for(host: str) -> Dict[str, str]:
-    h = (host or "").lower()
-    is_dl = (
-        h.endswith("cfbu247.sbs")
-        or h.endswith("zampledakis.shop")
-        # The DLStream CDN constantly rotates segment domains; fall through to
-        # the desktop UA + Referer pair for any non-RapidAPI looking host. We
-        # explicitly keep the iPhone UA only for the historical RapidAPI flow.
-        or not (h.endswith(".rapidapi.com") or "rapid" in h)
-    )
-    if is_dl:
-        return {
-            "User-Agent": _FB_PROXY_UA_CHROME,
-            "Referer": _DLSTREAM_REFERER,
-            "Accept": "*/*",
-            "Accept-Language": "en-US,en;q=0.9,fr;q=0.8",
-            "Accept-Encoding": "identity",
-        }
-    return {
-        "User-Agent": _FB_PROXY_UA_IPHONE,
-        "Accept": "*/*",
-        "Accept-Encoding": "identity",
-    }
-
-
-# Backwards-compat — code below still references _FB_PROXY_UA in places.
-_FB_PROXY_UA = _FB_PROXY_UA_CHROME
 
 
 def _proxify_fb(base: str, abs_url: str) -> str:
     return f"{base}/api/football/proxy?url={quote(abs_url, safe='')}"
 
 
-# Segment file extensions (HLS chunks). The DLStream pipeline obfuscates them
-# behind .js / .jpg / .pdf / .zst / .png / .woff to bypass content filters,
-# so we treat ANY non-m3u8 response on those hosts as a TS segment.
-_SEG_EXT_RE = re.compile(r"\.(ts|m4s|mp4|aac|key|js|jpg|jpeg|png|pdf|zst|woff2?|gif|webp|css|html)(\?|$)", re.I)
-_DLSTREAM_HOSTS_RE = re.compile(r"(cfbu247\.sbs|zampledakis\.shop)$", re.I)
-
-
 @ext_router.get("/football/proxy")
-@ext_router.head("/football/proxy")
 async def football_proxy(request: Request, url: str = Query("")):
-    from fastapi.responses import StreamingResponse
+    from fastapi.responses import StreamingResponse  # noqa: F401
 
     if not url:
         return Response("Missing url", status_code=400)
@@ -1258,33 +1410,30 @@ async def football_proxy(request: Request, url: str = Query("")):
         return Response("Invalid url", status_code=400)
 
     cx = await _get_http_client()
-    headers = _proxy_headers_for(parsed.netloc)
-    # Forward Range header for partial-segment fetches (HLS seek/buffer).
-    range_hdr = request.headers.get("range")
-    if range_hdr:
-        headers["Range"] = range_hdr
+    headers = {
+        "User-Agent": _FB_PROXY_UA,
+        "Accept": "*/*",
+        "Accept-Encoding": "identity",
+    }
+    try:
+        upstream = await cx.get(url, headers=headers, follow_redirects=True, timeout=20.0)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("football proxy upstream failed: %s", e)
+        return Response("Proxy error", status_code=502)
 
-    # Heuristic: m3u8 by extension or path.
-    is_m3u8_url = bool(re.search(r"\.m3u8(\?|$)", parsed.path, re.I)) or "/playlist" in parsed.path
+    if upstream.status_code != 200:
+        return Response(f"Upstream {upstream.status_code}", status_code=502)
 
-    if is_m3u8_url:
-        # Playlists are tiny — fetch fully so we can rewrite URLs.
-        try:
-            upstream = await cx.get(url, headers=headers, follow_redirects=True, timeout=12.0)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("football proxy (m3u8) upstream failed: %s", e)
-            return Response("Proxy error", status_code=502)
-        if upstream.status_code != 200:
-            return Response(
-                f"Upstream {upstream.status_code}",
-                status_code=502,
-                headers={"Access-Control-Allow-Origin": "*"},
-            )
+    ct = upstream.headers.get("content-type", "")
+    is_m3u8 = bool(re.search(r"(mpegurl|\.m3u8(\?|$))", ct, re.I)) or bool(re.search(r"\.m3u8(\?|$)", parsed.path, re.I))
+
+    base = _public_base(request)
+
+    if is_m3u8:
         try:
             text = upstream.text
         except Exception:
             text = upstream.content.decode("utf-8", errors="ignore")
-        base = _public_base(request)
         base_url = re.sub(r"[^/]*(\?.*)?$", "", url)
 
         def rewrite_line(line: str) -> str:
@@ -1303,86 +1452,25 @@ async def football_proxy(request: Request, url: str = Query("")):
             content=rewritten,
             media_type="application/vnd.apple.mpegurl",
             headers={
-                "Cache-Control": "no-store, no-cache, must-revalidate",
+                "Cache-Control": "no-cache",
                 "Access-Control-Allow-Origin": "*",
-                "Access-Control-Allow-Headers": "*",
-                "Access-Control-Expose-Headers": "*",
             },
         )
 
-    # ── Segment / binary passthrough ────────────────────────────────────
-    # Stream the upstream body instead of buffering it in memory so we don't
-    # hold 2-4 MB per concurrent viewer; also lets HLS.js start decoding the
-    # first PES packets immediately.
-    try:
-        upstream_req = cx.stream(
-            "GET", url,
-            headers=headers,
-            follow_redirects=True,
-            timeout=httpx.Timeout(connect=8.0, read=30.0, write=10.0, pool=10.0),
-        )
-        upstream = await upstream_req.__aenter__()
-    except Exception as e:  # noqa: BLE001
-        logger.warning("football proxy (seg) upstream failed: %s", e)
-        return Response("Proxy error", status_code=502)
-
-    if upstream.status_code >= 400:
-        body = await upstream.aread()
-        await upstream.aclose()
-        await upstream_req.__aexit__(None, None, None)
-        return Response(
-            body[:512] or f"Upstream {upstream.status_code}",
-            status_code=502 if upstream.status_code >= 500 else upstream.status_code,
-            headers={"Access-Control-Allow-Origin": "*"},
-        )
-
-    # Decide content-type. The DLStream CDN serves TS segments masqueraded as
-    # image/javascript/pdf/etc — force application/octet-stream (or video/mp2t
-    # for .ts) so HLS.js handles them as media instead of trying to decode
-    # them as JPEG/JS.
-    is_dlstream_host = bool(_DLSTREAM_HOSTS_RE.search(parsed.netloc))
-    if is_dlstream_host or _SEG_EXT_RE.search(parsed.path):
-        if parsed.path.lower().endswith(".m4s"):
-            ct_out = "video/iso.segment"
-        else:
-            ct_out = "video/mp2t"
-    else:
-        ct_out = upstream.headers.get("content-type") or "application/octet-stream"
-
-    resp_status = upstream.status_code
-    out_headers = {
-        "Cache-Control": "public, max-age=30, s-maxage=60",
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Headers": "*",
-        "Access-Control-Expose-Headers": "*",
-        "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
-    }
-    # Preserve content-length / accept-ranges / content-range when present
-    # (essential for byte-range / seeking).
-    for h in ("content-length", "accept-ranges", "content-range", "last-modified", "etag"):
-        v = upstream.headers.get(h)
-        if v:
-            out_headers[h.title()] = v
-
-    async def _stream():
-        try:
-            async for chunk in upstream.aiter_bytes(chunk_size=64 * 1024):
-                yield chunk
-        finally:
-            try:
-                await upstream.aclose()
-            except Exception:
-                pass
-            try:
-                await upstream_req.__aexit__(None, None, None)
-            except Exception:
-                pass
-
-    return StreamingResponse(
-        _stream(),
-        status_code=resp_status,
-        media_type=ct_out,
-        headers=out_headers,
+    is_segment = bool(re.search(r"\.(ts|m4s|mp4|aac|key)(\?|$)", parsed.path, re.I))
+    cache_ctl = (
+        "public, max-age=300, s-maxage=600, stale-while-revalidate=60"
+        if is_segment
+        else upstream.headers.get("cache-control") or "public, max-age=60"
+    )
+    return Response(
+        content=upstream.content,
+        status_code=upstream.status_code,
+        media_type=ct or "video/mp2t",
+        headers={
+            "Cache-Control": cache_ctl,
+            "Access-Control-Allow-Origin": "*",
+        },
     )
 
 
