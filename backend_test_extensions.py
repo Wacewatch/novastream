@@ -14,7 +14,7 @@ import time
 from typing import Dict, Any, List
 
 # Public preview URL
-BASE_URL = "https://live-sports-hub-78.preview.emergentagent.com"
+BASE_URL = "https://embed-gateway.preview.emergentagent.com"
 
 class TestResults:
     def __init__(self):

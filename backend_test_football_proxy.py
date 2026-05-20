@@ -11,7 +11,7 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 
 # Backend URL from frontend/.env
-BASE_URL = "https://live-sports-hub-78.preview.emergentagent.com"
+BASE_URL = "https://embed-gateway.preview.emergentagent.com"
 
 # Test results
 results = {

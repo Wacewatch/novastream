@@ -224,9 +224,15 @@ _LOGO_COUNTRY_MAP = {
 _LOGO_INDEX: Dict[str, Dict[str, str]] = {}
 
 def _slugify(text: str) -> str:
-    """Channel-name slug: lowercase, accent-stripped, kebab-case, '+' -> 'plus'."""
+    """Channel-name slug: lowercase, accent-stripped, kebab-case, '+' -> 'plus'.
+    Removes parenthetical suffixes like (BACKUP) and bracketed suffixes like
+    [LIVE DURING EVENTS ONLY] before slugifying so they don't pollute the slug."""
     import unicodedata
-    s = unicodedata.normalize("NFKD", text or "").encode("ascii", "ignore").decode("ascii")
+    s = text or ""
+    # Strip [...] and (...) noise (regional/backup/event markers)
+    s = re.sub(r"\[[^\]]*\]", " ", s)
+    s = re.sub(r"\([^\)]*\)", " ", s)
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
     s = s.lower()
     s = s.replace("+", " plus ").replace("&", " and ")
     s = re.sub(r"[^a-z0-9]+", "-", s)
@@ -238,20 +244,31 @@ _SLUG_STOPWORDS = {
     "hd", "fhd", "uhd", "4k", "sd",
     "channel", "tv", "the",
     "backup", "main", "alt", "only",
+    "live", "event", "events", "during",
+    "plus",
 }
 
 def _candidate_slugs(name: str) -> List[str]:
-    """Generate ordered candidate slugs for a channel display name."""
+    """Generate ordered candidate slugs for a channel display name.
+    Also emits a "collapsed" variant (no hyphens) so e.g. '13-eme-rue'
+    can match the repo entry '13eme-rue'."""
     base = _slugify(name)
     if not base:
         return []
     parts = [p for p in base.split("-") if p]
-    cand = ["-".join(parts)]
+    cand: List[str] = []
+    full = "-".join(parts)
+    cand.append(full)
+    cand.append(full.replace("-", ""))  # collapsed
     pruned = [p for p in parts if p not in _SLUG_STOPWORDS]
     if pruned and pruned != parts:
-        cand.append("-".join(pruned))
+        p_full = "-".join(pruned)
+        cand.append(p_full)
+        cand.append(p_full.replace("-", ""))
     if pruned and pruned[-1].isdigit() and len(pruned) > 1:
-        cand.append("-".join(pruned[:-1]))
+        shorter = "-".join(pruned[:-1])
+        cand.append(shorter)
+        cand.append(shorter.replace("-", ""))
     seen = set()
     out = []
     for s in cand:
@@ -276,12 +293,26 @@ def _guess_logo(name: str, country: str) -> str:
 
 async def _refresh_logo_index() -> None:
     """Populate _LOGO_INDEX by listing each country's folder once at startup.
-    Failure is non-fatal (we just won't have logos for that country)."""
+    Persists the resulting maps in MongoDB so subsequent restarts don't hit
+    GitHub's anonymous rate limit (60 req/h). Falls back to the cached map
+    when the upstream API throttles or fails."""
     cx = await get_http_client()
+    # Load any persisted indexes first so a rate-limit hit still yields logos.
+    try:
+        async for doc in db.cached_logo_index.find({}):
+            cn = doc.get("_id")
+            mp = doc.get("map")
+            if cn and isinstance(mp, dict) and mp:
+                _LOGO_INDEX[cn] = mp
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"logo index db load failed: {e}")
     for display, (folder, code) in _LOGO_COUNTRY_MAP.items():
         try:
             r = await cx.get(f"{TV_LOGO_API}/{folder}", timeout=15.0)
             if r.status_code != 200:
+                # Keep any previously cached index for this country.
+                if r.status_code in (403, 429):
+                    logger.warning(f"logo index {display}: rate limited, keeping cached map ({len(_LOGO_INDEX.get(display, {}))} entries)")
                 continue
             payload = r.json()
             files = payload if isinstance(payload, list) else []
@@ -297,12 +328,26 @@ async def _refresh_logo_index() -> None:
                 else:
                     key = stem
                 slug_map[key] = fname
+                collapsed = key.replace("-", "")
+                if collapsed and collapsed != key:
+                    slug_map.setdefault(collapsed, fname)
                 # Also index without inner language markers sometimes present.
                 for marker in ("-french", "-deutsch", "-italiano", "-espanol"):
                     if marker in key:
-                        slug_map[key.replace(marker, "")] = fname
-            _LOGO_INDEX[display] = slug_map
-            logger.info(f"logo index {display}: {len(slug_map)} entries")
+                        alt = key.replace(marker, "")
+                        slug_map.setdefault(alt, fname)
+                        slug_map.setdefault(alt.replace("-", ""), fname)
+            if slug_map:
+                _LOGO_INDEX[display] = slug_map
+                try:
+                    await db.cached_logo_index.update_one(
+                        {"_id": display},
+                        {"$set": {"map": slug_map, "updated_at": int(time.time())}},
+                        upsert=True,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"logo index db persist failed for {display}: {e}")
+                logger.info(f"logo index {display}: {len(slug_map)} entries")
         except Exception as e:
             logger.warning(f"logo index failed for {display}: {e}")
 

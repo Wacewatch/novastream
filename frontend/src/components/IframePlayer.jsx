@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { X, ExternalLink, Maximize, RotateCcw } from "lucide-react";
+import { X, Maximize, RotateCcw } from "lucide-react";
 
 const LOGO_URL = "https://i.imgur.com/V8YmT4z.png";
 
@@ -8,6 +8,10 @@ const LOGO_URL = "https://i.imgur.com/V8YmT4z.png";
  *
  * Visually mirrors the HLS <VideoPlayer/> layout: a centered 16/9
  * .player-frame inside a fixed .player-shell — NOT a full-bleed iframe.
+ *
+ * IMPORTANT: this component intentionally exposes NO link to the upstream
+ * source URL (no "open in new tab"). The iframe `src` is the only place
+ * the URL travels — never surfaced to the user via UI.
  *
  * Props:
  *   - src: iframe URL
@@ -72,16 +76,6 @@ export default function IframePlayer({
             >
               <RotateCcw size={15} />
             </button>
-            <a
-              href={src}
-              target="_blank"
-              rel="noreferrer"
-              className="iframe-player-btn"
-              title="Ouvrir dans un nouvel onglet"
-              data-testid="iframe-external-btn"
-            >
-              <ExternalLink size={15} />
-            </a>
             <button
               type="button"
               onClick={openFullscreen}
