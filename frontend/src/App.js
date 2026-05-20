@@ -5,6 +5,9 @@ import NovaStream from "@/pages/NovaStream";
 import EmbedPage from "@/pages/EmbedPage";
 import DaddyEmbedPage from "@/pages/DaddyEmbedPage";
 import SportsEmbedPage from "@/pages/SportsEmbedPage";
+import SportsTokenRedirect from "@/pages/SportsTokenRedirect";
+import FootballEmbedPage from "@/pages/FootballEmbedPage";
+import FootballTokenRedirect from "@/pages/FootballTokenRedirect";
 import ApiDocs from "@/pages/ApiDocs";
 import MultiView from "@/pages/MultiView";
 import Login from "@/pages/Login";
@@ -24,7 +27,10 @@ function App() {
               <Route path="/" element={<NovaStream />} />
               <Route path="/embed/:channelId" element={<EmbedPage />} />
               <Route path="/embed/daddy/:channelId" element={<DaddyEmbedPage />} />
+              <Route path="/embed/sports/t/:token" element={<SportsTokenRedirect />} />
               <Route path="/embed/sports/:source/:id" element={<SportsEmbedPage />} />
+              <Route path="/embed/football/t/:token" element={<FootballTokenRedirect />} />
+              <Route path="/embed/football/:matchId/:serverIdx?" element={<FootballEmbedPage />} />
               <Route path="/docs" element={<ApiDocs />} />
               <Route path="/multiview" element={<MultiView />} />
               <Route path="/login" element={<Login />} />

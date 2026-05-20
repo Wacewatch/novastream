@@ -398,7 +398,16 @@ _dlstream_locks: Dict[str, asyncio.Lock] = {}
 # player.cfbu247.sbs. We discover the bundle filename from the embed HTML, then
 # parse the JS to build a {slug: channel_id} map, cached for 6h.
 SLUG_MAP_BASE = "https://player.cfbu247.sbs"
-SLUG_MAP_DISCOVERY_PATH = "/embed/abc-usa"  # any valid slug works
+# Discovery slugs — we try each one in order until we find a working
+# channelData-*.js asset. Rotating across multiple stable slugs guards us
+# against any single one being removed from the upstream catalog.
+SLUG_MAP_DISCOVERY_SLUGS = (
+    "abc-usa",
+    "bbc-one-uk",
+    "astro-supersport-1",
+    "cnn-usa",
+    "espn-usa",
+)
 SLUG_MAP_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -415,24 +424,37 @@ _SLUG_ENTRY_RE = re.compile(r'channel_id\s*:\s*"(\d+)"\s*,\s*slug\s*:\s*"([a-z0-
 
 
 async def _build_slug_map() -> Dict[str, str]:
-    """Fetch the player.cfbu247.sbs embed HTML, discover channelData-*.js
-    and parse the slug → numeric channel_id pairs."""
+    """Fetch the player.cfbu247.sbs embed HTML for one of several discovery
+    slugs, find the `channelData-*.js` asset reference and parse the
+    slug → numeric channel_id pairs. Tries multiple seed slugs so the
+    resolver still works if one of them is removed upstream."""
     cx = await _get_http_client()
+    asset_url: Optional[str] = None
+    for slug in SLUG_MAP_DISCOVERY_SLUGS:
+        try:
+            r = await cx.get(
+                f"{SLUG_MAP_BASE}/embed/{slug}",
+                headers=SLUG_MAP_HEADERS,
+                timeout=15.0,
+                follow_redirects=True,
+            )
+            if r.status_code != 200:
+                logger.warning("slug map seed %s HTTP %s", slug, r.status_code)
+                continue
+            m = _CHANNEL_DATA_RE.search(r.text)
+            if not m:
+                logger.warning("slug map seed %s: channelData asset not found", slug)
+                continue
+            asset_url = f"{SLUG_MAP_BASE}/assets/{m.group(1)}"
+            logger.info("slug map seed %s -> %s", slug, m.group(1))
+            break
+        except Exception as e:  # noqa: BLE001
+            logger.warning("slug map seed %s failed: %s", slug, e)
+            continue
+    if not asset_url:
+        logger.warning("slug map: all discovery seeds failed")
+        return {}
     try:
-        r = await cx.get(
-            f"{SLUG_MAP_BASE}{SLUG_MAP_DISCOVERY_PATH}",
-            headers=SLUG_MAP_HEADERS,
-            timeout=15.0,
-            follow_redirects=True,
-        )
-        if r.status_code != 200:
-            logger.warning("slug map discovery HTTP %s", r.status_code)
-            return {}
-        m = _CHANNEL_DATA_RE.search(r.text)
-        if not m:
-            logger.warning("slug map: channelData asset not found in embed HTML")
-            return {}
-        asset_url = f"{SLUG_MAP_BASE}/assets/{m.group(1)}"
         r2 = await cx.get(asset_url, headers=SLUG_MAP_HEADERS, timeout=20.0, follow_redirects=True)
         if r2.status_code != 200:
             logger.warning("slug map asset HTTP %s", r2.status_code)
@@ -444,7 +466,7 @@ async def _build_slug_map() -> Dict[str, str]:
         logger.info("slug map built: %s entries", len(out))
         return out
     except Exception as e:  # noqa: BLE001
-        logger.warning("slug map build failed: %s", e)
+        logger.warning("slug map asset fetch failed: %s", e)
         return {}
 
 
@@ -1709,6 +1731,7 @@ async def public_daddy_channels(
     if not cfg["enabled"]:
         return {"total": 0, "countries": [], "categories": [], "channels": []}
     items = await _daddy_catalog()
+    base = _public_base(request)
     s = (search or "").strip().lower()
     out: List[Dict[str, Any]] = []
     for c in items:
@@ -1723,7 +1746,9 @@ async def public_daddy_channels(
             "name": c["name"],
             "country": c["country"],
             "category": c["category"],
-            "embed_url": c["embed_url"],
+            # Always our own embed page (ad gate + 18+ gate + player).
+            # Never expose the upstream player.cfbu247.sbs / chat.cfbu247.sbs URL.
+            "embed_url": f"{base}/embed/daddy/{quote(str(c['id']), safe='')}",
         })
     if limit and limit > 0:
         out = out[: max(0, min(limit, 2000))]
@@ -1737,7 +1762,7 @@ async def public_daddy_channels(
 
 
 @ext_router.get("/v1/public/daddy/channel/{channel_id}")
-async def public_daddy_channel(channel_id: str):
+async def public_daddy_channel(channel_id: str, request: Request):
     cfg = await _get_daddy_config()
     if not cfg["enabled"]:
         raise HTTPException(status_code=503, detail="DaddyTV désactivé")
@@ -1745,12 +1770,13 @@ async def public_daddy_channel(channel_id: str):
     c = _daddy_cache["by_id"].get(str(channel_id).strip())
     if not c:
         raise HTTPException(status_code=404, detail="Chaîne DaddyTV introuvable")
+    base = _public_base(request)
     return {
         "id": c["id"],
         "name": c["name"],
         "country": c["country"],
         "category": c["category"],
-        "embed_url": c["embed_url"],
+        "embed_url": f"{base}/embed/daddy/{quote(str(c['id']), safe='')}",
     }
 
 
@@ -1781,16 +1807,116 @@ async def public_daddy_categories():
 
 
 # ---- Sports public ----
+# Build an opaque base64-encoded token so the public response NEVER leaks
+# the upstream source provider name. The token is a URL-safe base64 of
+# "source:id". Decoded server-side in /embed/sports/t/{token}.
+import base64 as _b64
+
+
+def _encode_sports_token(source: str, sid: str) -> str:
+    raw = f"{source}:{sid}".encode("utf-8")
+    return _b64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def _decode_sports_token(token: str) -> Optional[Tuple[str, str]]:
+    try:
+        pad = "=" * (-len(token) % 4)
+        raw = _b64.urlsafe_b64decode(token + pad).decode("utf-8")
+        if ":" not in raw:
+            return None
+        s, i = raw.split(":", 1)
+        return (s.strip(), i.strip())
+    except Exception:
+        return None
+
+
+def _public_sport_event(ev: Dict[str, Any], base: str) -> Dict[str, Any]:
+    """Public-facing event: stripped of upstream source names / streamed.pk
+    embed URLs. Each playable variant becomes an opaque embed URL routed
+    through OUR /embed/sports/t/{token} endpoint."""
+    embeds: List[Dict[str, str]] = []
+    for s in (ev.get("sources") or []):
+        src = s.get("source") or ""
+        sid = s.get("id") or ""
+        if not src or not sid:
+            continue
+        tok = _encode_sports_token(src, sid)
+        title = quote((ev.get("title") or "").strip(), safe="")
+        embed_url = f"{base}/embed/sports/t/{tok}"
+        if title:
+            embed_url += f"?t={title}"
+        embeds.append({
+            "label": f"Stream {len(embeds) + 1}",  # generic — no source name
+            "embed_url": embed_url,
+        })
+    return {
+        "id": ev.get("id"),
+        "title": ev.get("title"),
+        "sport": ev.get("sport"),
+        "league": ev.get("league"),
+        "time": ev.get("time"),
+        "is_live": bool(ev.get("isLive")),
+        "popular": bool(ev.get("popular")),
+        "home": ev.get("home"),
+        "away": ev.get("away"),
+        "home_badge": ev.get("homeBadge"),
+        "away_badge": ev.get("awayBadge"),
+        "embeds": embeds,
+    }
+
+
 @ext_router.get("/v1/public/sports")
-async def public_sports(sport: str = ""):
-    return await sports_matches(sport=sport)  # reuse
+async def public_sports(request: Request, sport: str = ""):
+    base = _public_base(request)
+    data = await sports_matches(sport=sport)
+    events_pub = [_public_sport_event(e, base) for e in (data.get("events") or [])]
+    return {
+        "total": len(events_pub),
+        "sports": data.get("sports") or [],
+        "sport_counts": data.get("sportCounts") or {},
+        "live_count": data.get("liveCount") or 0,
+        "popular_count": data.get("popularCount") or 0,
+        "events": events_pub,
+    }
+
+
+def _public_football_match(m: Dict[str, Any], base: str) -> Dict[str, Any]:
+    """Public-facing football match: drops raw m3u8 / stream_url, exposes
+    only an opaque embed URL when servers are available."""
+    out = dict(m)
+    out.pop("has_servers", None)
+    out.pop("server_count", None)
+    embeds: List[Dict[str, str]] = []
+    if m.get("server_count"):
+        for i in range(int(m["server_count"])):
+            tok = _b64.urlsafe_b64encode(
+                f"{m['id']}:{i}".encode("utf-8")
+            ).rstrip(b"=").decode("ascii")
+            embeds.append({
+                "label": f"Stream {i + 1}",
+                "embed_url": f"{base}/embed/football/t/{tok}",
+            })
+    out["embeds"] = embeds
+    return out
 
 
 @ext_router.get("/v1/public/football")
-async def public_football():
-    return await football_matches()
+async def public_football(request: Request):
+    base = _public_base(request)
+    data = await football_matches()
+    matches_pub = [_public_football_match(m, base) for m in (data.get("matches") or [])]
+    return {
+        "total": data.get("total", 0),
+        "live_count": data.get("live_count", 0),
+        "league_count": data.get("league_count", 0),
+        "leagues": data.get("leagues") or [],
+        "matches": matches_pub,
+        "cache_age_sec": data.get("cache_age_sec", 0),
+    }
 
 
 @ext_router.get("/v1/public/sports/info")
 async def public_sports_info():
+    # Info schedule (tv247.us) only references DaddyTV channels by id/name —
+    # no upstream source names or streams. Pass-through is safe.
     return await sports_info()

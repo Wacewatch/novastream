@@ -3,6 +3,7 @@ import axios from "axios";
 import { Search, Globe2, Loader2, Radio } from "lucide-react";
 import { toast } from "sonner";
 import FlagIcon from "@/components/FlagIcon";
+import FavoriteButton from "@/components/FavoriteButton";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -172,8 +173,11 @@ function DaddyCard({ ch, onClick }) {
     <button
       onClick={onClick}
       data-testid={`daddy-card-${ch.id}`}
-      className="glass rounded-xl p-3 text-left hover:border-[#ff8a00]/40 hover:bg-[#ff8a00]/5 transition-all duration-200 border border-white/8 hover:-translate-y-0.5"
+      className="glass rounded-xl p-3 text-left hover:border-[#ff8a00]/40 hover:bg-[#ff8a00]/5 transition-all duration-200 border border-white/8 hover:-translate-y-0.5 relative"
     >
+      <div className="absolute top-2 right-2 z-10">
+        <FavoriteButton channelId={`daddy:${ch.id}`} size={13} />
+      </div>
       <div className="flex items-center gap-2 mb-2">
         <div
           className="w-9 h-9 rounded-lg flex items-center justify-center text-white shrink-0"
@@ -182,7 +186,7 @@ function DaddyCard({ ch, onClick }) {
           <Radio size={16} />
         </div>
       </div>
-      <div className="text-sm font-semibold text-white truncate" title={ch.name}>{ch.name}</div>
+      <div className="text-sm font-semibold text-white truncate pr-6" title={ch.name}>{ch.name}</div>
       <div className="text-[11px] text-white/50 mt-0.5 truncate flex items-center gap-1.5">
         <FlagIcon country={ch.country} size={12} />
         <span className="truncate">{ch.category} · {ch.country}</span>

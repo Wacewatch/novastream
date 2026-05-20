@@ -1,0 +1,44 @@
+{
+  "summary": "Iteration 7 validates the 5 changes shipped this session: (1) IframePlayer refactor (.player-shell > .player-frame, centered 16/9), (2) public API leak-proofing — /v1/public/{daddy,sports,football} only expose OUR /embed/* URLs and opaque base64url tokens, (3) FavoriteButton present on every DaddyTV card with the 'daddy:<id>' channelId, (4) slug-seed rotation across 5 known-stable slugs in _build_slug_map, (5) two new token-redirect React routes (/embed/sports/t/:token and /embed/football/t/:token) plus /embed/football/:matchId/:serverIdx. Backend: 8/8 NEW pytest cases pass on the public-API contract suite + 13/13 prior pytest from iteration 6 still pass (slug resolver, daddy proxy, cached_catalog, 18+ category). Frontend: Playwright on /embed/sports/t/{token} confirmed client-side base64url decode → redirect to /embed/sports/echo/{id}?t=… and the AdUnlockModal renders correctly (étape 1/2 — Débloquer le direct). /embed/football/t/{token} → /embed/football/31b22b44-26/0 with the same modal. Homepage → DaddyTV tab → 507 channel cards rendered, first card [data-testid='daddy-card-123'] contains [data-testid='fav-btn-daddy:123']; clicking it persists ['daddy:123'] to localStorage 'livewatch.favorites.v1'. Clicking the card opens the player overlay with .player-shell wrapper (centered, NOT full-bleed) — confirmed visually that the ad gate + behind-it player container are centered.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_public_api_contracts.py",
+    "/app/backend/tests/test_daddy_slug_cache.py",
+    "/app/test_reports/pytest/iter7_results.xml"
+  ],
+  "action_items": [
+    "MINOR (HTML correctness): DaddyCard renders a <FavoriteButton> (which is a <button>) inside a <button class='glass …'> wrapper. This is invalid HTML and triggers a React hydration warning in console: '<button> cannot be a descendant of <button>'. Fix: change the outer DaddyCard from <button> to a <div role='button' tabIndex={0} onKeyDown=…> OR position FavoriteButton as a sibling overlay outside the card button. Likely present in the TV channel card too since favorites were modeled after TV — verify ChannelCard.jsx.",
+    "MEDIUM (carry-forward from iter 4/5/6): /app/backend/extensions.py is 1922 lines. Split into daddy_router.py / sports_router.py / football_router.py / admin_router.py was declined for this iteration (zero-behavior-change refactor, high regression risk) — schedule it before the file passes 2000 LoC."
+  ],
+  "critical_code_review_comments": [
+    "GOOD: extensions.py SLUG_MAP_DISCOVERY_SLUGS (line 404) rotates across 5 known-stable slugs (abc-usa, bbc-one-uk, astro-supersport-1, cnn-usa, espn-usa). _build_slug_map iterates and breaks on the first 200 OK with a parseable channelData asset — robust fallback. Slug resolver still passes for slug-automoto-la-chaine + slug-18-plus-18.",
+    "GOOD: _encode_sports_token (line 1816) uses base64.urlsafe_b64encode + rstrip('=') so the token contains no +, /, or = characters. _decode_sports_token re-pads correctly. Mirror logic on the React side (SportsTokenRedirect.jsx + FootballTokenRedirect.jsx) replaces -→+ and _→/ and re-adds padding before atob — symmetric & correct.",
+    "GOOD: _public_sport_event (line 1833) builds a fresh dict — does NOT pass through arbitrary upstream fields. embeds[].label is generic 'Stream N' (no source name). Confirmed via pytest: no 'source', no 'embedUrl' anywhere in /v1/public/sports response.",
+    "GOOD: _public_football_match (line 1883) pops 'has_servers' and 'server_count' from the dict-copy before exposing. _normalize_fb_match (line 1401) never adds 'url' or 'stream_url' to the public dict (they live on /football/streams instead). Pytest scan confirms no leak of those fields.",
+    "GOOD: public_daddy_channels + public_daddy_channel build embed_url as f'{base}/embed/daddy/{quote(id)}' — never references player.cfbu247.sbs / chat.cfbu247.sbs. The internal /api/daddy/stream/{id} (used by DaddyEmbedPage AFTER the ad-gate) is intentionally not exposed under /v1/public/.",
+    "GOOD: IframePlayer.jsx wraps everything in .player-shell > .player-frame matching the HLS VideoPlayer layout. Top bar (logo/title/reload/external/fullscreen/close) overlays via absolute positioning inside .player-frame. Escape key closes — keyboard accessibility preserved.",
+    "MINOR: DaddyCard nests <button data-testid='fav-btn-daddy:…'> inside <button data-testid='daddy-card-…'> — invalid HTML, generates a hydration warning every mount. Functionally works (event.stopPropagation must be inside FavoriteButton), but should be fixed: outer card → <div role='button' tabIndex={0}> or move FavoriteButton out as an absolute-positioned sibling of the card button.",
+    "MEDIUM: extensions.py now 1922 LoC. Split into per-router modules (daddy, sports, football, admin, public) backlog item — not blocking but compounding."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_public_api_contracts.py (NEW — 8 pytest cases covering public-API contract: embed_url on our domain, no upstream leaks, opaque tokens, slug rotation, /api/channels<2s)"
+  ],
+  "success_rate": {
+    "backend": "100% (8/8 new contract tests + 13/13 prior regression — 21/21 total)",
+    "frontend": "100% (sports token redirect + ad modal, football token redirect + ad modal, daddy fav toggle + localStorage persistence, daddy card → centered .player-shell overlay all confirmed)"
+  },
+  "test_credentials": "Not required.",
+  "seed_data_creation": "None.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "All 5 changes ship green. Public-API contract pytest is at /app/backend/tests/test_public_api_contracts.py — reuse for regression. The slug→numeric resolver lives at extensions.py:404-498 with a 5-slug rotation and 6h TTL. /api/v1/public/{sports,football} produce opaque base64url tokens; the redirect routes /embed/sports/t/:token and /embed/football/t/:token live at /app/frontend/src/pages/{Sports,Football}TokenRedirect.jsx and decode client-side. The only outstanding minor is the <button> inside <button> nest in DaddyCard.jsx (line 173-194) — same pattern may exist on TV ChannelCard.jsx since favorites were copied from there. Worth a quick scan with `grep -rn 'FavoriteButton' frontend/src/components/`.",
+  "rca of the issue": "N/A — no failures. The only console warning (<button> nested in <button>) is a React HTML-spec strictness warning, not a runtime bug; favorites still toggle correctly and persist."
+}
