@@ -389,6 +389,93 @@ _dlstream_cache: Dict[str, Tuple[Dict[str, str], float]] = {}
 _dlstream_locks: Dict[str, asyncio.Lock] = {}
 
 
+# -----------------------------------------------------------------------------
+# Slug → numeric channel_id resolver (player.cfbu247.sbs channelData bundle)
+# -----------------------------------------------------------------------------
+# Many DaddyTV channels (slug-XXX in our cache) lack a numeric ID in the static
+# catalog and in player10.json (id=0). To play them, we need their REAL numeric
+# channel_id which lives in the Vite bundle channelData-<hash>.js shipped by
+# player.cfbu247.sbs. We discover the bundle filename from the embed HTML, then
+# parse the JS to build a {slug: channel_id} map, cached for 6h.
+SLUG_MAP_BASE = "https://player.cfbu247.sbs"
+SLUG_MAP_DISCOVERY_PATH = "/embed/abc-usa"  # any valid slug works
+SLUG_MAP_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Referer": "https://daddylive.li/",
+    "Accept": "*/*",
+}
+SLUG_MAP_TTL = 6 * 3600.0  # 6h
+_slug_map_cache: Dict[str, Any] = {"at": 0.0, "map": {}}
+_slug_map_lock = asyncio.Lock()
+_CHANNEL_DATA_RE = re.compile(r"/assets/(channelData-[A-Za-z0-9_-]+\.js)")
+_SLUG_ENTRY_RE = re.compile(r'channel_id\s*:\s*"(\d+)"\s*,\s*slug\s*:\s*"([a-z0-9-]+)"')
+
+
+async def _build_slug_map() -> Dict[str, str]:
+    """Fetch the player.cfbu247.sbs embed HTML, discover channelData-*.js
+    and parse the slug → numeric channel_id pairs."""
+    cx = await _get_http_client()
+    try:
+        r = await cx.get(
+            f"{SLUG_MAP_BASE}{SLUG_MAP_DISCOVERY_PATH}",
+            headers=SLUG_MAP_HEADERS,
+            timeout=15.0,
+            follow_redirects=True,
+        )
+        if r.status_code != 200:
+            logger.warning("slug map discovery HTTP %s", r.status_code)
+            return {}
+        m = _CHANNEL_DATA_RE.search(r.text)
+        if not m:
+            logger.warning("slug map: channelData asset not found in embed HTML")
+            return {}
+        asset_url = f"{SLUG_MAP_BASE}/assets/{m.group(1)}"
+        r2 = await cx.get(asset_url, headers=SLUG_MAP_HEADERS, timeout=20.0, follow_redirects=True)
+        if r2.status_code != 200:
+            logger.warning("slug map asset HTTP %s", r2.status_code)
+            return {}
+        out: Dict[str, str] = {}
+        for cid, slug in _SLUG_ENTRY_RE.findall(r2.text):
+            if slug and cid and slug not in out:
+                out[slug] = cid
+        logger.info("slug map built: %s entries", len(out))
+        return out
+    except Exception as e:  # noqa: BLE001
+        logger.warning("slug map build failed: %s", e)
+        return {}
+
+
+async def _get_slug_map(force: bool = False) -> Dict[str, str]:
+    now = time.time()
+    if (not force and _slug_map_cache["map"]
+            and now - _slug_map_cache["at"] < SLUG_MAP_TTL):
+        return _slug_map_cache["map"]
+    async with _slug_map_lock:
+        if (not force and _slug_map_cache["map"]
+                and time.time() - _slug_map_cache["at"] < SLUG_MAP_TTL):
+            return _slug_map_cache["map"]
+        mp = await _build_slug_map()
+        if mp:
+            _slug_map_cache["map"] = mp
+            _slug_map_cache["at"] = time.time()
+        return _slug_map_cache["map"]
+
+
+async def _resolve_slug_to_numeric(slug_or_id: str) -> Optional[str]:
+    """Given a 'slug-XXX' ID from our catalog, return the real numeric channel_id."""
+    s = (slug_or_id or "").strip()
+    if not s:
+        return None
+    if not s.startswith("slug-"):
+        return s if s.isdigit() else None
+    slug = s[5:]  # strip "slug-" prefix
+    mp = await _get_slug_map()
+    return mp.get(slug)
+
+
 def _dlstream_lock(key: str) -> asyncio.Lock:
     lk = _dlstream_locks.get(key)
     if lk is None:
@@ -466,9 +553,16 @@ async def daddy_stream(channel_id: str, request: Request):
     iframe_url = ""
 
     # 1) Prefer the DLStream resolver (matches the Wacewatch /api/direct flow).
-    #    Slug-IDs (from upstream player10.json with no static mapping) skip it.
-    if not cid.startswith("slug-"):
-        resolved = await _resolve_dlstream(cid)
+    #    For slug-XXX channels, first resolve to numeric channel_id via the
+    #    player.cfbu247.sbs channelData bundle.
+    numeric_id = cid
+    if cid.startswith("slug-"):
+        n = await _resolve_slug_to_numeric(cid)
+        if n:
+            numeric_id = n
+
+    if numeric_id and numeric_id.isdigit():
+        resolved = await _resolve_dlstream(numeric_id)
         if resolved:
             if resolved.get("proxyPlaylistUrl"):
                 stream_url = f"{base}/api/daddy/proxy?url={quote(resolved['proxyPlaylistUrl'], safe='')}"
@@ -479,7 +573,8 @@ async def daddy_stream(channel_id: str, request: Request):
     if not stream_url and c.get("m3u8"):
         stream_url = f"{base}/api/daddy/proxy?url={quote(c['m3u8'], safe='')}"
 
-    # 3) Fallback iframe = original embed_url from player10.json (last resort).
+    # 3) Fallback iframe = original embed_url from player10.json (last resort —
+    #    note player.cfbu247.sbs has frame-ancestors CSP so it rarely works).
     if not iframe_url:
         iframe_url = c.get("embed_url") or ""
 

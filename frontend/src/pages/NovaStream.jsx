@@ -82,7 +82,7 @@ export default function NovaStream() {
   const [daddyStarted, setDaddyStarted] = useState(false); // HLS playback has started ≥ 1 frame
 
   // ── DaddyTV HLS watchdog ──────────────────────────────────────────────
-  // If the HLS playback hasn't actually started within 30 seconds of opening
+  // If the HLS playback hasn't actually started within 8 seconds of opening
   // the overlay, automatically switch to the iframe fallback (proxyPlayerUrl).
   // Triggers also on a hard error (caught via onError below).
   useEffect(() => {
@@ -91,9 +91,9 @@ export default function NovaStream() {
       // Still waiting? Switch to iframe if we have one.
       if ((daddyActive?.iframe_url || daddyActive?.embed_url)) {
         setDaddyHls(null);
-        toast.info("HLS lent (>30s) — passage à l'iframe…");
+        toast.info("HLS lent — passage à l'iframe…");
       }
-    }, 30000);
+    }, 8000);
     return () => clearTimeout(t);
   }, [daddyActive, daddyHls, daddyStarted]);
 
@@ -586,6 +586,10 @@ export default function NovaStream() {
       {pending && (
         <AdUnlockModal
           channel={pendingChannelLabel(pending)}
+          adult={
+            (pending.kind === "daddy" || pending.kind === "info")
+            && ((pending.payload?.category || "") + " ").includes("18")
+          }
           onUnlocked={handleUnlocked}
           onCancel={handleCancelPending}
         />

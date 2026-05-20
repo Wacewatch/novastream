@@ -1,25 +1,30 @@
 import { useState, useEffect } from "react";
-import { ExternalLink, ShieldCheck, Check, Lock, Crown, Shield, Loader2 } from "lucide-react";
+import { ExternalLink, ShieldCheck, Check, Lock, Crown, Shield, Loader2, AlertTriangle } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 
 const AD_URL_1 = "https://foreignabnormality.com/ktfpa1187?key=bcec92d207239b8d8e091e898bcd8666";
 const AD_URL_2 = "https://omg10.com/4/10323906";
 
-export default function AdUnlockModal({ channel, onUnlocked, onCancel }) {
+export default function AdUnlockModal({ channel, onUnlocked, onCancel, adult = false }) {
   const [step, setStep] = useState(1);
   const [waitedTooLong, setWaitedTooLong] = useState(false);
+  // Adult-content age gate: when the channel is rated 18+, the user must
+  // tick the "I confirm I'm 18+" box BEFORE the ad buttons unlock.
+  const [ageConfirmed, setAgeConfirmed] = useState(false);
   const { user, profile, hasAdFreeExperience, isAdmin, roleLabel, loading, refreshProfile } = useAuth();
 
   // Admins and VIPs bypass the ad modal entirely — auto-unlock as soon as
-  // their auth/profile finished loading.
+  // their auth/profile finished loading. For 18+ channels we still gate them
+  // behind the age-confirmation checkbox (legal requirement, not an ad).
   useEffect(() => {
     if (loading) return;
+    if (adult && !ageConfirmed) return;
     if (hasAdFreeExperience) {
       // Tiny delay so the splash isn't a jarring flash
       const t = setTimeout(() => onUnlocked(), 350);
       return () => clearTimeout(t);
     }
-  }, [hasAdFreeExperience, loading, onUnlocked]);
+  }, [hasAdFreeExperience, loading, onUnlocked, adult, ageConfirmed]);
 
   // Safety: if the user is logged-in but profile didn't load (RLS/etc.),
   // re-trigger a profile refresh so role-based bypass can apply.
@@ -44,6 +49,55 @@ export default function AdUnlockModal({ channel, onUnlocked, onCancel }) {
     window.open(AD_URL_2, "_blank", "noopener,noreferrer");
     onUnlocked();
   };
+
+  // ===== Adult age gate (18+ channels) =====
+  // Shown BEFORE both the loading splash and the ad modal so a logged-in
+  // user can't dodge the confirmation. Required by legal/regulatory rules.
+  if (adult && !ageConfirmed) {
+    return (
+      <div className="player-shell" data-testid="ad-modal-age-gate">
+        <div className="ad-modal glass-heavy" style={{ borderColor: "rgba(239,68,68,0.35)" }}>
+          <div className="flex justify-center mb-4">
+            <span
+              className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider"
+              style={{
+                background: "rgba(239,68,68,0.18)",
+                color: "#f87171",
+                border: "1px solid rgba(239,68,68,0.4)",
+              }}
+            >
+              <AlertTriangle size={12} /> Contenu réservé aux adultes
+            </span>
+          </div>
+          <h2 className="text-white text-2xl font-extrabold tracking-tight mb-2 text-center">
+            Contenu pour adultes — 18+
+          </h2>
+          <p className="text-white/70 text-sm leading-relaxed mb-4 text-center">
+            {channel?.name ? `${channel.name} — ` : ""}cette chaîne diffuse du contenu réservé à un public majeur.
+            En cliquant sur le bouton ci-dessous, vous déclarez sur l'honneur être âgé(e) d'au moins 18 ans
+            et autorisé(e) à visionner ce type de contenu dans votre juridiction.
+          </p>
+          <div className="flex flex-col gap-3">
+            <button
+              onClick={() => setAgeConfirmed(true)}
+              className="ad-btn-primary"
+              data-testid="ad-age-confirm-btn"
+              style={{ background: "linear-gradient(135deg,#dc2626 0%,#991b1b 100%)" }}
+            >
+              <ShieldCheck size={18} />
+              Je confirme avoir 18 ans ou plus — Continuer
+            </button>
+            <button onClick={onCancel} className="ad-btn-secondary" data-testid="ad-age-cancel-btn">
+              J'ai moins de 18 ans — Annuler
+            </button>
+          </div>
+          <p className="text-white/40 text-xs mt-5 text-center">
+            En continuant, vous reconnaissez avoir pris connaissance de la nature explicite du contenu.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   // ===== Loading splash =====
   // While auth/profile is still resolving, OR if the user is logged-in but

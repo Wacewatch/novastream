@@ -487,6 +487,19 @@ async def get_channels(force: bool = False) -> List[Dict[str, Any]]:
     now = time.time()
     if not force and _cache["channels"] and _cache["channels_exp"] > now:
         return _cache["channels"]
+    # Fast path: serve from MongoDB persistent cache while a refresh is queued.
+    # Avoids the 30–40 s cold-start delay for end-users.
+    if not force and not _cache["channels"]:
+        try:
+            doc = await db.cached_catalog.find_one({"_id": "channels"})
+            if doc and isinstance(doc.get("channels"), list) and doc["channels"]:
+                _cache["channels"] = doc["channels"]
+                _cache["channels_exp"] = now + 300
+                # Trigger an async refresh in the background (don't block).
+                asyncio.create_task(_refresh_channels_async())
+                return doc["channels"]
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"db cache load failed: {e}")
     sig = await get_signature()
     last_err = None
     for base in UPSTREAM_BASES:
@@ -504,13 +517,46 @@ async def get_channels(force: bool = False) -> List[Dict[str, Any]]:
                     seen[base_id] = 0
                 unique.append(c)
             _cache["channels"] = unique
-            _cache["channels_exp"] = now + 300
+            _cache["channels_exp"] = now + 15 * 60  # 15 min in-memory TTL
             logger.info(f"channels loaded: {len(unique)}")
+            # Persist to MongoDB so next cold start is instant.
+            try:
+                await db.cached_catalog.update_one(
+                    {"_id": "channels"},
+                    {"$set": {"channels": unique, "updated_at": datetime.now(timezone.utc)}},
+                    upsert=True,
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"db cache save failed: {e}")
             return unique
         except Exception as e:
             logger.warning(f"catalog failed {base}: {e}")
             last_err = e
+    # If upstream fails but we have a DB cache, serve it.
+    try:
+        doc = await db.cached_catalog.find_one({"_id": "channels"})
+        if doc and isinstance(doc.get("channels"), list) and doc["channels"]:
+            _cache["channels"] = doc["channels"]
+            _cache["channels_exp"] = now + 60
+            return doc["channels"]
+    except Exception:
+        pass
     raise HTTPException(status_code=502, detail=f"Impossible de charger les chaînes: {last_err}")
+
+
+async def _refresh_channels_async() -> None:
+    """Background refresh: fetches the upstream catalog and updates the cache
+    + the MongoDB persistent cache. Safe to call concurrently — only one
+    refresh runs at a time thanks to _refresh_in_progress."""
+    if _cache.get("_refresh_in_progress"):
+        return
+    _cache["_refresh_in_progress"] = True
+    try:
+        await get_channels(force=True)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"background channels refresh failed: {e}")
+    finally:
+        _cache["_refresh_in_progress"] = False
 
 async def resolve_stream(channel_url: str) -> str:
     """Resolve channel → signed HLS URL. Cached 240 s with per-channel lock
@@ -1284,7 +1330,10 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup_warmup():
     """Pre-warm the catalog cache so the very first /api/channels call is fast.
-    Done in a background task so the server starts immediately."""
+    Done in a background task so the server starts immediately.
+
+    Also starts a recurring background job that refreshes the channels list
+    every 15 min so users always hit a hot cache (no 30 s wait on cache miss)."""
     async def _warmup():
         try:
             # First build the logo index so the catalog can attach real URLs
@@ -1296,7 +1345,20 @@ async def startup_warmup():
             logger.info(f"warmup done: {len(channels)} channels cached")
         except Exception as e:
             logger.warning(f"warmup failed (will retry on first request): {e}")
+
+    async def _periodic_refresh():
+        # Wait for warmup to finish before the first periodic refresh.
+        await asyncio.sleep(15 * 60)
+        while True:
+            try:
+                await get_channels(force=True)
+                logger.info("periodic channels refresh OK")
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"periodic refresh failed: {e}")
+            await asyncio.sleep(15 * 60)
+
     asyncio.create_task(_warmup())
+    asyncio.create_task(_periodic_refresh())
 
 @app.on_event("shutdown")
 async def shutdown_db_client():

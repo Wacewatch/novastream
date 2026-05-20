@@ -1,0 +1,40 @@
+{
+  "summary": "Iteration 6 validates the 3 fixes: (a) slug→numeric channel_id resolver for DaddyTV (slug-XXX channels now return BOTH stream_url AND iframe_url, not just the CSP-blocked embed_url), (b) MongoDB cached_catalog persistent cache + 15-min background refresh for /api/channels, (c) 18+ age gate modal in AdUnlockModal shown BEFORE the regular ad flow. Backend: 13/13 pytest cases pass. /api/daddy/stream/{116,121,123,957,958} all return stream_url (proxied through /api/daddy/proxy) + iframe_url (chat.cfbu247.sbs/api/proxy/player). /api/daddy/stream/{slug-automoto-la-chaine, slug-18-plus-18, slug-18-plus-18-alt1} ALSO return both URLs — the slug resolver is working via the channelData-XXX.js bundle. /api/daddy/proxy returns valid HLS (#EXTM3U) for 121/123/958/50/100 (channels 116 and 957 currently 502 from upstream chat.cfbu247.sbs — acceptable per problem statement). /api/channels responds <1s warm, populates the cached_catalog._id='channels' MongoDB doc (verified directly via motor — contains >1000 channels). /api/daddy/channels?limit=5 returns the 18+ category. Frontend: Playwright on /embed/daddy/slug-18-plus-18 confirmed: data-testid='ad-modal-age-gate' visible with 'Contenu pour adultes — 18+' title, 'Je confirme avoir 18 ans ou plus — Continuer' button (data-testid='ad-age-confirm-btn'). After clicking confirm, ad-modal with ad-btn-1 appears. /embed/daddy/123 (normal channel) goes DIRECTLY to ad-modal with NO age gate. Home page (/) loads with all tabs (TV/DaddyTV/Sports/Football), country selector France, 974 channels rendered in well under 5s — confirmed by screenshot.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/daddy/proxy (for channels 116, 957)", "issue": "Upstream chat.cfbu247.sbs returns 502 transiently for some channel m3u8s. The proxy itself + the contract are correct — confirmed working for channels 121, 123, 958, 50, 100. Acceptable per problem statement (upstream dependency)."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_daddy_slug_cache.py",
+    "/app/test_reports/pytest/iter6_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "GOOD: extensions.py _resolve_slug_to_numeric (lines 467-477) correctly strips the 'slug-' prefix and looks up the numeric channel_id via a 6h-cached map built from the player.cfbu247.sbs embed → channelData-XXX.js JS bundle. Async lock prevents thundering-herd on cache miss. Regex (_SLUG_ENTRY_RE) is precise.",
+    "GOOD: daddy_stream() (line 530) now ALWAYS attempts the DLStream resolver for slug-XXX channels via the resolved numeric_id, so stream_url + iframe_url are both populated. embed_url remains for backward compat (aliased to iframe_url). Fallback ladder (DLStream → legacy m3u8 → original embed_url) is sensible.",
+    "GOOD: server.py get_channels() (line 486) reads from MongoDB cached_catalog._id='channels' on cold start and fires _refresh_channels_async() in the background — instantaneous warm responses, eventual freshness via the 15-min refresh loop registered in on_event('startup').",
+    "GOOD: AdUnlockModal.jsx now gates the regular ad flow behind ageConfirmed (line 21 + 27). The age gate (data-testid='ad-modal-age-gate') is rendered as the FIRST conditional branch at line 56-... — it MUST be passed before the loading/bypass/main ad modal can render. State machine is correct.",
+    "GOOD: DaddyEmbedPage.jsx (line 127) and NovaStream.jsx (line 589) both pass adult={category includes '18'} — symmetric handling across both embed paths.",
+    "MEDIUM: extensions.py is now ~1800 lines (was 1371 in iter 5) — the file continues to grow. Should be split: daddy_router.py (slug map + stream + proxy), sports_router.py, football_router.py, admin_router.py. This carries forward from iter 4 and 5.",
+    "MINOR: _slug_map_cache uses a single discovery slug ('abc-usa') as the seed for the channelData bundle. If that slug ever gets removed from the upstream catalog, the entire slug→numeric map fails to build. Consider rotating across 3-5 known-stable slugs and falling back if the first 404s.",
+    "MINOR: AdUnlockModal age gate stores no persistence (no localStorage). Every reload re-shows the gate. Probably intentional for compliance, but worth confirming with product.",
+    "MINOR: Watchdog reduced from 30s → 8s for HLS→iframe switch (per the brief) — verified in code, but on slow networks 8s might switch to iframe before the m3u8 actually has a chance to start. Worth measuring on 3G."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_daddy_slug_cache.py (NEW — 13 pytest cases covering slug resolver, channels cache, MongoDB cached_catalog, daddy proxy, daddy categories)"
+  ],
+  "success_rate": {"backend": "100% (13/13 pytest — 12 passed + 1 proxy test passes after multi-channel retry)", "frontend": "100% (age gate + ad-after-age + normal-channel-direct + home tabs all confirmed via Playwright)"},
+  "test_credentials": "Not required for this iteration (no auth flows tested).",
+  "seed_data_creation": "None — MongoDB cached_catalog was populated organically by the running backend.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "All 3 fixes are working end-to-end. The slug→numeric resolver is at extensions.py:467-477 and uses a 6h-cached map. cached_catalog MongoDB doc lives in db.cached_catalog._id='channels' and is auto-refreshed every 15 min by the on_event('startup') task in server.py. The 18+ age gate is in AdUnlockModal.jsx and is triggered by the `adult` prop. NovaStream.jsx and DaddyEmbedPage.jsx both pass adult={category.includes('18')}. If main agent wants further coverage, consider: (1) re-running test_daddy_slug_cache.py periodically as a regression, (2) adding a Playwright test that exercises the FULL ad unlock flow (click ad-btn-1 opens a publicité tab — note that intercepting that tab in the preview env will navigate away). Backend test file: /app/backend/tests/test_daddy_slug_cache.py.",
+  "rca of the issue": "N/A — all fixes verified working as designed. The only minor upstream issue (502 from chat.cfbu247.sbs for ~2 channels out of 5) is documented as acceptable per the problem statement and the fallback iframe path (iframe_url) is properly populated to handle this case."
+}

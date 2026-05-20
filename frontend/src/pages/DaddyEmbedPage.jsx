@@ -25,12 +25,14 @@ export default function DaddyEmbedPage() {
   const [error, setError] = useState(null);
   const [started, setStarted] = useState(false);
 
-  // 30-second watchdog: if HLS hasn't started playing within 30s, swap to iframe.
+  // 8-second watchdog: if HLS hasn't started playing within 8s, swap to iframe.
+  // This kicks in faster than waiting for hls.js to consume its 3 retry budget
+  // (which can take 20–30 s on flaky upstreams).
   useEffect(() => {
     if (!unlocked || !streamUrl || useIframe || started) return;
     const t = setTimeout(() => {
       if (iframeUrl) setUseIframe(true);
-    }, 30000);
+    }, 8000);
     return () => clearTimeout(t);
   }, [unlocked, streamUrl, useIframe, started, iframeUrl]);
 
@@ -122,6 +124,7 @@ export default function DaddyEmbedPage() {
       {!unlocked && (
         <AdUnlockModal
           channel={channel}
+          adult={(channel?.category || "").includes("18")}
           onUnlocked={handleUnlocked}
           onCancel={() => {/* embed mode: no cancel */}}
         />
