@@ -21,7 +21,19 @@ French live-TV streaming app (Vavoo-backed). User reported flaky UX (no loader, 
 - `/app/frontend/src/components/{ChannelCard, VideoPlayer, AdUnlockModal}.jsx`
 
 ## What's Been Implemented (latest first)
-### 2026-05-20 (current session — DaddyTV + cache TV + age gate 18+)
+### 2026-05-20 (current session #2 — UX polish + public API leak-proofing)
+- **DaddyTV iframe inside player overlay** (not full-page): `IframePlayer.jsx` rewritten to use `.player-shell > .player-frame` (16/9 centered, rounded, max 1280px), matching the HLS VideoPlayer layout. Top bar (logo/title/reload/external/fullscreen/close) floats over the iframe via absolute positioning.
+- **Public API leak-proofing**:
+  - `/v1/public/daddy/channels` + `/v1/public/daddy/channel/{id}` — `embed_url` now points to OUR `/embed/daddy/{id}` (was upstream `player.cfbu247.sbs/embed/...`).
+  - `/v1/public/sports` — each event has `embeds: [{label, embed_url}]` with `embed_url` = `/embed/sports/t/{base64url(source:id)}`. Strips upstream `source` and `embedUrl` from JSON.
+  - `/v1/public/football` — each match has `embeds: [{label, embed_url}]` with `embed_url` = `/embed/football/t/{base64url(matchId:idx)}`. Drops `has_servers`/`server_count`. The internal `stream_url` / raw m3u8 are never exposed publicly.
+  - `/v1/public/sports/info` — pass-through (only DaddyTV channel refs, no upstream URLs).
+- **Token-redirect React pages**: `SportsTokenRedirect.jsx`, `FootballTokenRedirect.jsx` (client-side base64url decode → `Navigate` to the real embed). New `FootballEmbedPage.jsx` (mounts at `/embed/football/:matchId/:serverIdx?`) — fetches `/api/football/streams`, gates behind `AdUnlockModal`, plays via VideoPlayer.
+- **Favorites star on DaddyTV cards**: `DaddyCard` now renders `<FavoriteButton channelId={`daddy:${ch.id}`}/>` (top-right). Outer wrapper changed from `<button>` to `<div role="button" tabIndex={0}>` to avoid nested-button HTML hydration warning. Persists in localStorage `livewatch.favorites.v1` (shared with TV).
+- **Slug-seed rotation**: `_build_slug_map` now iterates over `('abc-usa','bbc-one-uk','astro-supersport-1','cnn-usa','espn-usa')` — first working seed wins. Hardens the slug→numeric channel_id resolver against any single seed being removed upstream.
+- Backend: 21/21 pytest pass (8 new contract tests + 13 regression). Frontend: Playwright validated all flows.
+
+
 - **DaddyTV slug→numericID resolver** (`extensions.py` _build_slug_map / _resolve_slug_to_numeric, 6h cache). Fetches `player.cfbu247.sbs/embed/abc-usa`, discovers `channelData-XXX.js`, parses ~830 slug↔channel_id pairs. Slug-XXX channels (Automoto, 18+, etc.) NOW return both `stream_url` (m3u8 via DLStream) AND `iframe_url` (chat.cfbu247.sbs/api/proxy/player — frame-friendly). Previously they were stuck on `player.cfbu247.sbs/embed/…` which is CSP-blocked.
 - **MongoDB persistent cache for TV channels**: `db.cached_catalog._id='channels'` populated on every successful refresh. Cold-start `/api/channels` calls now serve from DB while a background refresh kicks off → response < 1 s (was 30–40 s). In-memory TTL bumped to 15 min.
 - **Periodic background refresh** every 15 min via `asyncio.create_task(_periodic_refresh())` in `on_event('startup')`. Failures non-fatal; DB cache keeps users served.

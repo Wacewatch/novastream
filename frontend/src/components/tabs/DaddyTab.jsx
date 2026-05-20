@@ -170,10 +170,18 @@ export default function DaddyTab({ onPick, initialChannelId, onAfterAutoOpen }) 
 
 function DaddyCard({ ch, onClick }) {
   return (
-    <button
+    <div
       onClick={onClick}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onClick?.();
+        }
+      }}
+      role="button"
+      tabIndex={0}
       data-testid={`daddy-card-${ch.id}`}
-      className="glass rounded-xl p-3 text-left hover:border-[#ff8a00]/40 hover:bg-[#ff8a00]/5 transition-all duration-200 border border-white/8 hover:-translate-y-0.5 relative"
+      className="glass rounded-xl p-3 text-left hover:border-[#ff8a00]/40 hover:bg-[#ff8a00]/5 transition-all duration-200 border border-white/8 hover:-translate-y-0.5 relative cursor-pointer"
     >
       <div className="absolute top-2 right-2 z-10">
         <FavoriteButton channelId={`daddy:${ch.id}`} size={13} />
@@ -191,6 +199,6 @@ function DaddyCard({ ch, onClick }) {
         <FlagIcon country={ch.country} size={12} />
         <span className="truncate">{ch.category} · {ch.country}</span>
       </div>
-    </button>
+    </div>
   );
 }
