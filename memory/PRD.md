@@ -21,7 +21,29 @@ French live-TV streaming app (Vavoo-backed). User reported flaky UX (no loader, 
 - `/app/frontend/src/components/{ChannelCard, VideoPlayer, AdUnlockModal}.jsx`
 
 ## What's Been Implemented (latest first)
-### 2026-02 (current session)
+### 2026-05-20 (current session — DaddyTV + cache TV + age gate 18+)
+- **DaddyTV slug→numericID resolver** (`extensions.py` _build_slug_map / _resolve_slug_to_numeric, 6h cache). Fetches `player.cfbu247.sbs/embed/abc-usa`, discovers `channelData-XXX.js`, parses ~830 slug↔channel_id pairs. Slug-XXX channels (Automoto, 18+, etc.) NOW return both `stream_url` (m3u8 via DLStream) AND `iframe_url` (chat.cfbu247.sbs/api/proxy/player — frame-friendly). Previously they were stuck on `player.cfbu247.sbs/embed/…` which is CSP-blocked.
+- **MongoDB persistent cache for TV channels**: `db.cached_catalog._id='channels'` populated on every successful refresh. Cold-start `/api/channels` calls now serve from DB while a background refresh kicks off → response < 1 s (was 30–40 s). In-memory TTL bumped to 15 min.
+- **Periodic background refresh** every 15 min via `asyncio.create_task(_periodic_refresh())` in `on_event('startup')`. Failures non-fatal; DB cache keeps users served.
+- **18+ age gate** in `AdUnlockModal.jsx`: new `adult` prop, when true displays a red-themed modal `[data-testid="ad-modal-age-gate"]` BEFORE the regular ad flow (and even before VIP/admin bypass). Requires user to click "Je confirme avoir 18 ans ou plus". `DaddyEmbedPage` + `NovaStream` pass `adult={category.includes('18')}`.
+- **HLS → iframe watchdog** reduced from 30 s → 8 s for DaddyTV (`DaddyEmbedPage.jsx` + `NovaStream.jsx`) so users don't stare at a 30 s blank when upstream returns 502.
+- 13/13 pytest cases pass; Playwright validated age gate + cache speed.
+
+### Earlier
+- Real channel **logos** via `github.com/tv-logo/tv-logos` (~200 FR + many other countries). Index built at startup; per-channel lookup is in-memory O(1); fallback to TV icon when no slug match.
+- **Quality tag** (HD/FHD/4K/UHD) detected from channel name, color-coded (blue / violet / gold).
+- **View tracking** in MongoDB (`views` collection, TTL 24 h, idx on `ts` and `(channel_id, ts)`). Aggregated to a memo-cached stats object (`live_total`, `total_24h`, `per_channel`).
+- `/api/stats` endpoint; FE polls every 20 s. Header pill `X VUES / 24 H`. Hero pulse-dot pill. Per-card viewers badge.
+- Player kebab menu cleaned, retry feedback, grid fluidity (memo + content-visibility).
+- Stable per-channel IDs (md5 of upstream URL). HLS playlist micro-cache (2 s) + per-channel resolve lock.
+- Embed page + public `/api/v1/public/*` namespace. Ad-unlock flow before play.
+- FlagCDN integration: `@/lib/flags` + `FlagIcon` component used in NovaStream, MultiView, DaddyTab.
+
+## Backlog / Roadmap
+- **P1**: Split `extensions.py` (~1800 LoC) into `daddy_router.py`, `sports_router.py`, `football_router.py`, `admin_router.py`.
+- **P2**: Slug map seed rotation (currently single `abc-usa` — add 3–5 fallback slugs in case upstream removes it).
+- **P2**: Adult-age confirmation persistence (localStorage, e.g. 24 h) to avoid re-asking on every reload.
+- **P2**: Measure 8 s watchdog on 3G — may need to push to 12 s on slow networks.
 - Real channel **logos** via `github.com/tv-logo/tv-logos` (~200 FR + many other countries). Index built at startup; per-channel lookup is in-memory O(1); fallback to TV icon when no slug match.
 - **Quality tag** (HD/FHD/4K/UHD) detected from channel name, color-coded (blue / violet / gold).
 - **View tracking** in MongoDB (`views` collection, TTL 24 h, idx on `ts` and `(channel_id, ts)`). Aggregated to a memo-cached stats object (`live_total`, `total_24h`, `per_channel`).
