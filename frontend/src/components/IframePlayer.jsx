@@ -1,8 +1,6 @@
 import { useEffect, useRef } from "react";
 import { X, Maximize, RotateCcw } from "lucide-react";
 
-const LOGO_URL = "https://i.imgur.com/V8YmT4z.png";
-
 /**
  * Iframe player overlay used by DaddyTV (iframe fallback), Sports and Football.
  *
@@ -62,7 +60,6 @@ export default function IframePlayer({
         {/* Top bar — overlays the iframe, matches VideoPlayer's top controls */}
         <div className="iframe-player-top">
           <div className="flex items-center gap-2 min-w-0">
-            <img src={LOGO_URL} alt="" className="w-6 h-6 rounded" />
             <span className="truncate text-white/90 font-semibold text-sm">{title}</span>
           </div>
           <div className="flex items-center gap-1.5 ml-auto">
