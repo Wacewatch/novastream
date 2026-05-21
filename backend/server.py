@@ -21,11 +21,37 @@ mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
-app = FastAPI(title="LiveWatch API")
+app = FastAPI(title="LiveWatch API", docs_url=None, redoc_url=None, openapi_url=None)
 api_router = APIRouter(prefix="/api")
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("livewatch")
+
+# ----------------- Redis (cache partagé entre workers) -----------------
+# Migre _resolve_cache et _hls_cache vers Redis : TTL natif (plus de leak de
+# clés mortes) + cache partagé entre les N workers uvicorn. Fallback gracieux :
+# si Redis est indisponible, on retombe sur un dict mémoire borné.
+import redis.asyncio as _aioredis  # noqa: E402
+
+REDIS_URL = os.environ.get("REDIS_URL", "")
+_redis: "Optional[_aioredis.Redis]" = None
+
+async def get_redis() -> "Optional[_aioredis.Redis]":
+    global _redis
+    if not REDIS_URL:
+        return None
+    if _redis is None:
+        try:
+            _redis = _aioredis.from_url(
+                REDIS_URL, encoding="utf-8", decode_responses=False,
+                socket_connect_timeout=2, socket_timeout=2,
+            )
+            await _redis.ping()
+            logger.info("redis connected")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"redis unavailable, fallback to memory: {e}")
+            _redis = None
+    return _redis
 
 # ----------------- Shared HTTP client (connection pool) -----------------
 # A single AsyncClient is reused for ALL upstream requests so we benefit from
@@ -604,43 +630,57 @@ async def _refresh_channels_async() -> None:
         _cache["_refresh_in_progress"] = False
 
 async def resolve_stream(channel_url: str) -> str:
-    """Resolve channel → signed HLS URL. Cached 240 s with per-channel lock
-    so that 1000 simultaneous viewers result in only ONE upstream resolve call."""
-    now = time.time()
-    cached = _resolve_cache.get(channel_url)
-    if cached and cached[1] > now:
-        return cached[0]
-    # Per-channel lock to prevent thundering herd
-    lock = _resolve_locks.setdefault(channel_url, asyncio.Lock())
-    async with lock:
-        # Re-check after acquiring lock
-        cached = _resolve_cache.get(channel_url)
-        if cached and cached[1] > time.time():
-            return cached[0]
-        sig = await get_signature()
-        cx = await get_http_client()
-        for base in UPSTREAM_BASES:
-            url = f"{base.rstrip('/')}/mediahubmx-resolve.json"
-            try:
-                r = await cx.post(url, headers=_catalog_headers(sig), json={
-                    "language": LANG,
-                    "region": REGION,
-                    "url": channel_url,
-                    "clientVersion": CLIENT_VERSION,
-                }, timeout=20.0)
-                r.raise_for_status()
-                data = r.json()
-                stream_url = None
-                if isinstance(data, list) and data and data[0].get("url"):
-                    stream_url = data[0]["url"]
-                elif isinstance(data, dict):
-                    stream_url = data.get("url") or data.get("streamUrl")
-                if stream_url:
+    """Resolve channel -> signed HLS URL. Cached in Redis (TTL natif, partage
+    entre workers). Fallback memoire borne si Redis down."""
+    import hashlib
+    key = b"resolve:" + hashlib.md5(channel_url.encode()).hexdigest().encode()
+    r = await get_redis()
+    # 1) Cache hit
+    if r is not None:
+        try:
+            cached = await r.get(key)
+            if cached:
+                return cached.decode("utf-8")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"redis get resolve failed: {e}")
+    else:
+        now = time.time()
+        c = _resolve_cache.get(channel_url)
+        if c and c[1] > now:
+            return c[0]
+    # 2) Miss -> upstream resolve
+    sig = await get_signature()
+    cx = await get_http_client()
+    for base in UPSTREAM_BASES:
+        url = f"{base.rstrip('/')}/mediahubmx-resolve.json"
+        try:
+            resp = await cx.post(url, headers=_catalog_headers(sig), json={
+                "language": LANG,
+                "region": REGION,
+                "url": channel_url,
+                "clientVersion": CLIENT_VERSION,
+            }, timeout=20.0)
+            resp.raise_for_status()
+            data = resp.json()
+            stream_url = None
+            if isinstance(data, list) and data and data[0].get("url"):
+                stream_url = data[0]["url"]
+            elif isinstance(data, dict):
+                stream_url = data.get("url") or data.get("streamUrl")
+            if stream_url:
+                if r is not None:
+                    try:
+                        await r.set(key, stream_url.encode("utf-8"), ex=RESOLVE_TTL)
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(f"redis set resolve failed: {e}")
+                else:
+                    if len(_resolve_cache) > 5000:
+                        _resolve_cache.clear()
                     _resolve_cache[channel_url] = (stream_url, time.time() + RESOLVE_TTL)
-                    return stream_url
-            except Exception as e:
-                logger.warning(f"resolve failed {base}: {e}")
-        raise HTTPException(status_code=502, detail="Flux non disponible")
+                return stream_url
+        except Exception as e:
+            logger.warning(f"resolve failed {base}: {e}")
+    raise HTTPException(status_code=502, detail="Flux non disponible")
 
 # ----------------- API Routes -----------------
 @api_router.get("/")
@@ -801,13 +841,24 @@ async def hls_proxy(u: str):
     looks_like_playlist = ".m3u8" in u.lower().split("?")[0]
 
     if looks_like_playlist:
-        cached = _hls_cache.get(u)
-        if cached and cached[2] > now:
-            return Response(content=cached[0], media_type=cached[1])
+        # Cache hit via Redis (ou memoire en fallback)
+        rds = await get_redis()
+        if rds is not None:
+            try:
+                blob = await rds.get(b"hls:" + u.encode("utf-8"))
+                if blob:
+                    nl = blob.index(b"\n")
+                    media_b = blob[:nl].decode("utf-8")
+                    body_b = blob[nl + 1:]
+                    return Response(content=body_b, media_type=media_b)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"redis get hls failed: {e}")
+        else:
+            cached = _hls_cache.get(u)
+            if cached and cached[2] > now:
+                return Response(content=cached[0], media_type=cached[1])
 
         # Single-flight pattern: 1 upstream fetch shared by ALL waiting viewers.
-        # We schedule the fetch as a standalone Task (decoupled from any
-        # particular request) so a client disconnect does not cancel the fetch.
         task = _hls_inflight.get(u)
         if task is None or task.done():
             task = asyncio.create_task(_fetch_playlist(u))
@@ -866,7 +917,18 @@ async def _fetch_playlist(u: str) -> Tuple[bytes, str, float]:
             rewritten = _rewrite_m3u8(text, u).encode("utf-8")
             media = "application/vnd.apple.mpegurl"
             entry: Tuple[bytes, str, float] = (rewritten, media, time.time() + HLS_PLAYLIST_TTL)
-            _hls_cache[u] = entry
+            rds = await get_redis()
+            if rds is not None:
+                try:
+                    await rds.set(b"hls:" + u.encode("utf-8"),
+                                  media.encode("utf-8") + b"\n" + rewritten,
+                                  ex=int(HLS_PLAYLIST_TTL) + 1)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"redis set hls failed: {e}")
+            else:
+                if len(_hls_cache) > 2000:
+                    _hls_cache.clear()
+                _hls_cache[u] = entry
             return entry
         # Not really a playlist — return body but DON'T cache it
         media2 = r.headers.get("content-type", "application/octet-stream")
@@ -1434,6 +1496,11 @@ async def startup_warmup():
 @app.on_event("shutdown")
 async def shutdown_db_client():
     client.close()
-    global _http_client
+    global _http_client, _redis
     if _http_client is not None and not _http_client.is_closed:
         await _http_client.aclose()
+    if _redis is not None:
+        try:
+            await _redis.aclose()
+        except Exception:
+            pass

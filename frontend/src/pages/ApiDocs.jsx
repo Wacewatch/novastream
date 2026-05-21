@@ -4,7 +4,7 @@ import axios from "axios";
 import { Copy, ExternalLink, Code2 } from "lucide-react";
 import { toast } from "sonner";
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
+const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || window.location.origin;
 const LOGO_URL = "https://i.imgur.com/V8YmT4z.png";
 
 // Five "all-in-one" endpoints. Each returns a single JSON blob with everything

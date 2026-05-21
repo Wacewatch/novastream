@@ -1,16 +1,13 @@
 # =========================================================================
-# NovaStream — production stack (phase 1)
+# NovaStream — production stack (phase 2 : Redis + tuning perf)
 # =========================================================================
 # Conteneurs :
-#   - novastream      : app (FastAPI + frontend static buildé), expose :8001
-#   - novastream-mongo: stockage views + referrers (interne au stack)
-#
-# NPMplus pointe sur novastream:8001 via le réseau partagé npmplus_default.
-# Auth/data métier : Supabase (externe, repris de LiveWatch).
+#   - novastream       : app (FastAPI + frontend static buildé), expose :8001
+#   - novastream-mongo : stockage views + referrers
+#   - novastream-redis : cache partagé (resolve + playlists HLS), TTL natif
 # =========================================================================
 
 services:
-
   mongo:
     image: mongo:4.4
     container_name: novastream-mongo
@@ -47,6 +44,41 @@ services:
         max-size: "20m"
         max-file: "3"
 
+  redis:
+    image: redis:7-alpine
+    container_name: novastream-redis
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --maxmemory
+      - "512mb"
+      - --maxmemory-policy
+      - allkeys-lru
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+    networks:
+      - novastream_internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    mem_swappiness: 0
+    deploy:
+      resources:
+        limits:
+          memory: 640M
+        reservations:
+          memory: 64M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   app:
     build:
       context: .
@@ -61,20 +93,19 @@ services:
     depends_on:
       mongo:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     expose:
       - "8001"
     environment:
-      # Mongo
       MONGO_URL: "mongodb://${MONGO_ROOT_USER}:${MONGO_ROOT_PASSWORD}@mongo:27017/${MONGO_DB_NAME}?authSource=admin"
       DB_NAME: ${MONGO_DB_NAME}
-      # Supabase (repris de LiveWatch)
+      REDIS_URL: "redis://redis:6379/0"
       SUPABASE_URL: ${SUPABASE_URL}
       SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
       SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
-      # CORS
       CORS_ORIGINS: ${CORS_ORIGINS:-*}
-      # Uvicorn — phase 1 : 1 worker pour cache HLS 100% efficace
-      UVICORN_WORKERS: ${UVICORN_WORKERS:-1}
+      UVICORN_WORKERS: ${UVICORN_WORKERS:-4}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       STATIC_DIR: /app/static
     mem_swappiness: 0
@@ -84,9 +115,9 @@ services:
     deploy:
       resources:
         limits:
-          memory: 2G
+          memory: 4G
         reservations:
-          memory: 256M
+          memory: 512M
     logging:
       driver: json-file
       options:

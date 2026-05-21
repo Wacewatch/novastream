@@ -5,7 +5,7 @@ import VideoPlayer from "@/components/VideoPlayer";
 import AdUnlockModal from "@/components/AdUnlockModal";
 import { Loader2 } from "lucide-react";
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
+const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || window.location.origin;
 const API = `${BACKEND_URL}/api`;
 
 /**

@@ -2,7 +2,7 @@ import { useState, memo } from "react";
 import { Tv, Eye } from "lucide-react";
 import FavoriteButton from "@/components/FavoriteButton";
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
+const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || window.location.origin;
 
 // Source -> short uppercase label shown on each card
 const SOURCE_TAGS = {
