@@ -121,7 +121,7 @@ export default function Admin() {
       const [sys, live, ref, glob] = await Promise.all([
         axios.get(`${API}/admin/system-stats`, { headers }).catch(() => ({ data: null })),
         axios.get(`${API}/admin/live-stats`, { headers }).catch(() => ({ data: null })),
-        axios.get(`${API}/admin/top-referrers?hours=24&limit=10`, { headers }).catch(() => ({ data: { referrers: [] } })),
+        axios.get(`${API}/admin/top-referrers?hours=0&limit=10`, { headers }).catch(() => ({ data: { referrers: [] } })),
         axios.get(`${API}/admin/global-stats`, { headers }).catch(() => ({ data: null })),
       ]);
       if (sys.data) setSysStats(sys.data);
@@ -547,7 +547,7 @@ export default function Admin() {
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-lg font-bold flex items-center gap-2">
               <Globe size={18} className="text-cyan-400" /> Top Référents
-              <span className="text-sm font-normal text-white/40">/ 24 h</span>
+              <span className="text-sm font-normal text-white/40">/ Total</span>
             </h3>
             <span className="text-xs text-white/40">{referrers.length} source(s)</span>
           </div>
@@ -558,19 +558,44 @@ export default function Admin() {
               {referrers.map((r, i) => {
                 const max = referrers[0]?.count || 1;
                 const pct = (r.count / max) * 100;
+                const fmt = (iso) => {
+                  if (!iso) return "—";
+                  try {
+                    const d = new Date(iso);
+                    return d.toLocaleString("fr-FR", {
+                      day: "2-digit",
+                      month: "2-digit",
+                      year: "2-digit",
+                      hour: "2-digit",
+                      minute: "2-digit",
+                    });
+                  } catch {
+                    return "—";
+                  }
+                };
                 return (
                   <li key={r.host} className="relative" data-testid={`referrer-${i}`}>
                     <div
                       className="absolute inset-0 rounded-lg bg-cyan-400/10"
                       style={{ width: `${pct}%`, transition: "width .3s" }}
                     />
-                    <div className="relative flex items-center justify-between px-3 py-2 text-sm">
-                      <span className="flex items-center gap-2 min-w-0">
-                        <span className="text-white/40 text-xs tabular-nums w-5">#{i + 1}</span>
+                    <div className="relative flex items-center justify-between px-3 py-2 gap-3">
+                      <span className="flex items-center gap-2 min-w-0 flex-1">
+                        <span className="text-white/40 text-xs tabular-nums w-5 shrink-0">#{i + 1}</span>
                         <Globe size={12} className="text-cyan-400 shrink-0" />
-                        <span className="text-white truncate">{r.host}</span>
+                        <span className="flex flex-col min-w-0">
+                          <span className="text-white truncate text-sm">{r.host}</span>
+                          <span className="text-[10px] text-white/45 tabular-nums">
+                            <span className="text-white/35">1er :</span> {fmt(r.first_call)}
+                            <span className="mx-1.5 text-white/20">•</span>
+                            <span className="text-white/35">dernier :</span> {fmt(r.last_call)}
+                          </span>
+                        </span>
                       </span>
-                      <span className="text-cyan-400 tabular-nums font-semibold ml-3">{r.count.toLocaleString("fr-FR")}</span>
+                      <span className="text-cyan-400 tabular-nums font-semibold text-sm shrink-0">
+                        {r.count.toLocaleString("fr-FR")}
+                        <span className="text-[10px] font-normal text-white/40 ml-1">appels</span>
+                      </span>
                     </div>
                   </li>
                 );
