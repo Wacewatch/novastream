@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Query, Request
+from fastapi import FastAPI, APIRouter, HTTPException, Query, Request, Header
 from fastapi.responses import StreamingResponse, PlainTextResponse, Response
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -101,11 +101,12 @@ async def _ensure_views_index() -> None:
     except Exception as e:
         logger.warning(f"views index init failed: {e}")
 
-async def _record_view(channel_id: str) -> None:
+async def _record_view(channel_id: str, is_member: bool = False) -> None:
     try:
         await db.views.insert_one({
             "channel_id": channel_id,
             "ts": datetime.now(timezone.utc),
+            "is_member": bool(is_member),
         })
     except Exception as e:
         logger.warning(f"record view failed: {e}")
@@ -124,21 +125,30 @@ async def _compute_stats() -> Dict[str, Any]:
             total_24h = await db.views.count_documents({})
         except Exception:
             total_24h = 0
-        # Per-channel live counts
+        # Per-channel live counts (+ members count globally)
         per_channel: Dict[str, int] = {}
+        members_live = 0
         try:
             pipeline = [
                 {"$match": {"ts": {"$gte": live_threshold}}},
-                {"$group": {"_id": "$channel_id", "n": {"$sum": 1}}},
+                {"$group": {
+                    "_id": "$channel_id",
+                    "n": {"$sum": 1},
+                    "members": {"$sum": {"$cond": [{"$eq": ["$is_member", True]}, 1, 0]}},
+                }},
             ]
             async for row in db.views.aggregate(pipeline):
                 per_channel[row["_id"]] = row["n"]
+                members_live += int(row.get("members") or 0)
         except Exception as e:
             logger.warning(f"stats aggregate failed: {e}")
         live_total = sum(per_channel.values())
+        guests_live = max(0, live_total - members_live)
         data = {
             "total_24h": total_24h,
             "live_total": live_total,
+            "members_live": members_live,
+            "guests_live": guests_live,
             "per_channel": per_channel,
         }
         _stats_cache["data"] = data
@@ -774,16 +784,21 @@ async def public_channel(channel_id: str, request: Request):
     return _public_channel(c, _public_base(request))
 
 @api_router.get("/stream/{channel_id}")
-async def get_stream_url(channel_id: str):
+async def get_stream_url(channel_id: str, authorization: Optional[str] = Header(None)):
     """Resolve and return the HLS URL through our proxy (source hidden)."""
     channels = await get_channels()
     channel = next((c for c in channels if c["id"] == channel_id), None)
     if not channel:
         raise HTTPException(status_code=404, detail="Chaîne introuvable")
     upstream = await resolve_stream(channel["url"])
-    # Track this as a view (non-blocking). The frontend calls this endpoint
-    # every time a user actually starts watching (after the ad unlock).
-    asyncio.create_task(_record_view(channel_id))
+    # Track this as a view (non-blocking). If the request carries a Bearer
+    # JWT we count it as a "member" view, otherwise it's a guest.
+    is_member = bool(
+        authorization
+        and authorization.lower().startswith("bearer ")
+        and len(authorization) > 20
+    )
+    asyncio.create_task(_record_view(channel_id, is_member=is_member))
     return {
         "id": channel_id,
         "name": channel["name"],
@@ -1188,28 +1203,41 @@ def _normalize_referer(raw: str) -> Optional[str]:
 @app.middleware("http")
 async def _log_referrer(request: Request, call_next):
     """Best-effort logging of HTTP Referer for top-referrers analytics.
-    Only logs the actual 'play this channel' action — i.e. /api/stream/{id} —
-    not every HLS segment fetch (which would inflate counts by ~1 per second)."""
+
+    Logs only the actual 'play this channel' actions:
+      * /api/stream/{id}            (TV)
+      * /api/daddy/stream/{id}      (DaddyTV)
+    NOT the HLS segment fetches (they would multiply by ~1 per second).
+
+    For iframe-embedded usage on a 3rd-party site (e.g. wavewatch.top puts
+    `<iframe src="https://livewatch.top/embed/{id}">`), the standard `Referer`
+    header on these XHRs is `https://livewatch.top/embed/{id}` — i.e. the
+    iframe's own page, NOT the parent site. To capture the real parent we
+    accept an explicit `?ref=<url>` query parameter which the embed pages
+    forward from `document.referrer`.
+    """
     response = await call_next(request)
     try:
         path = request.url.path or ""
-        # Only log the play-action endpoint. /api/hls and /api/stream/{id} segments
-        # would multiply by ~30/min per viewer, so we skip them.
-        if not path.startswith("/api/stream/"):
+        # Only the 'play action' endpoints. Keep this list short so we
+        # don't double-count (1 click = 1 referrer entry).
+        if not (
+            path.startswith("/api/stream/")
+            or path.startswith("/api/daddy/stream/")
+        ):
             return response
-        ref = request.headers.get("referer") or ""
-        host = _normalize_referer(ref)
+        # Prefer the explicit ?ref= sent by EmbedPage / DaddyEmbedPage
+        # (= document.referrer of the iframe, i.e. the parent page).
+        ref_param = request.query_params.get("ref") or ""
+        ref_header = request.headers.get("referer") or ""
+        host = _normalize_referer(ref_param) or _normalize_referer(ref_header)
         if not host:
-            return response
-        own = (request.url.hostname or "").lower()
-        if own.startswith("www."):
-            own = own[4:]
-        if host == own:
             return response
         await db.referrers.insert_one({
             "host": host,
             "ts": datetime.now(timezone.utc),
             "path": path,
+            "via": "query" if ref_param else "header",
         })
     except Exception:
         pass
@@ -1285,6 +1313,8 @@ async def admin_live_stats(authorization: Optional[str] = Header(None)):
     return {
         "online": live_total,
         "watching": live_total,
+        "members_online": stats.get("members_live", 0),
+        "guests_online": stats.get("guests_live", live_total),
         "total_24h": total_24h,
         "top_channels": top_channels,
     }
@@ -1405,6 +1435,7 @@ init_extensions(
     require_admin=_require_admin,
     extract_bearer=_extract_bearer,
     db=db,
+    record_view=_record_view,
 )
 api_router.include_router(ext_router)
 

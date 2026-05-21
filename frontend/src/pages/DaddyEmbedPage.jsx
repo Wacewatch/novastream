@@ -4,6 +4,7 @@ import axios from "axios";
 import VideoPlayer from "@/components/VideoPlayer";
 import AdUnlockModal from "@/components/AdUnlockModal";
 import { Loader2 } from "lucide-react";
+import { fetchDaddyStream } from "@/lib/streamApi";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -54,8 +55,7 @@ export default function DaddyEmbedPage() {
 
   const resolveStream = async () => {
     try {
-      const r = await axios.get(`${API}/daddy/stream/${encodeURIComponent(channelId)}`);
-      const data = r.data || {};
+      const data = await fetchDaddyStream(channelId);
       setIframeUrl(data.iframe_url || data.embed_url || "");
       if (data.stream_url) {
         setStreamUrl(data.stream_url);
@@ -87,8 +87,7 @@ export default function DaddyEmbedPage() {
       return;
     }
     try {
-      const r = await axios.get(`${API}/daddy/stream/${encodeURIComponent(channelId)}`);
-      const data = r.data || {};
+      const data = await fetchDaddyStream(channelId);
       setIframeUrl(data.iframe_url || data.embed_url || iframeUrl);
       if (data.stream_url) {
         setStreamUrl(`${data.stream_url}&_t=${Date.now()}`);

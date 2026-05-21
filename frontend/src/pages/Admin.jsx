@@ -486,11 +486,11 @@ export default function Admin() {
               <div className="mt-4 pt-4 border-t border-white/5 text-xs space-y-1">
                 <div className="flex justify-between text-white/50">
                   <span>Membres :</span>
-                  <span className="text-white/80 tabular-nums">0</span>
+                  <span className="text-white/80 tabular-nums">{liveStats?.members_online ?? 0}</span>
                 </div>
                 <div className="flex justify-between text-white/50">
                   <span>Invités :</span>
-                  <span className="text-white/80 tabular-nums">{liveStats?.online ?? 0}</span>
+                  <span className="text-white/80 tabular-nums">{liveStats?.guests_online ?? (liveStats?.online ?? 0)}</span>
                 </div>
               </div>
             </div>
