@@ -23,7 +23,7 @@ import time
 import httpx
 
 LOCAL = "http://localhost:8001"
-PUBLIC = "https://embed-gateway.preview.emergentagent.com"
+PUBLIC = "https://api-redesign-2.preview.emergentagent.com"
 CONCURRENCY = 1000
 TIMEOUT = 30.0
 LOG_FILE = "/var/log/supervisor/backend.out.log"

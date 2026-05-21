@@ -22,7 +22,6 @@ import {
 import { toast } from "sonner";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || window.location.origin;
-const LOGO_URL = "https://i.imgur.com/V8YmT4z.png";
 
 export default function VideoPlayer({
   channel,
@@ -338,14 +337,6 @@ export default function VideoPlayer({
           autoPlay
           data-testid="video-element"
           onClick={togglePlay}
-        />
-
-        {/* Watermark logo — top-left, under "EN DIRECT" */}
-        <img
-          src={LOGO_URL}
-          alt="LiveWatch"
-          className={`player-watermark ${controlsVisible ? "visible" : ""}`}
-          draggable={false}
         />
 
         {loading && !error && (

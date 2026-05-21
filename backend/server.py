@@ -1201,8 +1201,31 @@ _PROCESS_START = time.time()
 
 
 async def _ensure_referrers_index() -> None:
+    """Ensure indexes on the referrers collection.
+
+    We KEEP referrer logs forever (no TTL) so the admin "Top Référents" panel
+    can show all-time stats with first/last call timestamps per host.
+    If a previous TTL index exists on `ts` (legacy 30-day retention), we drop
+    it and recreate it without expireAfterSeconds.
+    """
     try:
-        await db.referrers.create_index("ts", expireAfterSeconds=30 * 24 * 3600)
+        # Look for any existing TTL index on `ts` and drop it (so we can switch
+        # to permanent retention).
+        try:
+            existing = await db.referrers.index_information()
+            for name, info in existing.items():
+                if name == "_id_":
+                    continue
+                keys = info.get("key") or []
+                # `keys` looks like [('ts', 1)] for the legacy index
+                if len(keys) == 1 and keys[0][0] == "ts" and "expireAfterSeconds" in info:
+                    await db.referrers.drop_index(name)
+                    logger.info(f"dropped legacy TTL index on referrers: {name}")
+        except Exception as e:
+            logger.warning(f"referrers TTL drop check failed: {e}")
+
+        # Permanent (no-TTL) indexes
+        await db.referrers.create_index("ts")
         await db.referrers.create_index([("host", 1), ("ts", -1)])
     except Exception as e:
         logger.warning(f"referrers index init failed: {e}")
@@ -1330,27 +1353,52 @@ async def admin_live_stats(authorization: Optional[str] = Header(None)):
 
 
 @api_router.get("/admin/top-referrers")
-async def admin_top_referrers(authorization: Optional[str] = Header(None), hours: int = 24, limit: int = 10):
-    """Top HTTP Referer hosts in the last N hours (admin-only)."""
+async def admin_top_referrers(authorization: Optional[str] = Header(None), hours: int = 0, limit: int = 10):
+    """Top HTTP Referer hosts (admin-only).
+
+    * hours = 0 (default): all-time stats.
+    * hours > 0: restricts to the last N hours (capped to 30 days).
+
+    For each host we return the total call count + the timestamps of the
+    first and last calls (ISO-8601 UTC strings, suitable for new Date(...)
+    on the front-end)."""
     jwt = (authorization or "").removeprefix("Bearer ").strip()
     await _require_admin(jwt)
 
-    since = datetime.now(timezone.utc) - timedelta(hours=max(1, min(hours, 24 * 30)))
+    match_stage = {}
+    if hours and hours > 0:
+        since = datetime.now(timezone.utc) - timedelta(hours=min(hours, 24 * 30))
+        match_stage = {"$match": {"ts": {"$gte": since}}}
+
     try:
-        pipeline = [
-            {"$match": {"ts": {"$gte": since}}},
-            {"$group": {"_id": "$host", "n": {"$sum": 1}}},
+        pipeline = []
+        if match_stage:
+            pipeline.append(match_stage)
+        pipeline += [
+            {"$group": {
+                "_id": "$host",
+                "n": {"$sum": 1},
+                "first": {"$min": "$ts"},
+                "last": {"$max": "$ts"},
+            }},
             {"$sort": {"n": -1}},
             {"$limit": max(1, min(limit, 50))},
         ]
         rows = []
         async for r in db.referrers.aggregate(pipeline):
-            rows.append({"host": r["_id"], "count": r["n"]})
+            first_dt = r.get("first")
+            last_dt = r.get("last")
+            rows.append({
+                "host": r["_id"],
+                "count": r["n"],
+                "first_call": first_dt.isoformat() if first_dt else None,
+                "last_call": last_dt.isoformat() if last_dt else None,
+            })
     except Exception as e:
         logger.warning(f"top-referrers aggregate failed: {e}")
         rows = []
 
-    return {"referrers": rows, "window_hours": hours}
+    return {"referrers": rows, "window_hours": hours, "all_time": hours == 0}
 
 
 @api_router.get("/admin/global-stats")
