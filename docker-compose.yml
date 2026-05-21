@@ -1,0 +1,107 @@
+# =========================================================================
+# NovaStream — production stack (phase 1)
+# =========================================================================
+# Conteneurs :
+#   - novastream      : app (FastAPI + frontend static buildé), expose :8001
+#   - novastream-mongo: stockage views + referrers (interne au stack)
+#
+# NPMplus pointe sur novastream:8001 via le réseau partagé npmplus_default.
+# Auth/data métier : Supabase (externe, repris de LiveWatch).
+# =========================================================================
+
+services:
+
+  mongo:
+    image: mongo:4.4
+    container_name: novastream-mongo
+    restart: unless-stopped
+    command:
+      - --bind_ip_all
+      - --wiredTigerCacheSizeGB
+      - "1"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
+      MONGO_INITDB_DATABASE: ${MONGO_DB_NAME}
+    volumes:
+      - mongo_data:/data/db
+      - mongo_config:/data/configdb
+    networks:
+      - novastream_internal
+    healthcheck:
+      test: ["CMD", "mongo", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    mem_swappiness: 0
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        REACT_APP_BACKEND_URL: ${REACT_APP_BACKEND_URL}
+        REACT_APP_SUPABASE_URL: ${REACT_APP_SUPABASE_URL}
+        REACT_APP_SUPABASE_ANON_KEY: ${REACT_APP_SUPABASE_ANON_KEY}
+    image: novastream:latest
+    container_name: novastream
+    restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
+    expose:
+      - "8001"
+    environment:
+      # Mongo
+      MONGO_URL: "mongodb://${MONGO_ROOT_USER}:${MONGO_ROOT_PASSWORD}@mongo:27017/${MONGO_DB_NAME}?authSource=admin"
+      DB_NAME: ${MONGO_DB_NAME}
+      # Supabase (repris de LiveWatch)
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+      # CORS
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      # Uvicorn — phase 1 : 1 worker pour cache HLS 100% efficace
+      UVICORN_WORKERS: ${UVICORN_WORKERS:-1}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      STATIC_DIR: /app/static
+    mem_swappiness: 0
+    networks:
+      - novastream_internal
+      - npmplus_default
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: "30m"
+        max-file: "5"
+
+volumes:
+  mongo_data:
+    driver: local
+  mongo_config:
+    driver: local
+
+networks:
+  novastream_internal:
+    driver: bridge
+    name: novastream_internal
+  npmplus_default:
+    external: true

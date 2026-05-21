@@ -1363,6 +1363,32 @@ api_router.include_router(ext_router)
 
 # ----------------- App setup -----------------
 app.include_router(api_router)
+# ----------------- Static React (SPA) -----------------
+# Le frontend buildé (CRA) est copié dans /app/static au build de l'image.
+# - /api/* est servi par le router ci-dessus (déjà inclus)
+# - /static/* (assets CRA hashés) et / (SPA) sont servis ici
+# - Toute route inconnue renvoie index.html (fallback SPA pour react-router)
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+
+STATIC_DIR = Path(os.environ.get("STATIC_DIR", "/app/static"))
+
+if STATIC_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR / "static")), name="static")
+
+    @app.get("/{full_path:path}")
+    async def spa_fallback(full_path: str):
+        if full_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="Not found")
+        candidate = STATIC_DIR / full_path
+        if full_path and candidate.is_file():
+            return FileResponse(str(candidate))
+        index = STATIC_DIR / "index.html"
+        if index.is_file():
+            return FileResponse(str(index))
+        raise HTTPException(status_code=404, detail="Not found")
+else:
+    logger.warning(f"STATIC_DIR {STATIC_DIR} not found")
 
 app.add_middleware(
     CORSMiddleware,
