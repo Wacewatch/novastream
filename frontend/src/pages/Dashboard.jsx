@@ -7,7 +7,6 @@ import {
   Crown,
   Shield,
   User as UserIcon,
-  KeyRound,
   Loader2,
   Tv2,
   Calendar,
@@ -18,6 +17,7 @@ import { useAuth } from "@/context/AuthContext";
 import { useFavorites } from "@/hooks/useFavorites";
 import { supabase } from "@/lib/supabase";
 import { toast } from "sonner";
+import VipUpgradeModule from "@/components/VipUpgradeModule";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -28,8 +28,6 @@ export default function Dashboard() {
 
   const [favChannels, setFavChannels] = useState([]);
   const [loadingChans, setLoadingChans] = useState(false);
-  const [vipKey, setVipKey] = useState("");
-  const [redeeming, setRedeeming] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -76,31 +74,11 @@ export default function Dashboard() {
     return <Navigate to="/login" replace state={{ from: { pathname: "/dashboard" } }} />;
   }
 
-  const handleRedeem = async (e) => {
-    e.preventDefault();
-    if (!vipKey.trim()) return;
-    setRedeeming(true);
-    try {
-      const { data: { session } } = await supabase.auth.getSession();
-      const token = session?.access_token;
-      const r = await axios.post(
-        `${API}/auth/redeem-vip`,
-        { key: vipKey.trim() },
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      if (r.data?.success) {
-        toast.success("🎉 Clé VIP activée ! Bienvenue dans le club Premium.");
-        setVipKey("");
-        await refreshProfile();
-      } else {
-        toast.error(r.data?.error || "Erreur d'activation");
-      }
-    } catch (err) {
-      const msg = err?.response?.data?.detail || err?.response?.data?.error || err?.message || "Erreur";
-      toast.error(msg);
-    } finally {
-      setRedeeming(false);
-    }
+  /** Returns the Authorization header for backend calls (used by VipUpgradeModule). */
+  const getAuthHeader = async () => {
+    const { data: { session } } = await supabase.auth.getSession();
+    const token = session?.access_token;
+    return token ? { Authorization: `Bearer ${token}` } : {};
   };
 
   const handleSignOut = async () => {
@@ -183,39 +161,12 @@ export default function Dashboard() {
           </div>
         </section>
 
-        {/* VIP key redemption (only for non-VIP) */}
+        {/* VIP buy + redeem module (only shown to non-VIP) */}
         {!isVip && (
-          <section className="mt-6 glass rounded-2xl p-5 border border-white/10" data-testid="vip-redeem-section">
-            <div className="flex items-center gap-2 mb-3">
-              <Crown size={18} className="text-yellow-400" />
-              <h3 className="text-lg font-bold">Activer une clé VIP</h3>
-            </div>
-            <p className="text-sm text-white/60 mb-4">
-              Entrez votre clé VIP pour débloquer la lecture sans pub et accéder aux fonctionnalités premium.
-            </p>
-            <form onSubmit={handleRedeem} className="flex flex-col sm:flex-row gap-2">
-              <div className="relative flex-1">
-                <KeyRound size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-white/50" />
-                <input
-                  value={vipKey}
-                  onChange={(e) => setVipKey(e.target.value)}
-                  placeholder="Ex: VIP-XXXX-XXXX-XXXX"
-                  required
-                  data-testid="vip-key-input"
-                  className="w-full pl-9 pr-3 py-2.5 rounded-xl bg-white/5 border border-white/10 text-white placeholder:text-white/40 focus:outline-none focus:border-yellow-400/50 font-mono"
-                />
-              </div>
-              <button
-                type="submit"
-                disabled={redeeming}
-                className="px-5 py-2.5 rounded-xl bg-yellow-400 hover:bg-yellow-300 text-black font-semibold flex items-center justify-center gap-2 disabled:opacity-60"
-                data-testid="vip-redeem-btn"
-              >
-                {redeeming ? <Loader2 className="animate-spin" size={16} /> : <Sparkles size={16} />}
-                Activer
-              </button>
-            </form>
-          </section>
+          <VipUpgradeModule
+            getAuthHeader={getAuthHeader}
+            onRedeemed={refreshProfile}
+          />
         )}
 
         {/* Favorites */}
