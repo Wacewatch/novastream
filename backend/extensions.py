@@ -619,12 +619,28 @@ async def daddy_stream(
         # Best-effort client IP (X-Forwarded-For first, then peer)
         xff = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
         ip = xff or (request.client.host if request.client else "")
+        # Best-effort sub claim (Supabase user_id) for "Ads avoided" counter.
+        user_id = None
+        if is_member:
+            try:
+                token = authorization.split(" ", 1)[1].strip()
+                seg = token.split(".")
+                if len(seg) >= 2:
+                    import base64 as _b64, json as _json
+                    body = seg[1] + "=" * (-len(seg[1]) % 4)
+                    payload = _json.loads(_b64.urlsafe_b64decode(body).decode("utf-8", errors="ignore"))
+                    sub = payload.get("sub")
+                    if isinstance(sub, str) and sub:
+                        user_id = sub
+            except Exception:
+                user_id = None
         asyncio.create_task(_record_view(
             f"daddy:{c['id']}",
             is_member=is_member,
             is_vip=bool(is_member and vip),
             is_embed=bool(embed),
             ip=ip,
+            user_id=user_id,
         ))
 
     return {

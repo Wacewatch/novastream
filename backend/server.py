@@ -139,6 +139,8 @@ async def _ensure_views_index() -> None:
             logger.warning(f"views TTL re-create check failed: {e}")
         await db.views.create_index("ts", expireAfterSeconds=400 * 24 * 3600)
         await db.views.create_index([("channel_id", 1), ("ts", -1)])
+        # For per-user "ads avoided" lookups (Dashboard counter).
+        await db.views.create_index([("user_id", 1), ("is_vip", 1), ("ts", -1)])
     except Exception as e:
         logger.warning(f"views index init failed: {e}")
 
@@ -148,6 +150,7 @@ async def _record_view(
     is_vip: bool = False,
     is_embed: bool = False,
     ip: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> None:
     try:
         await db.views.insert_one({
@@ -157,6 +160,7 @@ async def _record_view(
             "is_vip": bool(is_vip),
             "is_embed": bool(is_embed),
             "ip": (ip or "")[:64] or None,
+            "user_id": user_id or None,
         })
     except Exception as e:
         logger.warning(f"record view failed: {e}")
@@ -861,12 +865,14 @@ async def get_stream_url(
         and authorization.lower().startswith("bearer ")
         and len(authorization) > 20
     )
+    user_id = _decode_jwt_sub(authorization) if is_member else None
     asyncio.create_task(_record_view(
         channel_id,
         is_member=is_member,
         is_vip=bool(is_member and vip),
         is_embed=bool(embed),
         ip=_client_ip(request),
+        user_id=user_id,
     ))
     return {
         "id": channel_id,
@@ -1085,6 +1091,38 @@ def _extract_bearer(authorization: Optional[str]) -> str:
     return parts[1].strip()
 
 
+def _decode_jwt_sub(authorization: Optional[str]) -> Optional[str]:
+    """Cheap, NON-VALIDATING extraction of the `sub` claim from a Bearer JWT.
+
+    Used for view tracking (we just want to know "which user" — false values
+    are inconsequential since this never grants access). For *real* auth we
+    still hit Supabase /auth/v1/user via _supabase_get_user.
+    """
+    try:
+        if not authorization:
+            return None
+        parts = authorization.split(" ", 1)
+        if len(parts) != 2 or parts[0].lower() != "bearer":
+            return None
+        token = parts[1].strip()
+        segments = token.split(".")
+        if len(segments) < 2:
+            return None
+        body = segments[1]
+        # Pad base64 (JWT uses base64url without padding)
+        body += "=" * (-len(body) % 4)
+        import base64 as _b64
+        import json as _json
+        raw = _b64.urlsafe_b64decode(body)
+        payload = _json.loads(raw.decode("utf-8", errors="ignore"))
+        sub = payload.get("sub")
+        if isinstance(sub, str) and sub:
+            return sub
+    except Exception:
+        pass
+    return None
+
+
 # ---------- Models ----------
 class RedeemVipRequest(BaseModel):
     key: str = Field(..., min_length=4, max_length=128)
@@ -1099,6 +1137,44 @@ class ChannelsByIdsRequest(BaseModel):
 
 
 # ---------- Endpoints ----------
+@api_router.get("/user/bypass-stats")
+async def user_bypass_stats(authorization: Optional[str] = Header(None)):
+    """Returns the "ads avoided" counter for the calling user.
+
+    For a VIP user, every play counts as one avoided ad-unlock prompt. We
+    return:
+        { "month": <count in current calendar month, UTC>,
+          "total": <total since the user upgraded, all-time> }
+
+    Requires a valid Bearer JWT (we validate against Supabase /auth/v1/user
+    so we get the real user id, not a forged sub).
+    """
+    jwt = _extract_bearer(authorization)
+    user = await _supabase_get_user(jwt)
+    uid = user.get("id")
+    if not uid:
+        raise HTTPException(status_code=401, detail="Utilisateur invalide")
+
+    now = datetime.now(timezone.utc)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    try:
+        # Each is_vip=True view = one ad avoided (the user would otherwise
+        # have had to wait through the AdUnlockModal).
+        total = await db.views.count_documents({"user_id": uid, "is_vip": True})
+        month = await db.views.count_documents({
+            "user_id": uid,
+            "is_vip": True,
+            "ts": {"$gte": month_start},
+        })
+    except Exception as e:
+        logger.warning(f"bypass-stats query failed: {e}")
+        total = 0
+        month = 0
+
+    return {"month": int(month), "total": int(total)}
+
+
 @api_router.post("/auth/redeem-vip")
 async def redeem_vip(body: RedeemVipRequest, authorization: Optional[str] = Header(None)):
     """Mark a VIP key as used by the calling user, then upgrade the user's
