@@ -15,6 +15,7 @@ import SportsTab from "@/components/tabs/SportsTab";
 import FootballTab from "@/components/tabs/FootballTab";
 import InfoTab from "@/components/tabs/InfoTab";
 import { useFavorites } from "@/hooks/useFavorites";
+import { fetchTvStream, fetchDaddyStream } from "@/lib/streamApi";
 import {
   Select,
   SelectContent,
@@ -213,8 +214,8 @@ export default function NovaStream() {
       const ch = payload;
       setResolving(true);
       try {
-        const r = await axios.get(`${API}/stream/${encodeURIComponent(ch.id)}`);
-        setTvStreamUrl(r.data.proxy_url);
+        const data = await fetchTvStream(ch.id);
+        setTvStreamUrl(data.proxy_url);
         setTvActive(ch);
       } catch (e) {
         console.error(e);
@@ -233,8 +234,7 @@ export default function NovaStream() {
       setResolving(true);
       setDaddyStarted(false);
       try {
-        const r = await axios.get(`${API}/daddy/stream/${encodeURIComponent(ch.id)}`);
-        const data = r.data || {};
+        const data = await fetchDaddyStream(ch.id);
         setDaddyActive({
           ...ch,
           embed_url: data.iframe_url || data.embed_url || ch.embed_url || "",
@@ -603,8 +603,8 @@ export default function NovaStream() {
           onClose={() => { setTvActive(null); setTvStreamUrl(null); }}
           onRetry={async () => {
             try {
-              const r = await axios.get(`${API}/stream/${encodeURIComponent(tvActive.id)}`);
-              setTvStreamUrl(`${r.data.proxy_url}&_t=${Date.now()}`);
+              const data = await fetchTvStream(tvActive.id);
+              setTvStreamUrl(`${data.proxy_url}&_t=${Date.now()}`);
             } catch (e) {
               console.error(e);
               toast.error("Impossible de relancer le flux");
@@ -629,10 +629,10 @@ export default function NovaStream() {
           }}
           onRetry={async () => {
             try {
-              const r = await axios.get(`${API}/daddy/stream/${encodeURIComponent(daddyActive.id)}`);
-              if (r.data?.stream_url) {
+              const data = await fetchDaddyStream(daddyActive.id);
+              if (data?.stream_url) {
                 setDaddyStarted(false);
-                setDaddyHls(`${r.data.stream_url}&_t=${Date.now()}`);
+                setDaddyHls(`${data.stream_url}&_t=${Date.now()}`);
               } else {
                 setDaddyHls(null); // fall back to iframe
               }

@@ -4,6 +4,7 @@ import axios from "axios";
 import VideoPlayer from "@/components/VideoPlayer";
 import AdUnlockModal from "@/components/AdUnlockModal";
 import { Loader2 } from "lucide-react";
+import { fetchTvStream } from "@/lib/streamApi";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || window.location.origin;
 const API = `${BACKEND_URL}/api`;
@@ -35,8 +36,8 @@ export default function EmbedPage() {
   const handleUnlocked = async () => {
     setUnlocked(true);
     try {
-      const r = await axios.get(`${API}/stream/${encodeURIComponent(channelId)}`);
-      setStreamUrl(r.data.proxy_url);
+      const data = await fetchTvStream(channelId);
+      setStreamUrl(data.proxy_url);
     } catch (e) {
       setError("Flux indisponible");
     }
@@ -44,8 +45,8 @@ export default function EmbedPage() {
 
   const handleRetry = async () => {
     try {
-      const r = await axios.get(`${API}/stream/${encodeURIComponent(channelId)}`);
-      setStreamUrl(`${r.data.proxy_url}&_t=${Date.now()}`);
+      const data = await fetchTvStream(channelId);
+      setStreamUrl(`${data.proxy_url}&_t=${Date.now()}`);
     } catch (e) {
       setError("Flux indisponible");
     }

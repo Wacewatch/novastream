@@ -38,16 +38,18 @@ _supabase_query = None  # type: ignore
 _require_admin = None   # type: ignore
 _extract_bearer = None  # type: ignore
 _db = None  # type: ignore  # Motor db
+_record_view = None  # type: ignore  # async fn(channel_id: str, is_member: bool=False)
 
 
-def init_extensions(*, get_http_client, supabase_query, require_admin, extract_bearer, db):
+def init_extensions(*, get_http_client, supabase_query, require_admin, extract_bearer, db, record_view=None):
     """Wire helpers from server.py into the extensions module."""
-    global _get_http_client, _supabase_query, _require_admin, _extract_bearer, _db
+    global _get_http_client, _supabase_query, _require_admin, _extract_bearer, _db, _record_view
     _get_http_client = get_http_client
     _supabase_query = supabase_query
     _require_admin = require_admin
     _extract_bearer = extract_bearer
     _db = db
+    _record_view = record_view
 
 
 # A separate router that server.py will include into its existing api_router.
@@ -550,7 +552,13 @@ async def _resolve_dlstream(channel_id: str) -> Optional[Dict[str, str]]:
 
 
 @ext_router.get("/daddy/stream/{channel_id}")
-async def daddy_stream(channel_id: str, request: Request):
+async def daddy_stream(
+    channel_id: str,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+    vip: int = 0,
+    embed: int = 0,
+):
     """Resolves the playable URLs for a DaddyTV channel.
 
     Returns:
@@ -599,6 +607,41 @@ async def daddy_stream(channel_id: str, request: Request):
     #    note player.cfbu247.sbs has frame-ancestors CSP so it rarely works).
     if not iframe_url:
         iframe_url = c.get("embed_url") or ""
+
+    # Track this DaddyTV view (non-blocking, namespaced channel_id with
+    # the "daddy:" prefix so it doesn't collide with TV channel ids).
+    if _record_view is not None:
+        is_member = bool(
+            authorization
+            and authorization.lower().startswith("bearer ")
+            and len(authorization) > 20
+        )
+        # Best-effort client IP (X-Forwarded-For first, then peer)
+        xff = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+        ip = xff or (request.client.host if request.client else "")
+        # Best-effort sub claim (Supabase user_id) for "Ads avoided" counter.
+        user_id = None
+        if is_member:
+            try:
+                token = authorization.split(" ", 1)[1].strip()
+                seg = token.split(".")
+                if len(seg) >= 2:
+                    import base64 as _b64, json as _json
+                    body = seg[1] + "=" * (-len(seg[1]) % 4)
+                    payload = _json.loads(_b64.urlsafe_b64decode(body).decode("utf-8", errors="ignore"))
+                    sub = payload.get("sub")
+                    if isinstance(sub, str) and sub:
+                        user_id = sub
+            except Exception:
+                user_id = None
+        asyncio.create_task(_record_view(
+            f"daddy:{c['id']}",
+            is_member=is_member,
+            is_vip=bool(is_member and vip),
+            is_embed=bool(embed),
+            ip=ip,
+            user_id=user_id,
+        ))
 
     return {
         "id": c["id"],

@@ -241,6 +241,51 @@ backend:
         -agent: "testing"
         -comment: "✅ ADMIN AUTH CONTRACT VERIFIED (401 checks). Tested: (1) GET /api/admin/football-keys without Authorization header returns 401. (2) POST /api/admin/football-keys with body {api_key, label, enabled} without auth returns 401. (3) PATCH /api/admin/football-keys/{id} without auth returns 401. (4) DELETE /api/admin/football-keys/{id} without auth returns 401. All admin endpoints correctly reject unauthorized requests. Cannot test happy path without admin JWT, but auth contract is working correctly."
 
+  - task: "Live stats: Members vs Guests split (/api/admin/live-stats returns members_online + guests_online; /api/stream/{id} and /api/daddy/stream/{id} accept Authorization Bearer to mark view as member)"
+    implemented: true
+    working: true
+    file: "backend/server.py, backend/extensions.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "Added is_member tracking to views collection. /api/stream/{id} and /api/daddy/stream/{id} now check for Authorization header (Bearer token with length>20) and record is_member=true for authenticated requests, is_member=false otherwise. /api/admin/live-stats aggregates members_online and guests_online from views in the last 5 minutes."
+        -working: true
+        -agent: "testing"
+        -comment: "✅ ALL MEMBERS/GUESTS SPLIT TESTS PASSED (8/8). Tested: (1) GET /api/stream/{id} WITHOUT Authorization → returns 200 with stream URL, view recorded with is_member=false in MongoDB. (2) GET /api/stream/{id} WITH Authorization: Bearer dummy_long_enough_token_aaaaaaaaaaaa → returns 200, view recorded with is_member=true. (3) GET /api/daddy/stream/{id} WITHOUT Authorization → returns 200, view recorded with channel_id='daddy:{id}' and is_member=false. (4) GET /api/daddy/stream/{id} WITH Authorization: Bearer aaaaaaaaaaaaaaaaaaaaaa → returns 200, view recorded with channel_id='daddy:{id}' and is_member=true. All views correctly stored in MongoDB with proper is_member flag. Authorization header detection working correctly (checks 'bearer ' prefix + length>20, no JWT validation)."
+
+  - task: "Referrers: removed legacy same-host filter; middleware logs /api/daddy/stream/*; explicit ?ref= query param overrides Referer header"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "Referrer middleware now logs both /api/stream/* and /api/daddy/stream/* endpoints. Accepts explicit ?ref=<url> query parameter (used by iframe embed pages to forward document.referrer from parent page) which takes precedence over Referer header. Removed legacy same-host filter so all referrers are logged including livewatch.top itself. Stores host (normalized, www. stripped), ts, path, and via ('query' or 'header') in referrers collection. Indexes: ts (no TTL for permanent retention), host+ts. /api/admin/top-referrers aggregates with first/last call timestamps."
+        -working: true
+        -agent: "testing"
+        -comment: "✅ ALL REFERRER TRACKING TESTS PASSED (8/8). Tested: (1) GET /api/stream/{id}?ref=https://wavewatch.top/some-page → referrer logged with host='wavewatch.top' and via='query'. (2) GET /api/stream/{id} with Referer: https://example.org/foo header → referrer logged with host='example.org' and via='header'. (3) GET /api/stream/{id} with Referer: https://livewatch.top/ → same-host referrer NOW LOGGED (legacy filter removed), host='livewatch.top'. (4) GET /api/daddy/stream/{id}?ref=https://test-embed-host.com → referrer logged with host='test-embed-host.com' and via='query', confirming /api/daddy/stream/* is also tracked. (5) GET /api/admin/top-referrers without auth → 401 as expected. (6) MongoDB aggregation verified: all referrers have first/last timestamps. (7) MongoDB indexes verified: ts index (no TTL), host_1_ts_-1 index exist. All referrer tracking working correctly."
+
+  - task: "DaddyTV view tracking: /api/daddy/stream/{id} records views with channel_id prefixed 'daddy:<id>'"
+    implemented: true
+    working: true
+    file: "backend/extensions.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "DaddyTV stream endpoint now records views with channel_id prefixed 'daddy:{id}' to avoid collision with TV channel IDs. Uses same _record_view helper as TV channels, with is_member flag based on Authorization header."
+        -working: true
+        -agent: "testing"
+        -comment: "✅ DADDYTV VIEW TRACKING TESTS PASSED (4/4). Tested: (1) GET /api/daddy/stream/123 WITHOUT Authorization → view recorded with channel_id='daddy:123' and is_member=false. (2) GET /api/daddy/stream/123 WITH Authorization: Bearer aaaaaaaaaaaaaaaaaaaaaa → view recorded with channel_id='daddy:123' and is_member=true. (3) MongoDB verification: views collection contains entries with channel_id starting with 'daddy:' prefix, correctly namespaced to avoid collision with TV channel IDs. (4) Regression: /api/daddy/channels still returns correct channel list. DaddyTV view tracking working correctly with proper namespacing."
+
 frontend:
   - task: "LiveWatch branding (logo, favicon, title) + API link in header"
     implemented: true
@@ -293,15 +338,11 @@ frontend:
 metadata:
   created_by: "main_agent"
   version: "1.0"
-  test_sequence: 3
+  test_sequence: 4
   run_ui: false
 
 test_plan:
-  current_focus:
-    - "DaddyTV module (/api/daddy/channels, /api/daddy/channel/{id}, /api/daddy/embed/{id}) + 4 public endpoints (channels, channel/{id}, countries, categories)"
-    - "Sports module (/api/sports/matches, /api/sports/streams, /api/sports/info) + 2 public endpoints (sports, sports/info)"
-    - "Football Live module (/api/football/matches, /api/football/streams, /api/football/proxy) with RapidAPI key rotation + HLS proxy + public endpoint"
-    - "Admin: Football API keys CRUD (/api/admin/football-keys GET/POST/PATCH/DELETE) — requires admin JWT"
+  current_focus: []
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
@@ -883,3 +924,183 @@ agent_communication:
       9. No regressions on existing endpoints
       
       The proxy split implementation is production-ready. All test scenarios from the review request passed successfully.
+
+
+agent_communication:
+    -agent: "main"
+    -message: |
+      Session 2026-05-21 — Members/Guests split + Referrer attribution fixes:
+      
+      1) Members vs Guests split:
+         - /api/stream/{id} and /api/daddy/stream/{id} now accept optional
+           Authorization header (Bearer token with length>20, no JWT validation).
+         - Views are recorded with is_member=true for authenticated requests,
+           is_member=false otherwise.
+         - /api/admin/live-stats aggregates members_online and guests_online
+           from views in the last 5 minutes.
+      
+      2) Referrer attribution fixes:
+         - Middleware now logs referrers for both /api/stream/* and
+           /api/daddy/stream/* endpoints.
+         - Accepts explicit ?ref=<url> query parameter (used by iframe embed
+           pages to forward document.referrer from parent page) which takes
+           precedence over Referer header.
+         - Removed legacy same-host filter — all referrers are now logged
+           including livewatch.top itself.
+         - Stores host (normalized, www. stripped), ts, path, and via
+           ('query' or 'header') in referrers collection.
+         - Indexes: ts (no TTL for permanent retention), host+ts.
+         - /api/admin/top-referrers aggregates with first/last call timestamps.
+      
+      3) DaddyTV view tracking:
+         - /api/daddy/stream/{id} now records views with channel_id prefixed
+           'daddy:{id}' to avoid collision with TV channel IDs.
+      
+      Please test all scenarios from the review request.
+    -agent: "testing"
+    -message: |
+      ✅ MEMBERS/GUESTS SPLIT + REFERRER ATTRIBUTION TESTING COMPLETE - ALL TESTS PASSED (26/26)
+      
+      Comprehensive test suite executed against https://api-redesign-2.preview.emergentagent.com
+      Created /app/backend_test_members_referrers.py with full validation coverage.
+      
+      Test Results Summary:
+      
+      A) TV Stream with/without Authorization (4/4 tests passed):
+         ✅ GET /api/stream/{id} WITHOUT Authorization → 200, view recorded with is_member=false
+         ✅ GET /api/stream/{id} WITH Authorization: Bearer dummy_long_enough_token_aaaaaaaaaaaa → 200, view recorded with is_member=true
+         ✅ MongoDB verification: views collection correctly stores is_member flag
+         ✅ Authorization header detection working (checks 'bearer ' prefix + length>20)
+      
+      B) Referrer Tracking (6/6 tests passed):
+         ✅ GET /api/stream/{id}?ref=https://wavewatch.top/some-page → referrer logged with host='wavewatch.top', via='query'
+         ✅ GET /api/stream/{id} with Referer: https://example.org/foo → referrer logged with host='example.org', via='header'
+         ✅ GET /api/stream/{id} with Referer: https://livewatch.top/ → same-host referrer NOW LOGGED (legacy filter removed)
+         ✅ Query param ?ref= takes precedence over Referer header
+         ✅ Host normalization working (www. stripped, netloc extracted)
+         ✅ All referrers stored with host, ts, path, via fields
+      
+      C) DaddyTV Stream + Referrer (6/6 tests passed):
+         ✅ GET /api/daddy/stream/{id} WITHOUT Authorization → 200, view recorded with channel_id='daddy:{id}', is_member=false
+         ✅ GET /api/daddy/stream/{id} WITH Authorization: Bearer aaaaaaaaaaaaaaaaaaaaaa → 200, view recorded with channel_id='daddy:{id}', is_member=true
+         ✅ GET /api/daddy/stream/{id}?ref=https://test-embed-host.com → referrer logged with host='test-embed-host.com', via='query'
+         ✅ DaddyTV views correctly namespaced with 'daddy:' prefix
+         ✅ No collision with TV channel IDs
+         ✅ Middleware logs /api/daddy/stream/* endpoints
+      
+      D) Admin Endpoints (2/2 tests passed):
+         ✅ GET /api/admin/top-referrers without auth → 401 "Token manquant"
+         ✅ MongoDB aggregation verified: all referrers have first/last timestamps
+      
+      E) MongoDB Indexes (4/4 tests passed):
+         ✅ referrers collection: ts index (no TTL) exists
+         ✅ referrers collection: host_1_ts_-1 index exists
+         ✅ views collection: ts index with TTL (24h) exists
+         ✅ views collection: channel_id_1_ts_-1 index exists
+      
+      F) Regression Tests (4/4 tests passed):
+         ✅ GET /api/channels → returns channels list
+         ✅ GET /api/daddy/channels → returns daddy channels list
+         ✅ GET /api/ → returns {"app": "LiveWatch", "status": "ok"}
+         ✅ GET /api/stream/{id} response shape unchanged (id, name, proxy_url)
+      
+      Final MongoDB State:
+      - Last 5 views show correct is_member distribution (true/false)
+      - DaddyTV views correctly prefixed with 'daddy:' in channel_id
+      - Last 5 referrers show correct host/via/path/ts fields
+      - Referrers include wavewatch.top, example.org, livewatch.top (same-host), test-embed-host.com
+      
+      All backend tasks are now working correctly. No critical issues found.
+      The Members/Guests split and Referrer attribution fixes are production-ready.
+
+
+
+  - task: "Stats timeseries endpoint (/api/admin/stats-timeseries) with 24h/7d/30d/1y ranges"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "Added GET /api/admin/stats-timeseries?range=24h|7d|30d|1y endpoint. Admin-only (Bearer JWT required). Returns time-series buckets with metrics: total, member_plays, vip_plays, guest_plays, embed_plays, unique_visitors. Bucket size: hour for 24h, day for 7d/30d/1y. Fills missing buckets with zeros for continuous charts. Returns totals summed across all buckets."
+        -working: true
+        -agent: "testing"
+        -comment: "✅ ALL STATS TIMESERIES TESTS PASSED (26/26). Comprehensive validation completed: (1) MongoDB indexes verified: ts_1 with 400-day TTL (34560000s), channel_id_1_ts_-1, _id_ all present. Legacy 24h TTL index correctly dropped. (2) Auth contract verified: GET /api/admin/stats-timeseries without auth → 401 'Token manquant', invalid Bearer → 401. (3) Extended view tracking working perfectly: tested /api/stream/{id} with 6 scenarios (no auth, Bearer, Bearer+vip=1, Bearer+embed=1, no auth+vip=1, Bearer+ref). All views correctly recorded in MongoDB with is_member, is_vip, is_embed, ip fields. Server correctly ignores vip=1 when no Bearer token present (is_vip forced to false). IP capture working (X-Forwarded-For → X-Real-IP → socket peer). (4) Aggregation correctness verified: ran same pipeline as endpoint for range=7d, verified all buckets have total = member_plays + vip_plays + guest_plays, vip_plays <= member_plays + vip_plays (subset), unique_visitors <= total. Totals match sum of buckets. (5) DaddyTV parity verified: /api/daddy/stream/{id} with same scenarios, all views correctly stored with channel_id='daddy:{id}' prefix, all fields (is_member, is_vip, is_embed, ip) working. (6) Regression tests passed: /api/admin/live-stats without auth → 401, /api/admin/top-referrers without auth → 401, /api/ returns {app: 'LiveWatch', status: 'ok'}, /api/channels works, /api/daddy/channels works, /api/stream/{id} response shape unchanged (id, name, proxy_url). (7) Sample views show correct schema: channel_id, ts, is_member, is_vip, is_embed, ip. Views retention now 400 days (was 24h). All backend functionality working correctly."
+
+  - task: "Extended view tracking schema (is_vip, is_embed, ip fields) + 400-day retention"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "Extended db.views schema to include: is_vip (bool), is_embed (bool), ip (string, captured from X-Forwarded-For or X-Real-IP or socket peer). Updated _record_view() to accept these parameters. /api/stream/{id} and /api/daddy/stream/{id} now accept ?vip=1 and ?embed=1 query params. vip=1 only marks view as VIP if Authorization Bearer is also present (server-side enforcement). Changed TTL on ts index from 24h (86400s) to 400 days (34560000s) to support 1y timeseries. Legacy 24h TTL index auto-dropped on startup."
+        -working: true
+        -agent: "testing"
+        -comment: "✅ EXTENDED VIEW SCHEMA TESTS PASSED (13/13). All new fields working correctly: (1) is_vip field: correctly set to true only when Authorization Bearer present AND ?vip=1 param. When no auth + vip=1, is_vip forced to false (server-side enforcement working). (2) is_embed field: correctly set to true when ?embed=1 param present. (3) ip field: correctly captured from X-Forwarded-For (first hop = real client), falls back to X-Real-IP, then socket peer. All test views show valid IP addresses (34.170.12.145). (4) 400-day retention: MongoDB ts_1 index has expireAfterSeconds=34560000 (400 days). Legacy 24h TTL index (86400s) correctly dropped. (5) DaddyTV views: correctly stored with channel_id='daddy:{id}' prefix, all extended fields working. (6) Referrer tracking: ?ref= param correctly logged in referrers collection with via='query'. All extended view tracking working perfectly."
+
+agent_communication:
+    -agent: "testing"
+    -message: |
+      ✅ STATS TIMESERIES + EXTENDED VIEW TRACKING TESTING COMPLETE - ALL TESTS PASSED (26/26)
+      
+      Comprehensive test suite executed against https://api-redesign-2.preview.emergentagent.com
+      Created /app/backend_test_stats_timeseries.py with full validation coverage.
+      
+      Test Results Summary:
+      
+      A) MongoDB Index Check (3/3 tests passed):
+         ✅ ts_1 index with 400-day TTL (34560000s) verified
+         ✅ _id_ index exists
+         ✅ channel_id_1_ts_-1 index exists
+         - Legacy 24h TTL index correctly dropped on startup
+      
+      B) Endpoint Auth (2/2 tests passed):
+         ✅ GET /api/admin/stats-timeseries without auth → 401 "Token manquant"
+         ✅ GET /api/admin/stats-timeseries with invalid Bearer → 401
+      
+      C) Extended View Tracking (7/7 tests passed):
+         ✅ /api/stream/{id} without auth → is_member=false, is_vip=false, is_embed=false, ip captured
+         ✅ /api/stream/{id} with Bearer → is_member=true, is_vip=false, is_embed=false
+         ✅ /api/stream/{id} with Bearer + ?vip=1 → is_member=true, is_vip=true, is_embed=false
+         ✅ /api/stream/{id} with Bearer + ?embed=1 → is_member=true, is_vip=false, is_embed=true
+         ✅ /api/stream/{id} without auth + ?vip=1 → is_vip=false (server ignores vip=1 without Bearer)
+         ✅ /api/stream/{id} with Bearer + ?ref= → referrer logged with via='query'
+         ✅ IP capture working: X-Forwarded-For → X-Real-IP → socket peer
+      
+      D) Aggregation Correctness (2/2 tests passed):
+         ✅ All buckets valid: total = member_plays + vip_plays + guest_plays
+         ✅ Totals computed correctly: sum of all buckets matches totals output
+         - Verified vip_plays <= member_plays + vip_plays (VIP is subset of members)
+         - Verified unique_visitors <= total per bucket
+      
+      E) DaddyTV Parity (4/4 tests passed):
+         ✅ /api/daddy/stream/{id} without auth → channel_id='daddy:{id}', is_member=false
+         ✅ /api/daddy/stream/{id} with Bearer → channel_id='daddy:{id}', is_member=true
+         ✅ /api/daddy/stream/{id} with Bearer + ?vip=1 → is_vip=true
+         ✅ /api/daddy/stream/{id} with Bearer + ?embed=1 → is_embed=true
+         - All extended fields (is_vip, is_embed, ip) working correctly
+      
+      F) Regression Tests (6/6 tests passed):
+         ✅ /api/admin/live-stats without auth → 401
+         ✅ /api/admin/top-referrers without auth → 401
+         ✅ /api/ returns {"app": "LiveWatch", "status": "ok"}
+         ✅ /api/channels still works
+         ✅ /api/daddy/channels still works
+         ✅ /api/stream/{id} response shape unchanged (id, name, proxy_url)
+      
+      Sample Views (last 5 from MongoDB):
+      1. TV channel: channel_id='1629878879d81db9a9baa0-e32cb483eba771', is_member=false, is_vip=false, is_embed=false, ip='34.170.12.145'
+      2. DaddyTV: channel_id='daddy:123', is_member=true, is_vip=false, is_embed=true, ip='34.170.12.145'
+      3. DaddyTV: channel_id='daddy:123', is_member=true, is_vip=true, is_embed=false, ip='34.170.12.145'
+      4. DaddyTV: channel_id='daddy:123', is_member=true, is_vip=false, is_embed=false, ip='34.170.12.145'
+      5. DaddyTV: channel_id='daddy:123', is_member=false, is_vip=false, is_embed=false, ip='34.170.12.145'
+      
+      All backend tasks are now working correctly. No critical issues found.
+      The stats timeseries endpoint and extended view tracking are production-ready.

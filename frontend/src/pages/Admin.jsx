@@ -31,6 +31,7 @@ import {
 import { useAuth } from "@/context/AuthContext";
 import { supabase } from "@/lib/supabase";
 import { toast } from "sonner";
+import StatsTimeseriesPanel from "@/components/admin/StatsTimeseriesPanel";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || window.location.origin;
 const API = `${BACKEND_URL}/api`;
@@ -486,11 +487,11 @@ export default function Admin() {
               <div className="mt-4 pt-4 border-t border-white/5 text-xs space-y-1">
                 <div className="flex justify-between text-white/50">
                   <span>Membres :</span>
-                  <span className="text-white/80 tabular-nums">0</span>
+                  <span className="text-white/80 tabular-nums">{liveStats?.members_online ?? 0}</span>
                 </div>
                 <div className="flex justify-between text-white/50">
                   <span>Invités :</span>
-                  <span className="text-white/80 tabular-nums">{liveStats?.online ?? 0}</span>
+                  <span className="text-white/80 tabular-nums">{liveStats?.guests_online ?? (liveStats?.online ?? 0)}</span>
                 </div>
               </div>
             </div>
@@ -603,6 +604,9 @@ export default function Admin() {
             </ol>
           )}
         </section>
+
+        {/* === Statistiques détaillées (graphique 24h / 7j / 30j / 1an) === */}
+        <StatsTimeseriesPanel getAuthHeader={authHeader} />
 
         {/* VIP keys */}
         <section className="glass-heavy rounded-2xl p-5 border border-white/10" data-testid="admin-vip-keys-section">
