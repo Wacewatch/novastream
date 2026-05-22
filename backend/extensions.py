@@ -552,7 +552,13 @@ async def _resolve_dlstream(channel_id: str) -> Optional[Dict[str, str]]:
 
 
 @ext_router.get("/daddy/stream/{channel_id}")
-async def daddy_stream(channel_id: str, request: Request, authorization: Optional[str] = Header(None)):
+async def daddy_stream(
+    channel_id: str,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+    vip: int = 0,
+    embed: int = 0,
+):
     """Resolves the playable URLs for a DaddyTV channel.
 
     Returns:
@@ -610,7 +616,16 @@ async def daddy_stream(channel_id: str, request: Request, authorization: Optiona
             and authorization.lower().startswith("bearer ")
             and len(authorization) > 20
         )
-        asyncio.create_task(_record_view(f"daddy:{c['id']}", is_member=is_member))
+        # Best-effort client IP (X-Forwarded-For first, then peer)
+        xff = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+        ip = xff or (request.client.host if request.client else "")
+        asyncio.create_task(_record_view(
+            f"daddy:{c['id']}",
+            is_member=is_member,
+            is_vip=bool(is_member and vip),
+            is_embed=bool(embed),
+            ip=ip,
+        ))
 
     return {
         "id": c["id"],

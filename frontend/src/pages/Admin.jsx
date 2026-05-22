@@ -31,6 +31,7 @@ import {
 import { useAuth } from "@/context/AuthContext";
 import { supabase } from "@/lib/supabase";
 import { toast } from "sonner";
+import StatsTimeseriesPanel from "@/components/admin/StatsTimeseriesPanel";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -603,6 +604,9 @@ export default function Admin() {
             </ol>
           )}
         </section>
+
+        {/* === Statistiques détaillées (graphique 24h / 7j / 30j / 1an) === */}
+        <StatsTimeseriesPanel getAuthHeader={authHeader} />
 
         {/* VIP keys */}
         <section className="glass-heavy rounded-2xl p-5 border border-white/10" data-testid="admin-vip-keys-section">

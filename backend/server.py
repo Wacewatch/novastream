@@ -88,25 +88,75 @@ _hls_inflight: Dict[str, "asyncio.Task[Tuple[bytes, str, float]]"] = {}
 # ===== View tracking =====
 # A "view" is recorded each time the FE resolves a stream URL via
 # /api/stream/{id}. Stored in MongoDB so it survives restarts. A TTL index on
-# `ts` removes documents older than 24h automatically.
+# `ts` removes documents older than 400 days automatically.
 LIVE_WINDOW = timedelta(minutes=5)   # what counts as "currently watching"
 STATS_TTL = 3.0                       # cache stats aggregation for 3 s
 _stats_cache: Dict[str, Any] = {"data": None, "exp": 0.0}
 _stats_lock = asyncio.Lock()
 
-async def _ensure_views_index() -> None:
+
+def _client_ip(request: Request) -> str:
+    """Best-effort client IP behind reverse-proxies (Kubernetes ingress).
+
+    Reads X-Forwarded-For first (takes the *first* hop = the real client),
+    then X-Real-IP, then falls back to the direct socket peer. Returns "" if
+    nothing is available."""
     try:
-        await db.views.create_index("ts", expireAfterSeconds=24 * 3600)
+        xff = request.headers.get("x-forwarded-for") or ""
+        if xff:
+            return xff.split(",")[0].strip()
+        xr = request.headers.get("x-real-ip") or ""
+        if xr:
+            return xr.strip()
+        if request.client and request.client.host:
+            return request.client.host
+    except Exception:
+        pass
+    return ""
+
+async def _ensure_views_index() -> None:
+    """Indexes on db.views.
+
+    Retention is 400 days (TTL on `ts`) — long enough for the 24h/7d/30d/1y
+    timeseries panel. The legacy 24h TTL is auto-dropped if present.
+    """
+    try:
+        try:
+            existing = await db.views.index_information()
+            for name, info in existing.items():
+                if name == "_id_":
+                    continue
+                keys = info.get("key") or []
+                if (
+                    len(keys) == 1
+                    and keys[0][0] == "ts"
+                    and "expireAfterSeconds" in info
+                    and info["expireAfterSeconds"] != 400 * 24 * 3600
+                ):
+                    await db.views.drop_index(name)
+                    logger.info(f"dropped legacy TTL index on views: {name}")
+        except Exception as e:
+            logger.warning(f"views TTL re-create check failed: {e}")
+        await db.views.create_index("ts", expireAfterSeconds=400 * 24 * 3600)
         await db.views.create_index([("channel_id", 1), ("ts", -1)])
     except Exception as e:
         logger.warning(f"views index init failed: {e}")
 
-async def _record_view(channel_id: str, is_member: bool = False) -> None:
+async def _record_view(
+    channel_id: str,
+    is_member: bool = False,
+    is_vip: bool = False,
+    is_embed: bool = False,
+    ip: Optional[str] = None,
+) -> None:
     try:
         await db.views.insert_one({
             "channel_id": channel_id,
             "ts": datetime.now(timezone.utc),
             "is_member": bool(is_member),
+            "is_vip": bool(is_vip),
+            "is_embed": bool(is_embed),
+            "ip": (ip or "")[:64] or None,
         })
     except Exception as e:
         logger.warning(f"record view failed: {e}")
@@ -784,21 +834,40 @@ async def public_channel(channel_id: str, request: Request):
     return _public_channel(c, _public_base(request))
 
 @api_router.get("/stream/{channel_id}")
-async def get_stream_url(channel_id: str, authorization: Optional[str] = Header(None)):
-    """Resolve and return the HLS URL through our proxy (source hidden)."""
+async def get_stream_url(
+    channel_id: str,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+    vip: int = 0,
+    embed: int = 0,
+):
+    """Resolve and return the HLS URL through our proxy (source hidden).
+
+    Accepts non-authoritative stats hints from the client (set by streamApi.js
+    in the frontend):
+      * Authorization: Bearer <jwt>  → counted as "member"
+      * ?vip=1   → counted as "VIP" (UI hints; we don't validate the JWT
+                   server-side for stats — false positives are inconsequential)
+      * ?embed=1 → counted as an embed-page play (i.e. the user came through
+                   /embed/{id} on this site or via a 3rd-party iframe)
+    """
     channels = await get_channels()
     channel = next((c for c in channels if c["id"] == channel_id), None)
     if not channel:
         raise HTTPException(status_code=404, detail="Chaîne introuvable")
     upstream = await resolve_stream(channel["url"])
-    # Track this as a view (non-blocking). If the request carries a Bearer
-    # JWT we count it as a "member" view, otherwise it's a guest.
     is_member = bool(
         authorization
         and authorization.lower().startswith("bearer ")
         and len(authorization) > 20
     )
-    asyncio.create_task(_record_view(channel_id, is_member=is_member))
+    asyncio.create_task(_record_view(
+        channel_id,
+        is_member=is_member,
+        is_vip=bool(is_member and vip),
+        is_embed=bool(embed),
+        ip=_client_ip(request),
+    ))
     return {
         "id": channel_id,
         "name": channel["name"],
@@ -1367,6 +1436,137 @@ async def admin_top_referrers(authorization: Optional[str] = Header(None), hours
         rows = []
 
     return {"referrers": rows, "window_hours": hours, "all_time": hours == 0}
+
+
+@api_router.get("/admin/stats-timeseries")
+async def admin_stats_timeseries(
+    authorization: Optional[str] = Header(None),
+    range_: str = Query("7d", alias="range"),
+):
+    """Time-series of view metrics over a chosen range.
+
+    Range options (bucket size in parentheses):
+      * 24h  → 24 hourly buckets
+      * 7d   → 7 daily buckets   (default)
+      * 30d  → 30 daily buckets
+      * 1y   → 365 daily buckets
+
+    For each bucket we return:
+      * total          — total plays
+      * member_plays   — plays by a logged-in non-VIP user
+      * vip_plays      — plays by a VIP user
+      * guest_plays    — plays without a Bearer JWT
+      * embed_plays    — plays initiated from an /embed/* page (or 3rd-party iframe)
+      * unique_visitors — distinct client IPs that played at least once
+
+    Returns:
+      {
+        "range": "7d",
+        "bucket": "day",          # or "hour"
+        "buckets": [
+          {"t": "2026-05-15T00:00:00Z",
+           "total": 123, "member_plays": 30, "vip_plays": 12,
+           "guest_plays": 81, "embed_plays": 40, "unique_visitors": 78},
+          ...
+        ],
+        "totals": { same keys, summed over the whole range }
+      }
+    """
+    jwt = (authorization or "").removeprefix("Bearer ").strip()
+    await _require_admin(jwt)
+
+    now = datetime.now(timezone.utc)
+    rng = (range_ or "7d").lower()
+    if rng == "24h":
+        bucket = "hour"
+        start = now - timedelta(hours=24)
+        n_buckets = 24
+        # Truncate start to the hour
+        start = start.replace(minute=0, second=0, microsecond=0)
+    elif rng == "30d":
+        bucket = "day"
+        start = (now - timedelta(days=30)).replace(hour=0, minute=0, second=0, microsecond=0)
+        n_buckets = 30
+    elif rng in ("1y", "365d"):
+        bucket = "day"
+        start = (now - timedelta(days=365)).replace(hour=0, minute=0, second=0, microsecond=0)
+        n_buckets = 365
+    else:
+        rng = "7d"
+        bucket = "day"
+        start = (now - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
+        n_buckets = 7
+
+    date_fmt = "%Y-%m-%dT%H:00:00Z" if bucket == "hour" else "%Y-%m-%dT00:00:00Z"
+
+    pipeline = [
+        {"$match": {"ts": {"$gte": start}}},
+        {"$group": {
+            "_id": {
+                "$dateToString": {
+                    "format": "%Y-%m-%dT%H:00:00Z" if bucket == "hour" else "%Y-%m-%dT00:00:00Z",
+                    "date": "$ts",
+                    "timezone": "UTC",
+                }
+            },
+            "total": {"$sum": 1},
+            "members_raw": {"$sum": {"$cond": [{"$eq": ["$is_member", True]}, 1, 0]}},
+            "vip_plays": {"$sum": {"$cond": [{"$eq": ["$is_vip", True]}, 1, 0]}},
+            "embed_plays": {"$sum": {"$cond": [{"$eq": ["$is_embed", True]}, 1, 0]}},
+            "ips": {"$addToSet": "$ip"},
+        }},
+        {"$sort": {"_id": 1}},
+    ]
+
+    raw_by_t: Dict[str, Dict[str, Any]] = {}
+    try:
+        async for r in db.views.aggregate(pipeline):
+            ips = [ip for ip in (r.get("ips") or []) if ip]
+            members_raw = int(r.get("members_raw") or 0)
+            vip_plays = int(r.get("vip_plays") or 0)
+            # vip_plays is a subset of members_raw (a VIP is also a member),
+            # so "member but not VIP" = members_raw - vip_plays
+            member_only = max(0, members_raw - vip_plays)
+            total = int(r.get("total") or 0)
+            raw_by_t[r["_id"]] = {
+                "total": total,
+                "member_plays": member_only,
+                "vip_plays": vip_plays,
+                "guest_plays": max(0, total - members_raw),
+                "embed_plays": int(r.get("embed_plays") or 0),
+                "unique_visitors": len(set(ips)),
+            }
+    except Exception as e:
+        logger.warning(f"stats-timeseries aggregate failed: {e}")
+        raw_by_t = {}
+
+    # Build the full bucket list (fill missing slots with zeros so the chart
+    # is continuous even on empty days).
+    buckets: List[Dict[str, Any]] = []
+    totals = {
+        "total": 0, "member_plays": 0, "vip_plays": 0,
+        "guest_plays": 0, "embed_plays": 0, "unique_visitors": 0,
+    }
+    step = timedelta(hours=1) if bucket == "hour" else timedelta(days=1)
+    cur = start
+    for _ in range(n_buckets):
+        key = cur.strftime(date_fmt)
+        b = raw_by_t.get(key, {
+            "total": 0, "member_plays": 0, "vip_plays": 0,
+            "guest_plays": 0, "embed_plays": 0, "unique_visitors": 0,
+        })
+        buckets.append({"t": key, **b})
+        for k in totals:
+            totals[k] += b[k]
+        cur += step
+
+    return {
+        "range": rng,
+        "bucket": bucket,
+        "start": start.isoformat(),
+        "buckets": buckets,
+        "totals": totals,
+    }
 
 
 @api_router.get("/admin/global-stats")
