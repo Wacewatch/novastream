@@ -126,6 +126,42 @@ const SECTIONS = [
 }`,
   },
   {
+    key: "bosstv",
+    accent: "#d946ef",
+    title: "BossTV",
+    intro:
+      "Matchs de football BossTV (HLS multi-serveurs). Mêmes garanties que Football Live : chaque match propose des embeds[] opaques routés par notre domaine, aucun flux ni nom de serveur upstream n'est exposé.",
+    url: `${BACKEND_URL}/api/v1/public/bosstv`,
+    sample: `{
+  "total": 94,
+  "live_count": 15,
+  "upcoming_count": 73,
+  "finished_count": 6,
+  "league_count": 31,
+  "leagues": ["NBA", "Premier League", "Serie A", "..."],
+  "matches": [
+    {
+      "id":         "psg-vs-real-madrid-1779556000",
+      "title":      "PSG vs Real Madrid",
+      "home":       "PSG",
+      "away":       "Real Madrid",
+      "home_logo":  "https://…/psg.png",
+      "away_logo":  "https://…/real.png",
+      "league":     "UEFA Champions League",
+      "status":     "live",
+      "is_live":    true,
+      "is_finished":false,
+      "timestamp":  1779556000,
+      "time_label": "23 May 21:00",
+      "embeds": [
+        { "label": "Stream 1", "embed_url": "${BACKEND_URL}/embed/bosstv/t/…" },
+        { "label": "Stream 2", "embed_url": "${BACKEND_URL}/embed/bosstv/t/…" }
+      ]
+    }
+  ]
+}`,
+  },
+  {
     key: "info",
     accent: "#3b82f6",
     title: "Informations (Planning)",

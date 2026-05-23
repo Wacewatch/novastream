@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { X, Maximize, RotateCcw } from "lucide-react";
 
 /**
@@ -7,16 +7,12 @@ import { X, Maximize, RotateCcw } from "lucide-react";
  * Visually mirrors the HLS <VideoPlayer/> layout: a centered 16/9
  * .player-frame inside a fixed .player-shell — NOT a full-bleed iframe.
  *
+ * UI auto-hide: the top bar fades out after 3s of inactivity (mouse +
+ * touch), in normal and fullscreen modes. Tapping the player toggles it.
+ *
  * IMPORTANT: this component intentionally exposes NO link to the upstream
  * source URL (no "open in new tab"). The iframe `src` is the only place
  * the URL travels — never surfaced to the user via UI.
- *
- * Props:
- *   - src: iframe URL
- *   - title: top-bar title
- *   - onClose: () => void (closes overlay)
- *   - onReload?: () => void (reload the iframe — emits a fresh `?_t=…`)
- *   - rightSlot: optional ReactNode (e.g. source picker)
  */
 export default function IframePlayer({
   src,
@@ -26,6 +22,19 @@ export default function IframePlayer({
   rightSlot = null,
 }) {
   const frameRef = useRef(null);
+  const hideTimer = useRef(null);
+  const [visible, setVisible] = useState(true);
+
+  const showUi = useCallback(() => {
+    setVisible(true);
+    if (hideTimer.current) clearTimeout(hideTimer.current);
+    hideTimer.current = setTimeout(() => setVisible(false), 3000);
+  }, []);
+
+  useEffect(() => {
+    showUi();
+    return () => { if (hideTimer.current) clearTimeout(hideTimer.current); };
+  }, [showUi]);
 
   useEffect(() => {
     const handler = (e) => {
@@ -34,6 +43,15 @@ export default function IframePlayer({
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, [onClose]);
+
+  const handleTouchStart = () => {
+    if (visible) {
+      setVisible(false);
+      if (hideTimer.current) clearTimeout(hideTimer.current);
+    } else {
+      showUi();
+    }
+  };
 
   const openFullscreen = () => {
     const el = frameRef.current;
@@ -46,7 +64,6 @@ export default function IframePlayer({
       onReload();
       return;
     }
-    // Default: bust the iframe src by appending a timestamp.
     const ifr = document.getElementById("ns-iframe-frame-inner");
     if (ifr) {
       const u = ifr.src.split("#")[0];
@@ -55,10 +72,22 @@ export default function IframePlayer({
   };
 
   return (
-    <div className="player-shell" data-testid="iframe-player">
+    <div
+      className={`player-shell ${visible ? "" : "ui-hidden"}`}
+      data-testid="iframe-player"
+      onMouseMove={showUi}
+      onMouseLeave={() => {
+        if (hideTimer.current) clearTimeout(hideTimer.current);
+        setVisible(false);
+      }}
+      onTouchStart={handleTouchStart}
+    >
       <div className="player-frame" ref={frameRef}>
-        {/* Top bar — overlays the iframe, matches VideoPlayer's top controls */}
-        <div className="iframe-player-top">
+        {/* Top bar — overlays the iframe, auto-hides on idle. */}
+        <div
+          className={`iframe-player-top ${visible ? "visible" : "hidden-ui"}`}
+          onMouseMove={(e) => e.stopPropagation()}
+        >
           <div className="flex items-center gap-2 min-w-0">
             <span className="truncate text-white/90 font-semibold text-sm">{title}</span>
           </div>

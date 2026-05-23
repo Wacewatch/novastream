@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import axios from "axios";
 import {
   Search, Globe2, Loader2, Tv2, Users, Heart, Radio, Trophy,
-  Flame, Info as InfoIcon,
+  Flame, Info as InfoIcon, Crown,
 } from "lucide-react";
 import ChannelCard from "@/components/ChannelCard";
 import AdUnlockModal from "@/components/AdUnlockModal";
@@ -13,6 +13,7 @@ import FlagIcon from "@/components/FlagIcon";
 import DaddyTab from "@/components/tabs/DaddyTab";
 import SportsTab from "@/components/tabs/SportsTab";
 import FootballTab from "@/components/tabs/FootballTab";
+import BossTvTab from "@/components/tabs/BossTvTab";
 import InfoTab from "@/components/tabs/InfoTab";
 import { useFavorites } from "@/hooks/useFavorites";
 import { fetchTvStream, fetchDaddyStream } from "@/lib/streamApi";
@@ -46,6 +47,7 @@ const flagFor = (c) => COUNTRY_FLAGS[c] || "";
 const SPORTS_SUBTABS = [
   { id: "sports", label: "Sports", icon: Trophy },
   { id: "football", label: "Football Live", icon: Flame },
+  { id: "bosstv", label: "BossTV", icon: Crown },
   { id: "info", label: "Informations", icon: InfoIcon },
 ];
 
@@ -105,6 +107,10 @@ export default function NovaStream() {
   // Football (RapidAPI) — VideoPlayer with internal server picker
   const [footballOpen, setFootballOpen] = useState(null);
   // footballOpen: { match, servers: [{id,name,stream_url,url}], activeServerId, streamUrl }
+
+  // BossTV — same shape as football
+  const [bossOpen, setBossOpen] = useState(null);
+  // bossOpen: { match, servers, activeServerId, streamUrl, loading }
 
   // ---------- Bootstrap ----------
   useEffect(() => {
@@ -204,6 +210,25 @@ export default function NovaStream() {
     }
   };
 
+  const handlePickBoss = async (match) => {
+    setPending({ kind: "bosstv", payload: { match, loading: true } });
+    try {
+      const r = await axios.get(`${API}/bosstv/streams`, { params: { mid: match.id } });
+      const servers = (r.data?.servers || []).map((s, i) => ({
+        id: `srv-${i}`,
+        name: s.name,
+        stream_url: s.stream_url,
+      }));
+      setPending({
+        kind: "bosstv",
+        payload: { match, loading: false, servers, activeServerId: servers[0]?.id || null, streamUrl: servers[0]?.stream_url || null },
+      });
+    } catch (e) {
+      console.error(e);
+      setPending({ kind: "bosstv", payload: { match, loading: false, servers: [], activeServerId: null, streamUrl: null } });
+    }
+  };
+
   // ---------- Ad unlocked → open the actual player ----------
   const handleUnlocked = async () => {
     if (!pending) return;
@@ -261,6 +286,11 @@ export default function NovaStream() {
       setFootballOpen(payload);
       return;
     }
+
+    if (kind === "bosstv") {
+      setBossOpen(payload);
+      return;
+    }
   };
 
   const handleCancelPending = () => setPending(null);
@@ -285,6 +315,11 @@ export default function NovaStream() {
   // ---------- Football: switch server inside VideoPlayer (no ad replay) ----------
   const footballSwitchServer = useCallback((srv) => {
     setFootballOpen((f) => f ? { ...f, activeServerId: srv.id, streamUrl: srv.stream_url } : f);
+  }, []);
+
+  // ---------- BossTV: switch server inside VideoPlayer (no ad replay) ----------
+  const bossSwitchServer = useCallback((srv) => {
+    setBossOpen((b) => b ? { ...b, activeServerId: srv.id, streamUrl: srv.stream_url } : b);
   }, []);
 
   // ---------- Visible TV channels ----------
@@ -560,6 +595,9 @@ export default function NovaStream() {
         {activeTab === "sports" && sportsSubTab === "football" && (
           <FootballTab onPickMatch={handlePickFootball} />
         )}
+        {activeTab === "sports" && sportsSubTab === "bosstv" && (
+          <BossTvTab onPickMatch={handlePickBoss} />
+        )}
         {activeTab === "sports" && sportsSubTab === "info" && (
           <InfoTab onResolveChannel={handlePickInfo} />
         )}
@@ -690,6 +728,27 @@ export default function NovaStream() {
       {footballOpen && !footballOpen.streamUrl && !footballOpen.loading && (
         <FootballNoServersOverlay match={footballOpen.match} onClose={() => setFootballOpen(null)} />
       )}
+
+      {/* ===== BossTV overlay (VideoPlayer + inline server selector) ===== */}
+      {bossOpen && bossOpen.streamUrl && (
+        <VideoPlayer
+          channel={{ id: bossOpen.match.id, name: bossOpen.match.title, country_code: "boss" }}
+          streamUrl={bossOpen.streamUrl}
+          servers={bossOpen.servers}
+          activeServerId={bossOpen.activeServerId}
+          onSwitchServer={bossSwitchServer}
+          onClose={() => setBossOpen(null)}
+          onRetry={() => {
+            const cur = bossOpen.servers.find((s) => s.id === bossOpen.activeServerId);
+            if (cur) {
+              setBossOpen({ ...bossOpen, streamUrl: `${cur.stream_url}&_t=${Date.now()}` });
+            }
+          }}
+        />
+      )}
+      {bossOpen && !bossOpen.streamUrl && !bossOpen.loading && (
+        <FootballNoServersOverlay match={bossOpen.match} onClose={() => setBossOpen(null)} />
+      )}
     </div>
   );
 }
@@ -706,6 +765,8 @@ function pendingChannelLabel(p) {
     case "sports":
       return { name: p.payload?.match?.title || "Match" };
     case "football":
+      return { name: p.payload?.match?.title || "Match" };
+    case "bosstv":
       return { name: p.payload?.match?.title || "Match" };
     default:
       return { name: "" };

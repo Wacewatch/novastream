@@ -1,5 +1,5 @@
 import { useMemo, useState, memo } from "react";
-import { Plus, Tv2, X as XIcon, Pencil, RotateCcw, Radio, Trophy } from "lucide-react";
+import { Plus, Tv2, X as XIcon, Pencil, RotateCcw, Radio, Trophy, Crown } from "lucide-react";
 
 function MultiViewCell({ index, channel, onPick, onClear }) {
   const [reloadToken, setReloadToken] = useState(0);
@@ -19,6 +19,7 @@ function MultiViewCell({ index, channel, onPick, onClear }) {
     if (!channel) return Tv2;
     if (channel.kind === "daddy") return Radio;
     if (channel.kind === "sports") return Trophy;
+    if (channel.kind === "bosstv") return Crown;
     return Tv2;
   }, [channel]);
 

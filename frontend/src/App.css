@@ -238,10 +238,15 @@
   pointer-events: none;
   z-index: 6;
 }
-.player-frame:hover .player-controls,
 .player-controls.visible {
   opacity: 1;
   pointer-events: auto;
+}
+/* When the UI is hidden, also hide the mouse cursor everywhere in the
+   player so the experience matches native PC/mobile/iOS video players. */
+.player-shell.ui-hidden,
+.player-shell.ui-hidden * {
+  cursor: none !important;
 }
 .player-top {
   padding: 18px 22px;
@@ -1155,6 +1160,15 @@
   background: linear-gradient(180deg, rgba(0, 0, 0, 0.78) 0%, rgba(0, 0, 0, 0.0) 100%);
   color: white;
   pointer-events: none;
+  opacity: 1;
+  transition: opacity 0.3s ease;
+}
+.iframe-player-top.hidden-ui {
+  opacity: 0;
+  pointer-events: none !important;
+}
+.iframe-player-top.hidden-ui > * {
+  pointer-events: none !important;
 }
 .iframe-player-top > * {
   pointer-events: auto;
