@@ -1920,3 +1920,207 @@ async def public_sports_info():
     # Info schedule (tv247.us) only references DaddyTV channels by id/name —
     # no upstream source names or streams. Pass-through is safe.
     return await sports_info()
+
+
+# =====================================================================
+# BossTV (api.bosstvmm.com) — football matches with multi-server m3u8 streams
+# =====================================================================
+BOSSTV_BASE = "https://api.bosstvmm.com/api/matches"
+BOSSTV_TTL = 60.0  # 1 min — live matches turn on/off quickly
+
+_bosstv_cache: Dict[str, Any] = {"ts": 0.0, "matches": []}
+_bosstv_servers_by_mid: Dict[str, List[Dict[str, Any]]] = {}
+_bosstv_meta_by_mid: Dict[str, Dict[str, Any]] = {}
+
+
+def _bosstv_slug(s: str) -> str:
+    s = (s or "").lower()
+    s = re.sub(r"[^a-z0-9]+", "-", s)
+    return s.strip("-")
+
+
+def _make_bosstv_id(m: Dict[str, Any]) -> str:
+    home = _bosstv_slug(m.get("home_team_name") or "")
+    away = _bosstv_slug(m.get("away_team_name") or "")
+    ts = str(m.get("match_time") or "")
+    base = f"{home}-vs-{away}-{ts}"
+    return base[:80] if base.strip("-") else f"bosstv-{int(time.time())}"
+
+
+def _normalize_bosstv_match(m: Dict[str, Any]) -> Dict[str, Any]:
+    mid = _make_bosstv_id(m)
+    ts = m.get("match_time") or 0
+    try:
+        ts = int(ts)
+    except Exception:
+        ts = 0
+    if ts > 10**12:
+        ts //= 1000
+    home = (m.get("home_team_name") or "").strip() or "?"
+    away = (m.get("away_team_name") or "").strip() or "?"
+    home_logo = (m.get("home_team_logo") or "").strip()
+    away_logo = (m.get("away_team_logo") or "").strip()
+    league = (m.get("league_name") or "").strip() or "Autre"
+    status = (m.get("match_status") or "").strip().lower()
+    servers_raw = m.get("servers") if isinstance(m.get("servers"), list) else []
+    return {
+        "id": mid,
+        "title": f"{home} vs {away}",
+        "home": home,
+        "away": away,
+        "home_logo": home_logo,
+        "away_logo": away_logo,
+        "league": league,
+        "status": status,
+        "is_live": status == "live",
+        "is_finished": status == "finished",
+        "timestamp": ts,
+        "time_label": _format_fb_ts(ts) if ts else "",
+        "has_servers": bool(servers_raw),
+        "server_count": len(servers_raw),
+    }
+
+
+async def _fetch_bosstv_matches() -> Dict[str, Any]:
+    """Returns {'matches': [raw...], 'fetched_at': ts}."""
+    now = time.time()
+    if _bosstv_cache["matches"] and now - _bosstv_cache["ts"] < BOSSTV_TTL:
+        return {"matches": _bosstv_cache["matches"], "fetched_at": _bosstv_cache["ts"]}
+    async with _sports_lock("__bosstv__"):
+        if _bosstv_cache["matches"] and time.time() - _bosstv_cache["ts"] < BOSSTV_TTL:
+            return {"matches": _bosstv_cache["matches"], "fetched_at": _bosstv_cache["ts"]}
+        cx = await _get_http_client()
+        matches_raw: List[Dict[str, Any]] = []
+        try:
+            r = await cx.get(
+                BOSSTV_BASE,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                    "Accept": "application/json",
+                },
+                timeout=15.0,
+            )
+            if r.status_code == 200:
+                data = r.json()
+                if isinstance(data, dict):
+                    if isinstance(data.get("today"), list):
+                        matches_raw = data["today"]
+                    else:
+                        for v in data.values():
+                            if isinstance(v, list):
+                                matches_raw.extend(v)
+                elif isinstance(data, list):
+                    matches_raw = data
+        except Exception as e:  # noqa: BLE001
+            logger.warning("bosstv fetch failed: %s", e)
+            return {"matches": _bosstv_cache["matches"], "fetched_at": _bosstv_cache["ts"]}
+        _bosstv_cache["matches"] = matches_raw
+        _bosstv_cache["ts"] = time.time()
+        # Re-index servers by mid
+        _bosstv_servers_by_mid.clear()
+        _bosstv_meta_by_mid.clear()
+        for m in matches_raw:
+            mid = _make_bosstv_id(m)
+            servers = m.get("servers") if isinstance(m.get("servers"), list) else []
+            cleaned: List[Dict[str, Any]] = []
+            for i, s in enumerate(servers):
+                if not isinstance(s, dict):
+                    continue
+                url = s.get("stream_url") or s.get("url") or s.get("link") or ""
+                if not url:
+                    continue
+                cleaned.append({
+                    "name": s.get("name") or f"Server {i + 1}",
+                    "stream_url": url,
+                })
+            _bosstv_servers_by_mid[mid] = cleaned
+            _bosstv_meta_by_mid[mid] = _normalize_bosstv_match(m)
+        return {"matches": matches_raw, "fetched_at": _bosstv_cache["ts"]}
+
+
+@ext_router.get("/bosstv/matches")
+async def bosstv_matches(
+    status: str = Query("", description="live | vs | finished | empty for all"),
+    league: str = Query(""),
+    search: str = Query(""),
+):
+    data = await _fetch_bosstv_matches()
+    raw = data["matches"]
+    matches = [_normalize_bosstv_match(m) for m in raw]
+    if status:
+        matches = [m for m in matches if m.get("status") == status.lower()]
+    if league:
+        matches = [m for m in matches if m.get("league") == league]
+    if search:
+        q = search.strip().lower()
+        if q:
+            matches = [
+                m for m in matches
+                if q in (m.get("home") or "").lower()
+                or q in (m.get("away") or "").lower()
+                or q in (m.get("league") or "").lower()
+                or q in (m.get("title") or "").lower()
+            ]
+    # Group counts
+    leagues = sorted({m["league"] for m in matches if m.get("league")})
+    live = sum(1 for m in matches if m.get("is_live"))
+    finished = sum(1 for m in matches if m.get("is_finished"))
+    upcoming = len(matches) - live - finished
+    age = int(time.time() - data["fetched_at"]) if data.get("fetched_at") else 0
+    return {
+        "total": len(matches),
+        "live_count": live,
+        "upcoming_count": upcoming,
+        "finished_count": finished,
+        "league_count": len(leagues),
+        "leagues": leagues,
+        "matches": matches,
+        "cache_age_sec": age,
+    }
+
+
+@ext_router.get("/bosstv/streams")
+async def bosstv_streams(mid: str = Query("", description="Match id from /bosstv/matches")):
+    if not mid:
+        return {"servers": []}
+    # Ensure cache is hot
+    if not _bosstv_servers_by_mid:
+        await _fetch_bosstv_matches()
+    servers = _bosstv_servers_by_mid.get(mid, [])
+    return {"servers": servers}
+
+
+def _public_bosstv_match(m: Dict[str, Any], base: str) -> Dict[str, Any]:
+    """Public BossTV: hides server URLs, exposes opaque embed tokens."""
+    out = dict(m)
+    out.pop("has_servers", None)
+    out.pop("server_count", None)
+    embeds: List[Dict[str, str]] = []
+    if m.get("server_count"):
+        for i in range(int(m["server_count"])):
+            tok = _b64.urlsafe_b64encode(
+                f"{m['id']}:{i}".encode("utf-8")
+            ).rstrip(b"=").decode("ascii")
+            embeds.append({
+                "label": f"Stream {i + 1}",
+                "embed_url": f"{base}/embed/bosstv/t/{tok}",
+            })
+    out["embeds"] = embeds
+    return out
+
+
+@ext_router.get("/v1/public/bosstv")
+async def public_bosstv(request: Request, status: str = ""):
+    base = _public_base(request)
+    data = await bosstv_matches(status=status, league="", search="")
+    matches_pub = [_public_bosstv_match(m, base) for m in (data.get("matches") or [])]
+    return {
+        "total": data.get("total", 0),
+        "live_count": data.get("live_count", 0),
+        "upcoming_count": data.get("upcoming_count", 0),
+        "finished_count": data.get("finished_count", 0),
+        "league_count": data.get("league_count", 0),
+        "leagues": data.get("leagues") or [],
+        "matches": matches_pub,
+        "cache_age_sec": data.get("cache_age_sec", 0),
+    }
