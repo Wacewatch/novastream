@@ -606,7 +606,7 @@ export default function Admin() {
         </section>
 
         {/* === Statistiques détaillées (graphique 24h / 7j / 30j / 1an) === */}
-        <StatsTimeseriesPanel getAuthHeader={authHeader} />
+        <StatsTimeseriesPanel getAuthHeader={async () => { const { data: { session } } = await supabase.auth.getSession(); return session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}; }} />
 
         {/* VIP keys */}
         <section className="glass-heavy rounded-2xl p-5 border border-white/10" data-testid="admin-vip-keys-section">
