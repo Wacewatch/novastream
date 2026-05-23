@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Query, Request
+from fastapi import FastAPI, APIRouter, HTTPException, Query, Request, Header
 from fastapi.responses import StreamingResponse, PlainTextResponse, Response
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -114,24 +114,79 @@ _hls_inflight: Dict[str, "asyncio.Task[Tuple[bytes, str, float]]"] = {}
 # ===== View tracking =====
 # A "view" is recorded each time the FE resolves a stream URL via
 # /api/stream/{id}. Stored in MongoDB so it survives restarts. A TTL index on
-# `ts` removes documents older than 24h automatically.
+# `ts` removes documents older than 400 days automatically.
 LIVE_WINDOW = timedelta(minutes=5)   # what counts as "currently watching"
 STATS_TTL = 3.0                       # cache stats aggregation for 3 s
 _stats_cache: Dict[str, Any] = {"data": None, "exp": 0.0}
 _stats_lock = asyncio.Lock()
 
-async def _ensure_views_index() -> None:
+
+def _client_ip(request: Request) -> str:
+    """Best-effort client IP behind reverse-proxies (Kubernetes ingress).
+
+    Reads X-Forwarded-For first (takes the *first* hop = the real client),
+    then X-Real-IP, then falls back to the direct socket peer. Returns "" if
+    nothing is available."""
     try:
-        await db.views.create_index("ts", expireAfterSeconds=24 * 3600)
+        xff = request.headers.get("x-forwarded-for") or ""
+        if xff:
+            return xff.split(",")[0].strip()
+        xr = request.headers.get("x-real-ip") or ""
+        if xr:
+            return xr.strip()
+        if request.client and request.client.host:
+            return request.client.host
+    except Exception:
+        pass
+    return ""
+
+async def _ensure_views_index() -> None:
+    """Indexes on db.views.
+
+    Retention is 400 days (TTL on `ts`) — long enough for the 24h/7d/30d/1y
+    timeseries panel. The legacy 24h TTL is auto-dropped if present.
+    """
+    try:
+        try:
+            existing = await db.views.index_information()
+            for name, info in existing.items():
+                if name == "_id_":
+                    continue
+                keys = info.get("key") or []
+                if (
+                    len(keys) == 1
+                    and keys[0][0] == "ts"
+                    and "expireAfterSeconds" in info
+                    and info["expireAfterSeconds"] != 400 * 24 * 3600
+                ):
+                    await db.views.drop_index(name)
+                    logger.info(f"dropped legacy TTL index on views: {name}")
+        except Exception as e:
+            logger.warning(f"views TTL re-create check failed: {e}")
+        await db.views.create_index("ts", expireAfterSeconds=400 * 24 * 3600)
         await db.views.create_index([("channel_id", 1), ("ts", -1)])
+        # For per-user "ads avoided" lookups (Dashboard counter).
+        await db.views.create_index([("user_id", 1), ("is_vip", 1), ("ts", -1)])
     except Exception as e:
         logger.warning(f"views index init failed: {e}")
 
-async def _record_view(channel_id: str) -> None:
+async def _record_view(
+    channel_id: str,
+    is_member: bool = False,
+    is_vip: bool = False,
+    is_embed: bool = False,
+    ip: Optional[str] = None,
+    user_id: Optional[str] = None,
+) -> None:
     try:
         await db.views.insert_one({
             "channel_id": channel_id,
             "ts": datetime.now(timezone.utc),
+            "is_member": bool(is_member),
+            "is_vip": bool(is_vip),
+            "is_embed": bool(is_embed),
+            "ip": (ip or "")[:64] or None,
+            "user_id": user_id or None,
         })
     except Exception as e:
         logger.warning(f"record view failed: {e}")
@@ -150,21 +205,30 @@ async def _compute_stats() -> Dict[str, Any]:
             total_24h = await db.views.count_documents({})
         except Exception:
             total_24h = 0
-        # Per-channel live counts
+        # Per-channel live counts (+ members count globally)
         per_channel: Dict[str, int] = {}
+        members_live = 0
         try:
             pipeline = [
                 {"$match": {"ts": {"$gte": live_threshold}}},
-                {"$group": {"_id": "$channel_id", "n": {"$sum": 1}}},
+                {"$group": {
+                    "_id": "$channel_id",
+                    "n": {"$sum": 1},
+                    "members": {"$sum": {"$cond": [{"$eq": ["$is_member", True]}, 1, 0]}},
+                }},
             ]
             async for row in db.views.aggregate(pipeline):
                 per_channel[row["_id"]] = row["n"]
+                members_live += int(row.get("members") or 0)
         except Exception as e:
             logger.warning(f"stats aggregate failed: {e}")
         live_total = sum(per_channel.values())
+        guests_live = max(0, live_total - members_live)
         data = {
             "total_24h": total_24h,
             "live_total": live_total,
+            "members_live": members_live,
+            "guests_live": guests_live,
             "per_channel": per_channel,
         }
         _stats_cache["data"] = data
@@ -814,16 +878,42 @@ async def public_channel(channel_id: str, request: Request):
     return _public_channel(c, _public_base(request))
 
 @api_router.get("/stream/{channel_id}")
-async def get_stream_url(channel_id: str):
-    """Resolve and return the HLS URL through our proxy (source hidden)."""
+async def get_stream_url(
+    channel_id: str,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+    vip: int = 0,
+    embed: int = 0,
+):
+    """Resolve and return the HLS URL through our proxy (source hidden).
+
+    Accepts non-authoritative stats hints from the client (set by streamApi.js
+    in the frontend):
+      * Authorization: Bearer <jwt>  → counted as "member"
+      * ?vip=1   → counted as "VIP" (UI hints; we don't validate the JWT
+                   server-side for stats — false positives are inconsequential)
+      * ?embed=1 → counted as an embed-page play (i.e. the user came through
+                   /embed/{id} on this site or via a 3rd-party iframe)
+    """
     channels = await get_channels()
     channel = next((c for c in channels if c["id"] == channel_id), None)
     if not channel:
         raise HTTPException(status_code=404, detail="Chaîne introuvable")
     upstream = await resolve_stream(channel["url"])
-    # Track this as a view (non-blocking). The frontend calls this endpoint
-    # every time a user actually starts watching (after the ad unlock).
-    asyncio.create_task(_record_view(channel_id))
+    is_member = bool(
+        authorization
+        and authorization.lower().startswith("bearer ")
+        and len(authorization) > 20
+    )
+    user_id = _decode_jwt_sub(authorization) if is_member else None
+    asyncio.create_task(_record_view(
+        channel_id,
+        is_member=is_member,
+        is_vip=bool(is_member and vip),
+        is_embed=bool(embed),
+        ip=_client_ip(request),
+        user_id=user_id,
+    ))
     return {
         "id": channel_id,
         "name": channel["name"],
@@ -1063,6 +1153,38 @@ def _extract_bearer(authorization: Optional[str]) -> str:
     return parts[1].strip()
 
 
+def _decode_jwt_sub(authorization: Optional[str]) -> Optional[str]:
+    """Cheap, NON-VALIDATING extraction of the `sub` claim from a Bearer JWT.
+
+    Used for view tracking (we just want to know "which user" — false values
+    are inconsequential since this never grants access). For *real* auth we
+    still hit Supabase /auth/v1/user via _supabase_get_user.
+    """
+    try:
+        if not authorization:
+            return None
+        parts = authorization.split(" ", 1)
+        if len(parts) != 2 or parts[0].lower() != "bearer":
+            return None
+        token = parts[1].strip()
+        segments = token.split(".")
+        if len(segments) < 2:
+            return None
+        body = segments[1]
+        # Pad base64 (JWT uses base64url without padding)
+        body += "=" * (-len(body) % 4)
+        import base64 as _b64
+        import json as _json
+        raw = _b64.urlsafe_b64decode(body)
+        payload = _json.loads(raw.decode("utf-8", errors="ignore"))
+        sub = payload.get("sub")
+        if isinstance(sub, str) and sub:
+            return sub
+    except Exception:
+        pass
+    return None
+
+
 # ---------- Models ----------
 class RedeemVipRequest(BaseModel):
     key: str = Field(..., min_length=4, max_length=128)
@@ -1077,6 +1199,44 @@ class ChannelsByIdsRequest(BaseModel):
 
 
 # ---------- Endpoints ----------
+@api_router.get("/user/bypass-stats")
+async def user_bypass_stats(authorization: Optional[str] = Header(None)):
+    """Returns the "ads avoided" counter for the calling user.
+
+    For a VIP user, every play counts as one avoided ad-unlock prompt. We
+    return:
+        { "month": <count in current calendar month, UTC>,
+          "total": <total since the user upgraded, all-time> }
+
+    Requires a valid Bearer JWT (we validate against Supabase /auth/v1/user
+    so we get the real user id, not a forged sub).
+    """
+    jwt = _extract_bearer(authorization)
+    user = await _supabase_get_user(jwt)
+    uid = user.get("id")
+    if not uid:
+        raise HTTPException(status_code=401, detail="Utilisateur invalide")
+
+    now = datetime.now(timezone.utc)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    try:
+        # Each is_vip=True view = one ad avoided (the user would otherwise
+        # have had to wait through the AdUnlockModal).
+        total = await db.views.count_documents({"user_id": uid, "is_vip": True})
+        month = await db.views.count_documents({
+            "user_id": uid,
+            "is_vip": True,
+            "ts": {"$gte": month_start},
+        })
+    except Exception as e:
+        logger.warning(f"bypass-stats query failed: {e}")
+        total = 0
+        month = 0
+
+    return {"month": int(month), "total": int(total)}
+
+
 @api_router.post("/auth/redeem-vip")
 async def redeem_vip(body: RedeemVipRequest, authorization: Optional[str] = Header(None)):
     """Mark a VIP key as used by the calling user, then upgrade the user's
@@ -1250,28 +1410,41 @@ def _normalize_referer(raw: str) -> Optional[str]:
 @app.middleware("http")
 async def _log_referrer(request: Request, call_next):
     """Best-effort logging of HTTP Referer for top-referrers analytics.
-    Only logs the actual 'play this channel' action — i.e. /api/stream/{id} —
-    not every HLS segment fetch (which would inflate counts by ~1 per second)."""
+
+    Logs only the actual 'play this channel' actions:
+      * /api/stream/{id}            (TV)
+      * /api/daddy/stream/{id}      (DaddyTV)
+    NOT the HLS segment fetches (they would multiply by ~1 per second).
+
+    For iframe-embedded usage on a 3rd-party site (e.g. wavewatch.top puts
+    `<iframe src="https://livewatch.top/embed/{id}">`), the standard `Referer`
+    header on these XHRs is `https://livewatch.top/embed/{id}` — i.e. the
+    iframe's own page, NOT the parent site. To capture the real parent we
+    accept an explicit `?ref=<url>` query parameter which the embed pages
+    forward from `document.referrer`.
+    """
     response = await call_next(request)
     try:
         path = request.url.path or ""
-        # Only log the play-action endpoint. /api/hls and /api/stream/{id} segments
-        # would multiply by ~30/min per viewer, so we skip them.
-        if not path.startswith("/api/stream/"):
+        # Only the 'play action' endpoints. Keep this list short so we
+        # don't double-count (1 click = 1 referrer entry).
+        if not (
+            path.startswith("/api/stream/")
+            or path.startswith("/api/daddy/stream/")
+        ):
             return response
-        ref = request.headers.get("referer") or ""
-        host = _normalize_referer(ref)
+        # Prefer the explicit ?ref= sent by EmbedPage / DaddyEmbedPage
+        # (= document.referrer of the iframe, i.e. the parent page).
+        ref_param = request.query_params.get("ref") or ""
+        ref_header = request.headers.get("referer") or ""
+        host = _normalize_referer(ref_param) or _normalize_referer(ref_header)
         if not host:
-            return response
-        own = (request.url.hostname or "").lower()
-        if own.startswith("www."):
-            own = own[4:]
-        if host == own:
             return response
         await db.referrers.insert_one({
             "host": host,
             "ts": datetime.now(timezone.utc),
             "path": path,
+            "via": "query" if ref_param else "header",
         })
     except Exception:
         pass
@@ -1347,6 +1520,8 @@ async def admin_live_stats(authorization: Optional[str] = Header(None)):
     return {
         "online": live_total,
         "watching": live_total,
+        "members_online": stats.get("members_live", 0),
+        "guests_online": stats.get("guests_live", live_total),
         "total_24h": total_24h,
         "top_channels": top_channels,
     }
@@ -1399,6 +1574,137 @@ async def admin_top_referrers(authorization: Optional[str] = Header(None), hours
         rows = []
 
     return {"referrers": rows, "window_hours": hours, "all_time": hours == 0}
+
+
+@api_router.get("/admin/stats-timeseries")
+async def admin_stats_timeseries(
+    authorization: Optional[str] = Header(None),
+    range_: str = Query("7d", alias="range"),
+):
+    """Time-series of view metrics over a chosen range.
+
+    Range options (bucket size in parentheses):
+      * 24h  → 24 hourly buckets
+      * 7d   → 7 daily buckets   (default)
+      * 30d  → 30 daily buckets
+      * 1y   → 365 daily buckets
+
+    For each bucket we return:
+      * total          — total plays
+      * member_plays   — plays by a logged-in non-VIP user
+      * vip_plays      — plays by a VIP user
+      * guest_plays    — plays without a Bearer JWT
+      * embed_plays    — plays initiated from an /embed/* page (or 3rd-party iframe)
+      * unique_visitors — distinct client IPs that played at least once
+
+    Returns:
+      {
+        "range": "7d",
+        "bucket": "day",          # or "hour"
+        "buckets": [
+          {"t": "2026-05-15T00:00:00Z",
+           "total": 123, "member_plays": 30, "vip_plays": 12,
+           "guest_plays": 81, "embed_plays": 40, "unique_visitors": 78},
+          ...
+        ],
+        "totals": { same keys, summed over the whole range }
+      }
+    """
+    jwt = (authorization or "").removeprefix("Bearer ").strip()
+    await _require_admin(jwt)
+
+    now = datetime.now(timezone.utc)
+    rng = (range_ or "7d").lower()
+    if rng == "24h":
+        bucket = "hour"
+        start = now - timedelta(hours=24)
+        n_buckets = 24
+        # Truncate start to the hour
+        start = start.replace(minute=0, second=0, microsecond=0)
+    elif rng == "30d":
+        bucket = "day"
+        start = (now - timedelta(days=30)).replace(hour=0, minute=0, second=0, microsecond=0)
+        n_buckets = 30
+    elif rng in ("1y", "365d"):
+        bucket = "day"
+        start = (now - timedelta(days=365)).replace(hour=0, minute=0, second=0, microsecond=0)
+        n_buckets = 365
+    else:
+        rng = "7d"
+        bucket = "day"
+        start = (now - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
+        n_buckets = 7
+
+    date_fmt = "%Y-%m-%dT%H:00:00Z" if bucket == "hour" else "%Y-%m-%dT00:00:00Z"
+
+    pipeline = [
+        {"$match": {"ts": {"$gte": start}}},
+        {"$group": {
+            "_id": {
+                "$dateToString": {
+                    "format": "%Y-%m-%dT%H:00:00Z" if bucket == "hour" else "%Y-%m-%dT00:00:00Z",
+                    "date": "$ts",
+                    "timezone": "UTC",
+                }
+            },
+            "total": {"$sum": 1},
+            "members_raw": {"$sum": {"$cond": [{"$eq": ["$is_member", True]}, 1, 0]}},
+            "vip_plays": {"$sum": {"$cond": [{"$eq": ["$is_vip", True]}, 1, 0]}},
+            "embed_plays": {"$sum": {"$cond": [{"$eq": ["$is_embed", True]}, 1, 0]}},
+            "ips": {"$addToSet": "$ip"},
+        }},
+        {"$sort": {"_id": 1}},
+    ]
+
+    raw_by_t: Dict[str, Dict[str, Any]] = {}
+    try:
+        async for r in db.views.aggregate(pipeline):
+            ips = [ip for ip in (r.get("ips") or []) if ip]
+            members_raw = int(r.get("members_raw") or 0)
+            vip_plays = int(r.get("vip_plays") or 0)
+            # vip_plays is a subset of members_raw (a VIP is also a member),
+            # so "member but not VIP" = members_raw - vip_plays
+            member_only = max(0, members_raw - vip_plays)
+            total = int(r.get("total") or 0)
+            raw_by_t[r["_id"]] = {
+                "total": total,
+                "member_plays": member_only,
+                "vip_plays": vip_plays,
+                "guest_plays": max(0, total - members_raw),
+                "embed_plays": int(r.get("embed_plays") or 0),
+                "unique_visitors": len(set(ips)),
+            }
+    except Exception as e:
+        logger.warning(f"stats-timeseries aggregate failed: {e}")
+        raw_by_t = {}
+
+    # Build the full bucket list (fill missing slots with zeros so the chart
+    # is continuous even on empty days).
+    buckets: List[Dict[str, Any]] = []
+    totals = {
+        "total": 0, "member_plays": 0, "vip_plays": 0,
+        "guest_plays": 0, "embed_plays": 0, "unique_visitors": 0,
+    }
+    step = timedelta(hours=1) if bucket == "hour" else timedelta(days=1)
+    cur = start
+    for _ in range(n_buckets):
+        key = cur.strftime(date_fmt)
+        b = raw_by_t.get(key, {
+            "total": 0, "member_plays": 0, "vip_plays": 0,
+            "guest_plays": 0, "embed_plays": 0, "unique_visitors": 0,
+        })
+        buckets.append({"t": key, **b})
+        for k in totals:
+            totals[k] += b[k]
+        cur += step
+
+    return {
+        "range": rng,
+        "bucket": bucket,
+        "start": start.isoformat(),
+        "buckets": buckets,
+        "totals": totals,
+    }
 
 
 @api_router.get("/admin/global-stats")
@@ -1467,6 +1773,7 @@ init_extensions(
     require_admin=_require_admin,
     extract_bearer=_extract_bearer,
     db=db,
+    record_view=_record_view,
 )
 api_router.include_router(ext_router)
 

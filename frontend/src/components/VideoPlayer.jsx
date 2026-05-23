@@ -310,11 +310,31 @@ export default function VideoPlayer({
     }
   };
 
-  const showControls = () => {
+  const showControls = useCallback(() => {
     setControlsVisible(true);
     if (hideTimer.current) clearTimeout(hideTimer.current);
     if (!menuOpen) {
       hideTimer.current = setTimeout(() => setControlsVisible(false), 3000);
+    }
+  }, [menuOpen]);
+
+  // Start the auto-hide timer as soon as the player mounts so the UI
+  // retracts even if the user never moves their mouse.
+  useEffect(() => {
+    showControls();
+    return () => {
+      if (hideTimer.current) clearTimeout(hideTimer.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Tap on touch devices toggles controls (and starts hide timer when shown).
+  const handleTouchStart = (_e) => {
+    if (controlsVisible) {
+      setControlsVisible(false);
+      if (hideTimer.current) clearTimeout(hideTimer.current);
+    } else {
+      showControls();
     }
   };
 
@@ -329,7 +349,16 @@ export default function VideoPlayer({
       : formatLevel(qualityLevels.find((l) => l.index === currentLevel));
 
   return (
-    <div className="player-shell" data-testid="video-player-shell" onMouseMove={showControls}>
+    <div
+      className={`player-shell ${controlsVisible ? "" : "ui-hidden"}`}
+      data-testid="video-player-shell"
+      onMouseMove={showControls}
+      onMouseLeave={() => {
+        if (hideTimer.current) clearTimeout(hideTimer.current);
+        if (!menuOpen) setControlsVisible(false);
+      }}
+      onTouchStart={handleTouchStart}
+    >
       <div className="player-frame" ref={containerRef}>
         <video
           ref={videoRef}

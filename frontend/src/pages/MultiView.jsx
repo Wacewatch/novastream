@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import axios from "axios";
 import {
   Search, Globe2, Grid3x3, ArrowLeft, Tv2, Trash2, Loader2,
-  X as XIcon, Radio, Trophy,
+  X as XIcon, Radio, Trophy, Crown,
 } from "lucide-react";
 import MultiViewCell from "@/components/MultiViewCell";
 import FlagIcon from "@/components/FlagIcon";
@@ -30,6 +30,7 @@ const SOURCE_TABS = [
   { id: "tv", label: "TV", icon: Tv2, color: "#ff2e63" },
   { id: "daddy", label: "DaddyTV", icon: Radio, color: "#ff8a00" },
   { id: "sports", label: "Sports", icon: Trophy, color: "#10b981" },
+  { id: "bosstv", label: "BossTV", icon: Crown, color: "#d946ef" },
 ];
 
 function loadState() {
@@ -122,6 +123,10 @@ export default function MultiView() {
       const t = encodeURIComponent(item.title || item.name || "Match");
       return `/embed/sports/${encodeURIComponent(first.source)}/${encodeURIComponent(first.id)}?t=${t}`;
     }
+    if (source === "bosstv") {
+      if (!item.has_servers && !item.server_count) return "";
+      return `/embed/bosstv/${encodeURIComponent(item.id)}/0`;
+    }
     return "";
   };
 
@@ -188,6 +193,36 @@ export default function MultiView() {
               sources: e.sources,
               src: buildSrc("sports", e),
             }));
+          setItems(list);
+        } else if (pickerSource === "bosstv") {
+          const r = await axios.get(`${API}/bosstv/matches`, { signal: ctrl.signal });
+          if (cancelled) return;
+          const matches = (r.data.matches || []).filter((m) => m.has_servers);
+          const q = search.trim().toLowerCase();
+          const filtered = q
+            ? matches.filter((m) =>
+                (m.title || "").toLowerCase().includes(q)
+                || (m.home || "").toLowerCase().includes(q)
+                || (m.away || "").toLowerCase().includes(q)
+                || (m.league || "").toLowerCase().includes(q),
+              )
+            : matches;
+          // Sort: live first, then upcoming, then by timestamp
+          filtered.sort((a, b) => {
+            if (a.is_live !== b.is_live) return a.is_live ? -1 : 1;
+            return (a.timestamp || 0) - (b.timestamp || 0);
+          });
+          const list = filtered.slice(0, 400).map((m) => ({
+            kind: "bosstv",
+            id: m.id,
+            name: m.title,
+            country: "",
+            category: m.league || "",
+            has_servers: m.has_servers,
+            server_count: m.server_count,
+            meta: { league: m.league, time: m.time_label, isLive: m.is_live },
+            src: buildSrc("bosstv", m),
+          }));
           setItems(list);
         }
       } catch (e) {
@@ -383,6 +418,8 @@ export default function MultiView() {
                   placeholder={
                     pickerSource === "sports"
                       ? "Rechercher un match, sport ou ligue…"
+                      : pickerSource === "bosstv"
+                      ? "Rechercher un match BossTV…"
                       : "Rechercher une chaîne…"
                   }
                   data-testid="mv-picker-search"
@@ -447,6 +484,7 @@ export default function MultiView() {
                         {it.kind === "tv" && <Tv2 size={18} className="text-white/50" />}
                         {it.kind === "daddy" && <Radio size={18} className="text-[#ff8a00]" />}
                         {it.kind === "sports" && <Trophy size={18} className="text-emerald-400" />}
+                        {it.kind === "bosstv" && <Crown size={18} className="text-fuchsia-400" />}
                       </div>
                       <div className="min-w-0 flex-1">
                         <p className="text-sm font-semibold truncate">{it.name}</p>
@@ -465,6 +503,12 @@ export default function MultiView() {
                           )}
                           {it.kind === "sports" && (
                             <>{it.meta?.sport || "Sport"} · {it.meta?.time || ""}</>
+                          )}
+                          {it.kind === "bosstv" && (
+                            <>
+                              {it.meta?.isLive && <span className="text-red-400">● LIVE</span>}
+                              {!it.meta?.isLive && (it.meta?.league || "BossTV")} · {it.meta?.time || ""}
+                            </>
                           )}
                         </p>
                       </div>

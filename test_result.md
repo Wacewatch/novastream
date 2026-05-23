@@ -122,7 +122,7 @@ backend:
         -comment: "Added /api/v1/public/countries, /api/v1/public/categories, /api/v1/public/channels (filters: country/category/search/limit 1-5000), /api/v1/public/channel/{id}. Each channel response includes id, name, country, categories, stream_url (absolute) and embed_url (absolute) derived from X-Forwarded-* headers."
         -working: true
         -agent: "testing"
-        -comment: "✅ ALL PUBLIC API v1 ENDPOINTS WORKING CORRECTLY. Tested: (1) /api/v1/public/countries returns 17 countries including France. (2) /api/v1/public/categories returns 8 categories. (3) /api/v1/public/channels?country=France&limit=5 returns exactly 5 France channels with correct structure (id, name, country='France', categories[], stream_url, embed_url). (4) All stream_url start with https://api-redesign-2.preview.emergentagent.com/api/stream/{id} and embed_url with /embed/{id} - X-Forwarded-* headers honored correctly. (5) Filter by category=Sport returns only Sport channels. (6) Filter by search=tf1 returns only channels with 'tf1' in name. (7) /api/v1/public/channel/{valid_id} returns correct single channel data. (8) /api/v1/public/channel/INVALID_ID returns 404 with correct French error message 'Chaîne introuvable'."
+        -comment: "✅ ALL PUBLIC API v1 ENDPOINTS WORKING CORRECTLY. Tested: (1) /api/v1/public/countries returns 17 countries including France. (2) /api/v1/public/categories returns 8 categories. (3) /api/v1/public/channels?country=France&limit=5 returns exactly 5 France channels with correct structure (id, name, country='France', categories[], stream_url, embed_url). (4) All stream_url start with https://universal-player-16.preview.emergentagent.com/api/stream/{id} and embed_url with /embed/{id} - X-Forwarded-* headers honored correctly. (5) Filter by category=Sport returns only Sport channels. (6) Filter by search=tf1 returns only channels with 'tf1' in name. (7) /api/v1/public/channel/{valid_id} returns correct single channel data. (8) /api/v1/public/channel/INVALID_ID returns 404 with correct French error message 'Chaîne introuvable'."
 
   - task: "Performance: shared httpx client, resolve cache (240s) and HLS playlist micro-cache (2s) with per-key locks"
     implemented: true
@@ -293,7 +293,7 @@ frontend:
 metadata:
   created_by: "main_agent"
   version: "1.0"
-  test_sequence: 3
+  test_sequence: 4
   run_ui: false
 
 test_plan:
@@ -372,7 +372,7 @@ agent_communication:
            with expected JSON shape (total + array).
         
         Do NOT test playback. Use the public preview URL:
-        https://api-redesign-2.preview.emergentagent.com
+        https://universal-player-16.preview.emergentagent.com
 
 agent_communication:
     -agent: "main"
@@ -402,7 +402,7 @@ agent_communication:
     -message: |
         ✅ BACKEND TESTING COMPLETE - ALL TESTS PASSED (16/16)
         
-        Comprehensive test suite executed against https://api-redesign-2.preview.emergentagent.com
+        Comprehensive test suite executed against https://universal-player-16.preview.emergentagent.com
         Created /app/backend_test.py with full validation coverage.
         
         Test Results Summary:
@@ -452,13 +452,13 @@ agent_communication:
            response time of the 2nd call is sub-50ms).
         Do NOT test playback in a real browser — focus on API correctness,
         caching effectiveness, and concurrency safety. Use the public preview
-        URL: https://api-redesign-2.preview.emergentagent.com
+        URL: https://universal-player-16.preview.emergentagent.com
 
     -agent: "testing"
     -message: |
         ✅ EXTENSIONS BACKEND TESTING COMPLETE - ALL TESTS PASSED (34/34)
         
-        Comprehensive test suite executed against https://api-redesign-2.preview.emergentagent.com
+        Comprehensive test suite executed against https://universal-player-16.preview.emergentagent.com
         Created /app/backend_test_extensions.py with full validation coverage for new modules.
         
         Test Results Summary:
@@ -653,7 +653,7 @@ agent_communication:
     -message: |
       ✅ DLSTREAM RESOLVER TESTING COMPLETE - ALL TESTS PASSED (16/16)
       
-      Comprehensive test suite executed against https://api-redesign-2.preview.emergentagent.com
+      Comprehensive test suite executed against https://universal-player-16.preview.emergentagent.com
       Created /app/backend_test_dlstream.py with full validation coverage.
       
       Key Findings:
@@ -674,7 +674,7 @@ agent_communication:
     -message: |
       ✅ FOOTBALL PROXY ENDPOINT RETESTING COMPLETE - ALL TESTS PASSED (19/19)
       
-      Comprehensive test suite executed against https://api-redesign-2.preview.emergentagent.com
+      Comprehensive test suite executed against https://universal-player-16.preview.emergentagent.com
       Created /app/backend_test_football_proxy.py with full validation coverage.
       
       Test Results Summary:
@@ -868,7 +868,7 @@ agent_communication:
     -message: |
       ✅ DADDY PROXY SPLIT TESTING COMPLETE - ALL TESTS PASSED (9/9)
       
-      Comprehensive test suite executed against https://api-redesign-2.preview.emergentagent.com
+      Comprehensive test suite executed against https://universal-player-16.preview.emergentagent.com
       Created /app/backend_test_daddy_proxy.py with full validation coverage.
       
       Key Findings:
@@ -883,3 +883,178 @@ agent_communication:
       9. No regressions on existing endpoints
       
       The proxy split implementation is production-ready. All test scenarios from the review request passed successfully.
+
+    -agent: "main"
+    -message: |
+      ✨ NEW FEATURE: BossTV integration (api.bosstvmm.com) + Player UI auto-hide.
+
+      BACKEND (extensions.py — added at end):
+        • GET /api/bosstv/matches — proxies api.bosstvmm.com/api/matches with
+          60s cache. Returns normalized matches: {id, title, home/away, logos,
+          league, status, is_live, is_finished, timestamp, time_label,
+          has_servers, server_count}. Query params: status (live|finished|vs),
+          league, search. Total fields: total, live_count, upcoming_count,
+          finished_count, league_count, leagues[], matches[], cache_age_sec.
+        • GET /api/bosstv/streams?mid=… — returns the cleaned list of
+          servers [{name, stream_url}] for a given match id.
+        • GET /api/v1/public/bosstv?status=… — public-facing variant. Replaces
+          raw stream_url with opaque embeds[] (base64url token of "mid:idx")
+          routed through /embed/bosstv/t/:token. Never exposes upstream
+          server names or .m3u8 URLs (same contract as /v1/public/football).
+
+      FRONTEND:
+        • New tab /app/frontend/src/components/tabs/BossTvTab.jsx — same
+          UX as FootballTab (LIVE / Upcoming / Finished filters, league
+          filter, search, auto-refresh 60s). Cards use the existing
+          .match-card / .league-tag / .team-row styles.
+        • Inserted as a sub-tab between "Football Live" and "Informations"
+          in SPORTS_SUBTABS (NovaStream.jsx).
+        • handlePickBoss(match) → AdUnlockModal → VideoPlayer with inline
+          server selector (bossSwitchServer), exactly like Football.
+        • New routes:
+          - /embed/bosstv/:matchId/:serverIdx? → BossTvEmbedPage.jsx
+          - /embed/bosstv/t/:token → BossTvTokenRedirect.jsx (decodes
+            base64url "mid:idx" and forwards).
+        • MultiView (src/pages/MultiView.jsx): added BossTV as a 4th source
+          tab (Crown icon, color #d946ef). Picker calls /api/bosstv/matches,
+          shows only matches with servers, sorts LIVE first, and assigns a
+          cell src of /embed/bosstv/{mid}/0 (first server). MultiViewCell
+          now renders the Crown icon for bosstv kind.
+        • ApiDocs: added a 5th section "BossTV" with the public endpoint
+          URL and a JSON sample.
+
+      PLAYER UI AUTO-HIDE FIX (PC / mobile / iOS):
+        • Removed the CSS rule that kept .player-controls visible whenever
+          the mouse hovered the .player-frame (was: `:hover .player-controls`).
+          Now controls visibility is driven SOLELY by the `controlsVisible`
+          state — fading out after 3s of inactivity in normal AND fullscreen.
+        • VideoPlayer.jsx: added a mount-time call to showControls() (so the
+          timer starts on first load even without mouse movement), a
+          onMouseLeave handler that clears + hides immediately, and an
+          onTouchStart handler that toggles UI visibility (tap-to-show /
+          tap-to-hide). When UI is hidden the mouse cursor is hidden too
+          (`.player-shell.ui-hidden { cursor:none }`).
+        • IframePlayer.jsx: same auto-hide pattern applied to the top bar
+          (sports / daddy iframe / etc.). Top bar fades out after 3s of
+          inactivity; tap toggles; works in fullscreen.
+
+      Manual smoke (curl):
+        • /api/bosstv/matches → 200, 94 matches, 15 live, 31 leagues ✓
+        • /api/bosstv/matches?status=live → 200, 15 ✓
+        • /api/bosstv/streams?mid=<live-id> → 200, 12 servers ✓
+        • /api/v1/public/bosstv?status=live → 200, embeds[] with
+          /embed/bosstv/t/<token> URLs, no stream_url leaked ✓
+        • Frontend builds clean, lint passes ✓
+
+      Please run backend tests focused on the 3 new BossTV endpoints
+      (/api/bosstv/matches, /api/bosstv/streams, /api/v1/public/bosstv)
+      and confirm no regression on the existing football / sports / daddy
+      flows. Auto-hide UI is a frontend-only change; the user will validate
+      it visually.
+
+  - task: "BossTV endpoints (matches, streams, public)"
+    implemented: true
+    working: true
+    file: "backend/extensions.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: |
+          Added three endpoints proxying api.bosstvmm.com:
+            • GET /api/bosstv/matches — supports query params (status, league,
+              search). Returns normalized list with id, title, home/away,
+              logos, league, is_live, is_finished, timestamp, has_servers,
+              server_count + aggregated counters. 60s cache.
+            • GET /api/bosstv/streams?mid=… — returns [{name, stream_url}].
+              Cache shared with /matches.
+            • GET /api/v1/public/bosstv?status=… — public variant.
+              Each match has embeds[] of {label, embed_url} where embed_url
+              is /embed/bosstv/t/<base64url(mid:idx)>. No upstream server
+              name or m3u8 URL is exposed.
+          Manual curl OK: 94 matches / 15 live / 12 servers on first live.
+        -working: true
+        -agent: "testing"
+        -comment: |
+          ✅ ALL BOSSTV ENDPOINTS WORKING CORRECTLY (9/9 tests passed). Created /app/backend_test_bosstv.py with comprehensive validation.
+          
+          Test Results:
+          1. ✅ GET /api/bosstv/matches → 200 with correct structure
+             - Returns 94 matches (15 live, 73 upcoming, 6 finished)
+             - All required fields present: total, live_count, upcoming_count, finished_count, league_count, leagues[], matches[], cache_age_sec
+             - Each match has correct structure: id (string), title, home, away, home_logo, away_logo, league, status, is_live (bool), is_finished (bool), timestamp (int), time_label, has_servers (bool), server_count (int)
+          
+          2. ✅ GET /api/bosstv/matches?status=live → 200
+             - Returns only live matches (15 matches)
+             - live_count == total (verified)
+             - All matches have is_live=true
+          
+          3. ✅ GET /api/bosstv/matches?status=finished → 200
+             - Returns only finished matches (6 matches)
+             - All matches have is_finished=true
+          
+          4. ✅ GET /api/bosstv/matches?search=vs → 200
+             - Search filter works correctly (returned 94 matches)
+             - No errors with search parameter
+          
+          5. ✅ GET /api/bosstv/streams (no mid) → 200
+             - Returns {"servers": []} when no mid provided
+          
+          6. ✅ GET /api/bosstv/streams?mid=<live_match_id> → 200
+             - Tested with live match "Hull City vs Middlesbrough" (has_servers=true, server_count=12)
+             - Returns 12 servers with correct structure: {name, stream_url}
+             - All stream_url start with https:// ✅
+             - All stream_url contain .m3u8 (with query params) ✅
+             - Example: https://pull.niur.live/live/stream-9912041_lsd.m3u8?txSecret=...
+          
+          7. ✅ GET /api/v1/public/bosstv → 200
+             - Same structure as /bosstv/matches but with embeds[] instead of has_servers/server_count
+             - Confirmed has_servers and server_count are NOT in response ✅
+             - Each match with servers has embeds[] array
+             - Each embed has {label: "Stream N", embed_url: ".../embed/bosstv/t/<token>"}
+             - Verified embed_url format: /embed/bosstv/t/<base64url_token> ✅
+             - Confirmed NO .m3u8 URLs in embed_url ✅
+             - Confirmed NO bosstvmm.com hostname in embed_url ✅
+          
+          8. ✅ GET /api/v1/public/bosstv?status=live → 200
+             - Returns only live matches (15 matches)
+             - All matches have is_live=true
+          
+          9. ✅ Regression tests - ALL EXISTING ENDPOINTS WORKING:
+             - GET /api/v1/public/football → 200 ✅
+             - GET /api/v1/public/sports → 200 ✅
+             - GET /api/v1/public/all → 200 ✅
+             - GET /api/v1/public/daddy/channels → 200 ✅
+          
+          No critical issues found. BossTV integration is production-ready.
+
+agent_communication:
+    -agent: "testing"
+    -message: |
+      ✅ BOSSTV BACKEND TESTING COMPLETE - ALL TESTS PASSED (9/9)
+      
+      Comprehensive test suite executed against https://universal-player-16.preview.emergentagent.com
+      Created /app/backend_test_bosstv.py with full validation coverage for BossTV endpoints.
+      
+      All 9 test scenarios from the review request passed successfully:
+      1. ✅ GET /api/bosstv/matches - correct structure with all required fields
+      2. ✅ GET /api/bosstv/matches?status=live - only live matches returned
+      3. ✅ GET /api/bosstv/matches?status=finished - only finished matches returned
+      4. ✅ GET /api/bosstv/matches?search=vs - search filter working
+      5. ✅ GET /api/bosstv/streams (no mid) - returns empty servers list
+      6. ✅ GET /api/bosstv/streams?mid=<live_match_id> - returns servers with valid m3u8 URLs
+      7. ✅ GET /api/v1/public/bosstv - correct structure with embeds[], no raw URLs exposed
+      8. ✅ GET /api/v1/public/bosstv?status=live - only live matches returned
+      9. ✅ Regression tests - all existing endpoints still working
+      
+      Key Findings:
+      - 94 total matches (15 live, 73 upcoming, 6 finished)
+      - 31 leagues available
+      - Live matches have 12 servers with valid https:// m3u8 URLs
+      - Public endpoint correctly hides raw stream URLs behind opaque tokens
+      - No .m3u8 or bosstvmm.com hostnames leaked in public API
+      - All existing endpoints (football, sports, daddy, all) working correctly
+      
+      BossTV integration is production-ready. No critical issues found.
