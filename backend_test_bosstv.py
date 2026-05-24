@@ -6,7 +6,7 @@ Tests all BossTV endpoints + regression tests for existing endpoints
 import requests
 import time
 
-BASE_URL = "https://universal-player-16.preview.emergentagent.com"
+BASE_URL = "https://player-ui-redesign.preview.emergentagent.com"
 
 def test_bosstv_matches():
     """Test 1: GET /api/bosstv/matches - basic structure"""
