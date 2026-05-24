@@ -27,11 +27,13 @@ import {
   AlertTriangle,
   ToggleRight,
   ToggleLeft,
+  LayoutDashboard,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { supabase } from "@/lib/supabase";
 import { toast } from "sonner";
 import StatsTimeseriesPanel from "@/components/admin/StatsTimeseriesPanel";
+import TopBar from "@/components/TopBar";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || window.location.origin;
 const API = `${BACKEND_URL}/api`;
@@ -372,20 +374,16 @@ export default function Admin() {
       <div className="ns-bg" />
       <div className="ns-grain" />
 
-      <header className="sticky top-0 z-30 glass" style={{ borderRadius: 0 }}>
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3 flex items-center gap-3">
-          <Link to="/" className="player-btn" data-testid="admin-back-btn">
-            <ArrowLeft size={18} />
+      <TopBar
+        variant="admin"
+        backTo="/"
+        right={
+          <Link to="/dashboard" className="topbar-pill hidden sm:inline-flex" data-testid="admin-dashboard-link">
+            <LayoutDashboard size={13} />
+            <span className="text-xs">Dashboard</span>
           </Link>
-          <img src={SITE_LOGO} alt="LiveWatch" className="h-7" />
-          <span className="hidden sm:inline-flex items-center gap-1.5 text-xs uppercase tracking-[0.18em] text-red-400 px-2.5 py-1 rounded-full bg-red-500/10 border border-red-500/30">
-            <Shield size={12} /> Admin
-          </span>
-          <Link to="/dashboard" className="ml-auto player-btn px-3 text-sm" data-testid="admin-dashboard-link">
-            Mon Dashboard
-          </Link>
-        </div>
-      </header>
+        }
+      />
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-6">
         {/* Global Stats cards */}

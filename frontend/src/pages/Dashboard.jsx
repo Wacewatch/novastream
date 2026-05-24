@@ -18,6 +18,7 @@ import { useFavorites } from "@/hooks/useFavorites";
 import { supabase } from "@/lib/supabase";
 import { toast } from "sonner";
 import VipUpgradeModule from "@/components/VipUpgradeModule";
+import TopBar from "@/components/TopBar";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || window.location.origin;
 const API = `${BACKEND_URL}/api`;
@@ -97,27 +98,24 @@ export default function Dashboard() {
       <div className="ns-bg" />
       <div className="ns-grain" />
 
-      <header className="sticky top-0 z-30 glass" style={{ borderRadius: 0 }}>
-        <div className="max-w-6xl mx-auto px-4 sm:px-6 py-3 flex items-center gap-3">
-          <Link to="/" className="player-btn" data-testid="dashboard-back-btn">
-            <ArrowLeft size={18} />
-          </Link>
-          <img src="https://i.imgur.com/V8YmT4z.png" alt="LiveWatch" className="h-7" />
-          <span className="hidden sm:inline-flex text-xs uppercase tracking-[0.18em] text-white/55 px-2.5 py-1 rounded-full glass-pill">
-            Dashboard
-          </span>
-          <div className="ml-auto flex items-center gap-2">
+      <TopBar
+        variant="dashboard"
+        backTo="/"
+        right={
+          <>
             {isAdmin && (
-              <Link to="/admin" className="player-btn inline-flex items-center gap-1.5 px-3 text-sm" data-testid="dashboard-admin-link">
-                <Shield size={14} /> Admin
+              <Link to="/admin" className="topbar-pill hidden sm:inline-flex" data-testid="dashboard-admin-link">
+                <Shield size={13} />
+                <span className="text-xs">Admin</span>
               </Link>
             )}
-            <button onClick={handleSignOut} className="player-btn inline-flex items-center gap-1.5 px-3 text-sm" data-testid="dashboard-logout-btn">
-              <LogOut size={14} /> Déconnexion
+            <button onClick={handleSignOut} className="topbar-pill" data-testid="dashboard-logout-btn">
+              <LogOut size={13} />
+              <span className="text-xs">Déconnexion</span>
             </button>
-          </div>
-        </div>
-      </header>
+          </>
+        }
+      />
 
       <main className="max-w-6xl mx-auto px-4 sm:px-6 py-6 sm:py-8">
         {/* Profile card */}

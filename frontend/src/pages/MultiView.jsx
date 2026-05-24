@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import MultiViewCell from "@/components/MultiViewCell";
 import FlagIcon from "@/components/FlagIcon";
+import TopBar from "@/components/TopBar";
 import {
   Select,
   SelectContent,
@@ -300,26 +301,12 @@ export default function MultiView() {
       <div className="ns-grain" />
 
       {/* Header */}
-      <header className="sticky top-0 z-40 glass" style={{ borderRadius: 0, backdropFilter: "blur(22px) saturate(140%)" }}>
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3 flex items-center gap-3 sm:gap-5">
-          <Link to="/" className="player-btn shrink-0" data-testid="mv-back-btn" aria-label="Retour">
-            <ArrowLeft size={18} />
-          </Link>
-          <div className="flex items-center gap-2.5 shrink-0" data-testid="brand-logo">
-            <img
-              src="https://i.imgur.com/V8YmT4z.png"
-              alt="LiveWatch"
-              className="h-7 sm:h-8 w-auto"
-              draggable={false}
-            />
-            <span className="hidden sm:inline-flex items-center gap-1.5 text-xs uppercase tracking-[0.18em] text-white/55 px-2.5 py-1 rounded-full glass-pill">
-              <Grid3x3 size={12} /> Multiview
-            </span>
-          </div>
-
-          <div className="ml-auto flex items-center gap-2">
-            {/* Layout selector */}
-            <div className="flex items-center gap-1 p-1 rounded-full glass-pill" data-testid="mv-layout-selector">
+      <TopBar
+        variant="multiview"
+        backTo="/"
+        right={
+          <>
+            <div className="flex items-center gap-1 p-1 rounded-full glass-pill mr-1" data-testid="mv-layout-selector">
               {LAYOUTS.map((l) => (
                 <button
                   key={l.id}
@@ -332,24 +319,24 @@ export default function MultiView() {
                 </button>
               ))}
             </div>
-            <div className="hidden sm:flex items-center gap-2 glass-pill px-3 py-2 rounded-full" data-testid="mv-filled-count">
-              <Tv2 size={14} className="text-[#ff2e63]" />
-              <span className="text-sm font-semibold tabular-nums">{filledCount}</span>
-              <span className="text-xs text-white/60">/ {visibleCells}</span>
+            <div className="topbar-stat hidden sm:flex" data-testid="mv-filled-count">
+              <Tv2 size={13} />
+              <span className="topbar-stat-value">{filledCount}</span>
+              <span className="topbar-stat-label">/ {visibleCells}</span>
             </div>
             <button
               onClick={clearAll}
-              className="player-btn shrink-0"
+              className="topbar-icon-btn"
               title="Tout effacer"
               data-testid="mv-clear-all"
               disabled={filledCount === 0}
               style={{ opacity: filledCount === 0 ? 0.4 : 1 }}
             >
-              <Trash2 size={16} />
+              <Trash2 size={15} />
             </button>
-          </div>
-        </div>
-      </header>
+          </>
+        }
+      />
 
       {/* Grid */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-3 sm:px-5 py-4">

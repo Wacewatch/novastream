@@ -8,7 +8,8 @@ import ChannelCard from "@/components/ChannelCard";
 import AdUnlockModal from "@/components/AdUnlockModal";
 import VideoPlayer from "@/components/VideoPlayer";
 import IframePlayer from "@/components/IframePlayer";
-import UserMenu from "@/components/UserMenu";
+import TopBar from "@/components/TopBar";
+import SportsTicker from "@/components/SportsTicker";
 import FlagIcon from "@/components/FlagIcon";
 import DaddyTab from "@/components/tabs/DaddyTab";
 import SportsTab from "@/components/tabs/SportsTab";
@@ -339,93 +340,23 @@ export default function NovaStream() {
       <div className="ns-grain" />
 
       {/* ===== Header (always visible) ===== */}
-      <header className="sticky top-0 z-40 glass" style={{ borderRadius: 0, backdropFilter: "blur(22px) saturate(140%)" }}>
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 py-4 flex items-center gap-3 sm:gap-6">
-          <div className="flex items-center gap-2.5 shrink-0" data-testid="brand-logo">
-            <img
-              src="https://i.imgur.com/V8YmT4z.png"
-              alt="LiveWatch"
-              className="h-7 sm:h-8 w-auto"
-              draggable={false}
-            />
-          </div>
-
-          {activeTab === "tv" && (
-            <div className="hidden md:flex flex-1 max-w-md mx-auto">
-              <div className="relative w-full">
-                <Search size={18} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-white/50" />
-                <input
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  placeholder="Rechercher une chaîne…"
-                  data-testid="search-input"
-                  className="w-full pl-10 pr-4 py-2.5 rounded-full glass-pill text-sm text-white placeholder:text-white/40 focus:outline-none focus:border-white/20"
-                />
-              </div>
-            </div>
-          )}
-
-          <div className="ml-auto md:ml-0 shrink-0 flex items-center gap-2">
-            <div
-              className="hidden lg:flex items-center gap-2 px-3 py-2 rounded-full glass-pill border-white/10"
-              data-testid="viewers-stat-24h"
-              title="Spectateurs uniques sur les dernières 24 heures"
-            >
-              <Users size={14} className="text-[#ff2e63]" />
-              <span className="text-sm font-bold tabular-nums">{stats.total_24h.toLocaleString("fr-FR")}</span>
-              <span className="text-[11px] text-white/55 uppercase tracking-wider">vues / 24 h</span>
-            </div>
-            <a
-              href="/multiview"
-              className="hidden sm:inline-flex items-center gap-1.5 text-sm text-white/70 hover:text-white px-3 py-2 rounded-full glass-pill border-white/10 transition-colors"
-              data-testid="multiview-link"
-              title="Mode multiview (jusqu'à 4×4)"
-            >
-              <Tv2 size={14} className="text-[#ff2e63]" />
-              Multi
-            </a>
-            <button
-              onClick={() => setOnlyFavorites((v) => !v)}
-              className={`hidden sm:inline-flex items-center gap-1.5 text-sm px-3 py-2 rounded-full glass-pill border-white/10 transition-colors ${
-                onlyFavorites ? "text-[#ff2e63] border-[#ff2e63]/40" : "text-white/70 hover:text-white"
-              }`}
-              data-testid="favorites-filter-btn"
-              title={onlyFavorites ? "Afficher toutes les chaînes" : "Afficher mes favoris"}
-            >
-              <Heart
-                size={14}
-                fill={onlyFavorites ? "#ff2e63" : "transparent"}
-                color={onlyFavorites ? "#ff2e63" : "currentColor"}
-                strokeWidth={onlyFavorites ? 0 : 2}
-              />
-              <span>{favorites.length}</span>
-            </button>
-            <a
-              href="/docs"
-              className="hidden sm:inline-flex items-center gap-1.5 text-sm text-white/70 hover:text-white px-3 py-2 rounded-full glass-pill border-white/10 transition-colors"
-              data-testid="api-link"
-            >
-              API
-            </a>
-            <UserMenu />
-          </div>
-        </div>
-
-        {activeTab === "tv" && (
-          <div className="md:hidden px-4 pb-3">
-            <div className="relative">
-              <Search size={18} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-white/50" />
-              <input
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Rechercher une chaîne…"
-                data-testid="search-input-mobile"
-                className="w-full pl-10 pr-4 py-2.5 rounded-full glass-pill text-sm text-white placeholder:text-white/40 focus:outline-none focus:border-white/20"
-              />
-            </div>
-          </div>
-        )}
-      </header>
+      <TopBar
+        variant={
+          activeTab === "daddy" ? "daddy" :
+          activeTab === "sports" ? (
+            sportsSubTab === "football" ? "football" :
+            sportsSubTab === "bosstv" ? "bosstv" :
+            "sports"
+          ) : "tv"
+        }
+        showSearch={activeTab === "tv"}
+        search={search}
+        onSearchChange={setSearch}
+        onlyFavorites={onlyFavorites}
+        onToggleFavorites={() => setOnlyFavorites((v) => !v)}
+        favoritesCount={favorites.length}
+        stats={{ total_24h: stats.total_24h, live_total: stats.live_total }}
+      />
 
       {/* ===== Hub buttons (3 tabs) ===== */}
       <section className="max-w-7xl mx-auto px-4 sm:px-6 pt-6 pb-2" data-testid="hub-section">
@@ -557,6 +488,13 @@ export default function NovaStream() {
               );
             })}
           </div>
+        </section>
+      )}
+
+      {/* ===== Daily matches ticker — Sports tab only ===== */}
+      {activeTab === "sports" && sportsSubTab !== "info" && (
+        <section className="max-w-7xl mx-auto px-4 sm:px-6 pt-3 pb-1">
+          <SportsTicker />
         </section>
       )}
 
