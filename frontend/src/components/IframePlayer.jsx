@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { X, Maximize, RotateCcw } from "lucide-react";
+import { X, Maximize, Minimize, RotateCcw } from "lucide-react";
+
+const isIOS = () => {
+  if (typeof navigator === "undefined") return false;
+  const ua = navigator.userAgent || "";
+  if (/iP(hone|od|ad)/.test(ua)) return true;
+  return ua.includes("Mac") && navigator.maxTouchPoints > 1;
+};
 
 /**
  * Iframe player overlay used by DaddyTV (iframe fallback), Sports and Football.
@@ -53,11 +60,33 @@ export default function IframePlayer({
     }
   };
 
+  const [pseudoFs, setPseudoFs] = useState(false);
+
   const openFullscreen = () => {
     const el = frameRef.current;
     if (!el) return;
-    if (el.requestFullscreen) el.requestFullscreen().catch(() => {});
+    // iOS Safari can't fullscreen an iframe container reliably — use a CSS
+    // pseudo-fullscreen (cover the entire viewport, hide chrome) instead.
+    if (isIOS() || !el.requestFullscreen) {
+      setPseudoFs((v) => !v);
+      try {
+        if (!pseudoFs) {
+          window.scrollTo(0, 0);
+          document.body.style.overflow = "hidden";
+        } else {
+          document.body.style.overflow = "";
+        }
+      } catch (_) { /* noop */ }
+      return;
+    }
+    if (document.fullscreenElement) {
+      document.exitFullscreen?.();
+    } else {
+      el.requestFullscreen().catch(() => setPseudoFs(true));
+    }
   };
+
+  useEffect(() => () => { try { document.body.style.overflow = ""; } catch (_) {} }, []);
 
   const reload = () => {
     if (onReload) {
@@ -73,7 +102,7 @@ export default function IframePlayer({
 
   return (
     <div
-      className={`player-shell ${visible ? "" : "ui-hidden"}`}
+      className={`player-shell ${visible ? "" : "ui-hidden"} ${pseudoFs ? "pseudo-fs" : ""}`}
       data-testid="iframe-player"
       onMouseMove={showUi}
       onMouseLeave={() => {
@@ -106,10 +135,10 @@ export default function IframePlayer({
               type="button"
               onClick={openFullscreen}
               className="iframe-player-btn"
-              title="Plein écran"
+              title={pseudoFs ? "Quitter le plein écran" : "Plein écran"}
               data-testid="iframe-fullscreen-btn"
             >
-              <Maximize size={15} />
+              {pseudoFs ? <Minimize size={15} /> : <Maximize size={15} />}
             </button>
             <button
               type="button"

@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import axios from "axios";
 import { Copy, ExternalLink, Code2 } from "lucide-react";
 import { toast } from "sonner";
+import TopBar from "@/components/TopBar";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || window.location.origin;
 const LOGO_URL = "https://i.imgur.com/V8YmT4z.png";
@@ -211,19 +212,7 @@ export default function ApiDocs() {
       <div className="ns-grain" />
 
       {/* Header */}
-      <header
-        className="sticky top-0 z-40 glass"
-        style={{ borderRadius: 0, backdropFilter: "blur(22px) saturate(140%)" }}
-      >
-        <div className="max-w-3xl mx-auto px-4 sm:px-6 py-4 flex items-center justify-between gap-3">
-          <Link to="/" className="flex items-center gap-2.5">
-            <img src={LOGO_URL} alt="LiveWatch" className="h-7 sm:h-8 w-auto" />
-          </Link>
-          <Link to="/" className="ad-btn-secondary !py-2 !px-4 text-sm">
-            ← Retour
-          </Link>
-        </div>
-      </header>
+      <TopBar variant="docs" backTo="/" />
 
       <main className="max-w-3xl mx-auto px-4 sm:px-6 py-14">
         <p className="text-white/50 uppercase tracking-[0.2em] text-xs mb-2">

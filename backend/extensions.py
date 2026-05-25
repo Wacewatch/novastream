@@ -2167,3 +2167,138 @@ async def public_bosstv(request: Request, status: str = ""):
         "matches": matches_pub,
         "cache_age_sec": data.get("cache_age_sec", 0),
     }
+
+
+
+# =====================================================================
+# Sports Daily Ticker — proxy of football_api_proxy.php (212.47.64.168)
+# Used by the SportsTab top bandeau.
+# =====================================================================
+_DAILY_TICKER_BASE = "http://212.47.64.168/football_api_proxy.php?mode=matches&date={date}"
+_DAILY_TICKER_TTL = 60.0
+_daily_ticker_cache: Dict[str, Dict[str, Any]] = {}
+_daily_ticker_lock = asyncio.Lock()
+
+
+def _normalize_daily_status(short: str, elapsed: Any) -> Tuple[str, str, bool, bool]:
+    """Return (status_short, status_label, is_live, is_finished)."""
+    s = (short or "").upper().strip()
+    live_codes = {"1H", "HT", "2H", "ET", "BT", "P", "LIVE", "INT"}
+    finished_codes = {"FT", "AET", "PEN", "ABD", "AWD", "WO"}
+    cancelled_codes = {"PST", "CANC", "TBD", "SUSP"}
+    is_live = s in live_codes
+    is_finished = s in finished_codes
+    label = s
+    if s == "1H":
+        label = f"{elapsed}'" if elapsed else "1ère mi-temps"
+    elif s == "2H":
+        label = f"{elapsed}'" if elapsed else "2ème mi-temps"
+    elif s == "HT":
+        label = "Mi-temps"
+    elif s == "FT":
+        label = "Terminé"
+    elif s == "NS":
+        label = ""
+    elif s == "PST":
+        label = "Reporté"
+    elif s == "TBD":
+        label = "À définir"
+    elif s == "ET":
+        label = f"Prol. {elapsed}'" if elapsed else "Prolongations"
+    elif s == "PEN":
+        label = "Tirs au but"
+    return s, label, is_live, is_finished
+
+
+def _fmt_match_time(iso: str) -> str:
+    try:
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        return dt.astimezone().strftime("%H:%M")
+    except Exception:
+        return ""
+
+
+def _normalize_daily_match(m: Dict[str, Any]) -> Dict[str, Any]:
+    fixture = m.get("fixture") or {}
+    league = m.get("league") or {}
+    teams = m.get("teams") or {}
+    goals = m.get("goals") or {}
+    home = teams.get("home") or {}
+    away = teams.get("away") or {}
+    status = fixture.get("status") or {}
+    short, label, is_live, is_finished = _normalize_daily_status(status.get("short", ""), status.get("elapsed"))
+    iso_date = fixture.get("date") or ""
+    return {
+        "id": str(m.get("id") or fixture.get("id") or ""),
+        "league": league.get("name") or "",
+        "league_slug": league.get("slug") or "",
+        "country": league.get("country") or "",
+        "kick_off": iso_date,
+        "kick_off_label": _fmt_match_time(iso_date),
+        "status_short": short,
+        "status_label": label,
+        "elapsed": status.get("elapsed"),
+        "is_live": is_live,
+        "is_finished": is_finished,
+        "home_name": home.get("name") or "?",
+        "home_logo": home.get("logo") or "",
+        "home_goals": goals.get("home"),
+        "away_name": away.get("name") or "?",
+        "away_logo": away.get("logo") or "",
+        "away_goals": goals.get("away"),
+    }
+
+
+async def _fetch_daily_ticker(date_str: str) -> Dict[str, Any]:
+    now = time.time()
+    cached = _daily_ticker_cache.get(date_str)
+    if cached and now - cached["ts"] < _DAILY_TICKER_TTL:
+        return cached["data"]
+    async with _daily_ticker_lock:
+        cached = _daily_ticker_cache.get(date_str)
+        if cached and time.time() - cached["ts"] < _DAILY_TICKER_TTL:
+            return cached["data"]
+        url = _DAILY_TICKER_BASE.format(date=date_str)
+        raw = await _fetch_json(url, timeout=15.0)
+        items = (raw or {}).get("response") if isinstance(raw, dict) else (raw or [])
+        if not isinstance(items, list):
+            items = []
+        normalized = [_normalize_daily_match(m) for m in items if isinstance(m, dict)]
+        # Sort: live first, then by kickoff
+        normalized.sort(
+            key=lambda m: (
+                0 if m["is_live"] else (1 if not m["is_finished"] else 2),
+                m["kick_off"] or "",
+            )
+        )
+        leagues = sorted({m["league"] for m in normalized if m["league"]})
+        data = {
+            "date": date_str,
+            "total": len(normalized),
+            "live_count": sum(1 for m in normalized if m["is_live"]),
+            "finished_count": sum(1 for m in normalized if m["is_finished"]),
+            "upcoming_count": sum(1 for m in normalized if not m["is_live"] and not m["is_finished"]),
+            "leagues": leagues,
+            "matches": normalized,
+        }
+        _daily_ticker_cache[date_str] = {"ts": time.time(), "data": data}
+        return data
+
+
+def _today_iso() -> str:
+    return datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d")
+
+
+@ext_router.get("/sports/daily")
+async def sports_daily(date: str = Query("", description="YYYY-MM-DD (default: today)")):
+    """Proxy + normalize the daily fixtures ticker (used by the Sports tab bandeau)."""
+    d = (date or "").strip() or _today_iso()
+    # Basic validation
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", d):
+        raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
+    return await _fetch_daily_ticker(d)
+
+
+@ext_router.get("/v1/public/sports/daily")
+async def public_sports_daily(date: str = Query("")):
+    return await sports_daily(date=date)

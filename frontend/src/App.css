@@ -1218,3 +1218,674 @@
   background: linear-gradient(135deg, #ff2e63, #ff5470);
   border-color: rgba(255, 46, 99, 0.7);
 }
+
+
+/* ===========================================================
+ * v2 — Modern unified TopBar + EPG + SportsTicker + page accents
+ * =========================================================== */
+
+:root {
+  --accent: #ff2e63;
+}
+
+/* The background overlay tint adapts to the page accent. */
+.ns-bg::after {
+  background:
+    radial-gradient(ellipse at 30% 0%, color-mix(in srgb, var(--accent) 16%, transparent) 0%, transparent 55%),
+    radial-gradient(ellipse at 80% 100%, color-mix(in srgb, var(--accent) 8%, transparent) 0%, transparent 60%),
+    linear-gradient(180deg, rgba(4, 4, 9, 0.86) 0%, rgba(4, 4, 9, 0.94) 60%, rgba(4, 4, 9, 0.98) 100%);
+}
+
+/* ---------- TopBar ---------- */
+.topbar-root {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  isolation: isolate;
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  background: linear-gradient(180deg, rgba(8, 8, 14, 0.88) 0%, rgba(8, 8, 14, 0.70) 100%);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  box-shadow: 0 10px 28px -18px rgba(0, 0, 0, 0.8);
+}
+.topbar-accent {
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 2px;
+  background: linear-gradient(90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--accent) 70%, transparent) 18%,
+    var(--accent) 50%,
+    color-mix(in srgb, var(--accent) 70%, transparent) 82%,
+    transparent 100%);
+  opacity: 0.85;
+  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--accent) 60%, transparent));
+}
+.topbar-inner {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 12px 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+@media (min-width: 640px) { .topbar-inner { padding: 12px 24px; gap: 10px; } }
+
+.topbar-back {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px; height: 36px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: white;
+  transition: all 0.18s;
+  flex-shrink: 0;
+}
+.topbar-back:hover {
+  background: color-mix(in srgb, var(--accent) 22%, rgba(255,255,255,0.06));
+  border-color: color-mix(in srgb, var(--accent) 50%, rgba(255,255,255,0.1));
+  transform: translateX(-1px);
+}
+
+.topbar-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  text-decoration: none;
+}
+.topbar-logo {
+  height: 28px;
+  width: auto;
+  user-select: none;
+  filter: drop-shadow(0 0 12px color-mix(in srgb, var(--accent) 35%, transparent));
+}
+@media (min-width: 640px) { .topbar-logo { height: 30px; } }
+
+.topbar-sublabel {
+  display: none;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, rgba(255,255,255,0.02));
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, rgba(255,255,255,0.06));
+}
+@media (min-width: 640px) { .topbar-sublabel { display: inline-flex; } }
+
+.topbar-search {
+  position: relative;
+  flex: 1;
+  max-width: 420px;
+  margin: 0 auto;
+}
+.topbar-search-mobile {
+  position: relative;
+  padding: 0 16px 12px 16px;
+}
+.topbar-search-icon {
+  position: absolute;
+  left: 14px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: rgba(255, 255, 255, 0.45);
+  pointer-events: none;
+}
+.topbar-search-mobile .topbar-search-icon { left: 30px; }
+.topbar-search-input {
+  width: 100%;
+  padding: 9px 36px 9px 38px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: white;
+  font-size: 13.5px;
+  transition: all 0.18s;
+}
+.topbar-search-input::placeholder { color: rgba(255, 255, 255, 0.42); }
+.topbar-search-input:focus {
+  outline: none;
+  background: rgba(255, 255, 255, 0.08);
+  border-color: color-mix(in srgb, var(--accent) 55%, rgba(255,255,255,0.08));
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.topbar-search-clear {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 22px; height: 22px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.7);
+  background: rgba(255, 255, 255, 0.08);
+  border: none;
+  font-size: 16px;
+  cursor: pointer;
+  line-height: 1;
+  padding-bottom: 2px;
+}
+.topbar-search-mobile .topbar-search-clear { right: 26px; }
+.topbar-search-clear:hover { background: rgba(255, 255, 255, 0.16); color: white; }
+
+.topbar-actions {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.topbar-stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 12px;
+}
+.topbar-stat > svg { color: var(--accent); flex-shrink: 0; }
+.topbar-stat-value {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: white;
+}
+.topbar-stat-label {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: rgba(255, 255, 255, 0.5);
+}
+.topbar-stat-live {
+  background: rgba(16, 185, 129, 0.10);
+  border-color: rgba(16, 185, 129, 0.30);
+}
+.topbar-stat-live .topbar-stat-value { color: #34d399; }
+.topbar-live-dot {
+  width: 7px; height: 7px;
+  border-radius: 999px;
+  background: #10b981;
+  box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.6);
+  animation: pulseDot 1.6s ease-out infinite;
+}
+@keyframes pulseDot {
+  0%   { box-shadow: 0 0 0 0    rgba(16, 185, 129, 0.55); }
+  70%  { box-shadow: 0 0 0 7px  rgba(16, 185, 129, 0);    }
+  100% { box-shadow: 0 0 0 0    rgba(16, 185, 129, 0);    }
+}
+
+.topbar-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 12.5px;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+  transition: all 0.18s ease;
+}
+.topbar-pill > svg { color: var(--accent); }
+.topbar-pill:hover {
+  background: color-mix(in srgb, var(--accent) 14%, rgba(255,255,255,0.06));
+  border-color: color-mix(in srgb, var(--accent) 45%, rgba(255,255,255,0.08));
+  color: white;
+  transform: translateY(-1px);
+}
+.topbar-pill.is-active {
+  background: color-mix(in srgb, var(--accent) 18%, rgba(255,255,255,0.04));
+  border-color: color-mix(in srgb, var(--accent) 55%, rgba(255,255,255,0.08));
+  color: white;
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.topbar-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px; height: 34px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: white;
+  cursor: pointer;
+  transition: all 0.18s;
+}
+.topbar-icon-btn:hover {
+  background: color-mix(in srgb, var(--accent) 22%, rgba(255,255,255,0.06));
+  border-color: color-mix(in srgb, var(--accent) 50%, rgba(255,255,255,0.1));
+}
+
+/* ---------- Player EPG-now badge ---------- */
+.player-top-logo {
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  object-fit: contain;
+  background: rgba(255, 255, 255, 0.08);
+  padding: 4px;
+  flex-shrink: 0;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+}
+.epg-now {
+  margin-top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 540px;
+}
+.epg-now-current {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.epg-now-time {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.55);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  flex-shrink: 0;
+}
+.epg-now-title {
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.epg-now-cat {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.10em;
+  color: var(--accent, #ff2e63);
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent, #ff2e63) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent, #ff2e63) 35%, transparent);
+  flex-shrink: 0;
+}
+.epg-now-bar {
+  height: 3px;
+  background: rgba(255, 255, 255, 0.10);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.epg-now-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent, #ff2e63), color-mix(in srgb, var(--accent, #ff2e63) 60%, white));
+  border-radius: 999px;
+  transition: width 1s linear;
+  box-shadow: 0 0 8px color-mix(in srgb, var(--accent, #ff2e63) 55%, transparent);
+}
+.epg-now-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.55);
+  min-width: 0;
+}
+.epg-now-next {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+}
+.epg-now-next-arrow { color: rgba(255, 255, 255, 0.3); font-weight: 700; }
+.epg-now-next-time { color: rgba(255, 255, 255, 0.7); font-weight: 700; }
+.epg-now-next-title {
+  color: rgba(255, 255, 255, 0.62);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- Sports Ticker (bandeau matchs du jour) ---------- */
+.sports-ticker {
+  position: relative;
+  border-radius: 18px;
+  background:
+    radial-gradient(ellipse at top right, rgba(16, 185, 129, 0.10), transparent 60%),
+    linear-gradient(180deg, rgba(10, 10, 18, 0.78), rgba(8, 8, 14, 0.62));
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  backdrop-filter: blur(22px) saturate(160%);
+  -webkit-backdrop-filter: blur(22px) saturate(160%);
+  box-shadow: 0 18px 50px -22px rgba(0, 0, 0, 0.8);
+  padding: 14px 14px 12px 14px;
+  overflow: hidden;
+}
+.sports-ticker::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, #10b981 30%, #34d399 70%, transparent);
+  opacity: 0.7;
+}
+.sports-ticker-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.sports-ticker-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.85);
+}
+.sports-ticker-date {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 4px;
+}
+.sports-ticker-nav {
+  width: 26px; height: 26px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.7);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.sports-ticker-nav:hover { background: rgba(16, 185, 129, 0.15); border-color: rgba(16, 185, 129, 0.45); color: white; }
+.sports-ticker-day {
+  padding: 5px 12px;
+  border-radius: 999px;
+  background: rgba(16, 185, 129, 0.10);
+  border: 1px solid rgba(16, 185, 129, 0.30);
+  color: #34d399;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: capitalize;
+  cursor: pointer;
+  letter-spacing: 0.02em;
+}
+.sports-ticker-filters {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  flex-wrap: wrap;
+}
+.sports-ticker-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.65);
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.sports-ticker-filter:hover { color: white; border-color: rgba(255,255,255,0.16); }
+.sports-ticker-filter.is-active {
+  background: rgba(16, 185, 129, 0.16);
+  border-color: rgba(16, 185, 129, 0.45);
+  color: #34d399;
+}
+.sports-ticker-filter.is-hot {
+  border-color: rgba(239, 68, 68, 0.35);
+}
+.sports-ticker-filter-count {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.7);
+  min-width: 18px;
+  text-align: center;
+}
+.sports-ticker-filter.is-active .sports-ticker-filter-count {
+  background: rgba(16, 185, 129, 0.22);
+  color: #6ee7b7;
+}
+.sports-ticker-filter.is-hot .sports-ticker-filter-count {
+  background: rgba(239, 68, 68, 0.20);
+  color: #fca5a5;
+  animation: pulseDot 1.6s ease-out infinite;
+}
+
+.sports-ticker-body {
+  position: relative;
+  margin: 0 -4px;
+}
+.sports-ticker-arrow {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 5;
+  width: 28px; height: 28px;
+  border-radius: 999px;
+  background: rgba(15, 15, 22, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: white;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4);
+  transition: all 0.15s;
+}
+.sports-ticker-arrow:hover { background: rgba(16, 185, 129, 0.85); border-color: rgba(16, 185, 129, 0.9); }
+.sports-ticker-arrow.left  { left: -10px; }
+.sports-ticker-arrow.right { right: -10px; }
+@media (min-width: 768px) { .sports-ticker-arrow { display: inline-flex; } }
+
+.sports-ticker-track {
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  scroll-snap-type: x mandatory;
+  padding: 2px 4px 10px 4px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,0.18) transparent;
+}
+.sports-ticker-track::-webkit-scrollbar { height: 6px; }
+.sports-ticker-track::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 6px; }
+.sports-ticker-empty {
+  padding: 22px;
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 13px;
+  text-align: center;
+  width: 100%;
+}
+
+.sports-ticker-card {
+  flex: 0 0 240px;
+  scroll-snap-align: start;
+  background: rgba(15, 15, 24, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 14px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition: all 0.18s;
+  position: relative;
+  overflow: hidden;
+}
+.sports-ticker-card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(16, 185, 129, 0.35);
+  background: rgba(20, 22, 30, 0.78);
+}
+.sports-ticker-card.live {
+  border-color: rgba(239, 68, 68, 0.40);
+  background: rgba(40, 12, 12, 0.55);
+}
+.sports-ticker-card.live::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse at top right, rgba(239, 68, 68, 0.18), transparent 60%);
+  pointer-events: none;
+}
+.sports-ticker-card.finished { opacity: 0.78; }
+
+.sports-ticker-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 10.5px;
+}
+.sports-ticker-card-league {
+  color: rgba(255, 255, 255, 0.5);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
+}
+.sports-ticker-card-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  flex-shrink: 0;
+  font-size: 10.5px;
+}
+.sports-ticker-card-status.upcoming {
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.sports-ticker-card-status.live {
+  background: rgba(239, 68, 68, 0.18);
+  color: #fca5a5;
+  border: 1px solid rgba(239, 68, 68, 0.45);
+}
+.sports-ticker-card-status.finished {
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.sports-ticker-live-dot {
+  width: 6px; height: 6px;
+  background: #ef4444;
+  border-radius: 999px;
+  animation: pulseDotRed 1.4s ease-out infinite;
+}
+@keyframes pulseDotRed {
+  0%   { box-shadow: 0 0 0 0   rgba(239, 68, 68, 0.55); }
+  70%  { box-shadow: 0 0 0 6px rgba(239, 68, 68, 0);    }
+  100% { box-shadow: 0 0 0 0   rgba(239, 68, 68, 0);    }
+}
+
+.sports-ticker-card-teams {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.sports-ticker-team {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.sports-ticker-team-logo {
+  width: 22px;
+  height: 22px;
+  object-fit: contain;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 6px;
+  padding: 2px;
+  flex-shrink: 0;
+}
+.sports-ticker-team-placeholder {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  flex-shrink: 0;
+}
+.sports-ticker-team-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.92);
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sports-ticker-score {
+  font-size: 16px;
+  font-weight: 800;
+  color: rgba(255, 255, 255, 0.85);
+  font-variant-numeric: tabular-nums;
+  padding: 0 4px;
+  min-width: 20px;
+  text-align: right;
+  flex-shrink: 0;
+}
+.sports-ticker-score.win {
+  color: #fef3c7;
+  text-shadow: 0 0 8px rgba(251, 191, 36, 0.4);
+}
+
+/* ---------- Pseudo-fullscreen for iframe (iOS / older browsers) ---------- */
+.player-shell.pseudo-fs {
+  z-index: 9999;
+  padding: 0;
+}
+.player-shell.pseudo-fs .player-frame {
+  width: 100vw;
+  height: 100dvh;
+  max-width: none;
+  border-radius: 0;
+  aspect-ratio: auto;
+}
+
+/* ---------- Page-level accent variables ---------- */
+[data-testid="topbar-tv"]        ~ * .ns-bg::after { /* fallback noop */ }
+
+/* Apply --accent at <body> level depending on which TopBar variant is mounted.
+ * We use :has() for modern browsers (Chrome/Safari/FF 121+). */
+body:has([data-testid="topbar-tv"])        { --accent: #ff2e63; }
+body:has([data-testid="topbar-daddy"])     { --accent: #ff8a00; }
+body:has([data-testid="topbar-sports"])    { --accent: #10b981; }
+body:has([data-testid="topbar-football"])  { --accent: #ef4444; }
+body:has([data-testid="topbar-bosstv"])    { --accent: #d946ef; }
+body:has([data-testid="topbar-multiview"]) { --accent: #6366f1; }
+body:has([data-testid="topbar-docs"])      { --accent: #06b6d4; }
+body:has([data-testid="topbar-admin"])     { --accent: #8b5cf6; }
+body:has([data-testid="topbar-dashboard"]) { --accent: #22d3ee; }

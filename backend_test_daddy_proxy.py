@@ -13,7 +13,7 @@ import requests
 from urllib.parse import urlparse, parse_qs
 
 # Backend URL from frontend/.env
-BACKEND_URL = os.getenv("REACT_APP_BACKEND_URL", "https://universal-player-16.preview.emergentagent.com")
+BACKEND_URL = os.getenv("REACT_APP_BACKEND_URL", "https://player-ui-redesign.preview.emergentagent.com")
 BASE_URL = f"{BACKEND_URL}/api"
 
 # Test configuration

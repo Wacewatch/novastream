@@ -20,6 +20,17 @@ import {
   Server,
 } from "lucide-react";
 import { toast } from "sonner";
+import { EpgNowBadge } from "@/components/TopBar";
+
+// Detect iOS / iPadOS — Safari there doesn't support standard Fullscreen API
+// on arbitrary containers; we must call webkitEnterFullscreen() on the <video>.
+const isIOS = () => {
+  if (typeof navigator === "undefined") return false;
+  const ua = navigator.userAgent || "";
+  if (/iP(hone|od|ad)/.test(ua)) return true;
+  // iPadOS 13+ masquerades as Mac with touch points
+  return ua.includes("Mac") && navigator.maxTouchPoints > 1;
+};
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || window.location.origin;
 
@@ -202,9 +213,26 @@ export default function VideoPlayer({
   }, [onStarted]);
 
   useEffect(() => {
-    const handler = () => setIsFullscreen(!!document.fullscreenElement);
+    const handler = () =>
+      setIsFullscreen(!!(document.fullscreenElement || document.webkitFullscreenElement));
     document.addEventListener("fullscreenchange", handler);
-    return () => document.removeEventListener("fullscreenchange", handler);
+    document.addEventListener("webkitfullscreenchange", handler);
+    // iOS native video fullscreen
+    const v = videoRef.current;
+    const onBegin = () => setIsFullscreen(true);
+    const onEnd = () => setIsFullscreen(false);
+    if (v) {
+      v.addEventListener("webkitbeginfullscreen", onBegin);
+      v.addEventListener("webkitendfullscreen", onEnd);
+    }
+    return () => {
+      document.removeEventListener("fullscreenchange", handler);
+      document.removeEventListener("webkitfullscreenchange", handler);
+      if (v) {
+        v.removeEventListener("webkitbeginfullscreen", onBegin);
+        v.removeEventListener("webkitendfullscreen", onEnd);
+      }
+    };
   }, []);
 
   // Close menu on outside click
@@ -250,11 +278,34 @@ export default function VideoPlayer({
   };
 
   const toggleFullscreen = () => {
-    if (!containerRef.current) return;
-    if (document.fullscreenElement) {
-      document.exitFullscreen();
+    const video = videoRef.current;
+    const container = containerRef.current;
+    // iOS Safari: standard Fullscreen API on the container is ignored.
+    // Use the native video element's webkitEnterFullscreen() — that's the only
+    // path that actually goes fullscreen on iPhone / older iPad Safari.
+    if (isIOS()) {
+      try {
+        if (video && typeof video.webkitEnterFullscreen === "function") {
+          // Make sure controls show natively while in fullscreen.
+          video.setAttribute("controls", "controls");
+          video.webkitEnterFullscreen();
+          // Remove our 'controls' attr once user exits (iOS fires webkitendfullscreen)
+          const onExit = () => {
+            video.removeAttribute("controls");
+            video.removeEventListener("webkitendfullscreen", onExit);
+          };
+          video.addEventListener("webkitendfullscreen", onExit);
+          return;
+        }
+      } catch (_) { /* fall through to standard API */ }
+    }
+    if (!container) return;
+    const doc = document;
+    const inFs = doc.fullscreenElement || doc.webkitFullscreenElement;
+    if (inFs) {
+      (doc.exitFullscreen || doc.webkitExitFullscreen)?.call(doc);
     } else {
-      containerRef.current.requestFullscreen?.();
+      (container.requestFullscreen || container.webkitRequestFullscreen)?.call(container);
     }
   };
 
@@ -392,11 +443,24 @@ export default function VideoPlayer({
         <div className={`player-controls ${controlsVisible ? "visible" : ""}`}>
           {/* Top bar */}
           <div className="player-top">
-            <div className="flex items-center gap-3 min-w-0">
-              <span className="live-badge"><span className="dot" />En direct</span>
-              <h3 className="text-white text-base font-semibold truncate" data-testid="player-channel-name">
-                {channel?.name}
-              </h3>
+            <div className="flex items-center gap-3 min-w-0 flex-1">
+              {channel?.logo ? (
+                <img
+                  src={channel.logo}
+                  alt=""
+                  className="player-top-logo"
+                  onError={(e) => { e.currentTarget.style.display = "none"; }}
+                />
+              ) : null}
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="live-badge"><span className="dot" />En direct</span>
+                  <h3 className="text-white text-base font-semibold truncate" data-testid="player-channel-name">
+                    {channel?.name}
+                  </h3>
+                </div>
+                <EpgNowBadge channelName={channel?.name || ""} />
+              </div>
             </div>
             <button onClick={onClose} className="player-btn" data-testid="player-close-btn" aria-label="Fermer">
               <X size={20} />
