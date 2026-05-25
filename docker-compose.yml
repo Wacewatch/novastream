@@ -6,7 +6,6 @@
 #   - novastream-mongo : stockage views + referrers
 #   - novastream-redis : cache partagé (resolve + playlists HLS), TTL natif
 # =========================================================================
-
 services:
   mongo:
     image: mongo:4.4
@@ -108,6 +107,10 @@ services:
       UVICORN_WORKERS: ${UVICORN_WORKERS:-4}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       STATIC_DIR: /app/static
+      # malloc tuning — force Python à rendre la mémoire à l'OS après libération
+      MALLOC_TRIM_THRESHOLD_: "65536"
+      MALLOC_MMAP_THRESHOLD_: "131072"
+      PYTHONMALLOC: "malloc"
     mem_swappiness: 0
     networks:
       - novastream_internal
@@ -115,7 +118,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 4G
+          memory: 6G
         reservations:
           memory: 512M
     logging:
