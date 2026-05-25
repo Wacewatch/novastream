@@ -1777,6 +1777,12 @@ init_extensions(
 )
 api_router.include_router(ext_router)
 
+# ----------------- EPG (XMLTV index for in-player programme info) -----------------
+from epg import epg_router, init_epg  # noqa: E402
+
+init_epg(get_http_client=get_http_client)
+api_router.include_router(epg_router)
+
 
 # ----------------- App setup -----------------
 app.include_router(api_router)

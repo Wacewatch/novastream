@@ -27,12 +27,12 @@ export default function UserMenu() {
     return (
       <Link
         to="/login"
-        className="player-btn inline-flex items-center gap-1.5 px-3"
+        className="topbar-pill"
         data-testid="login-btn"
         title="Se connecter"
       >
-        <LogIn size={16} />
-        <span className="hidden sm:inline text-sm">Connexion</span>
+        <LogIn size={13} />
+        <span className="hidden sm:inline text-xs">Connexion</span>
       </Link>
     );
   }
