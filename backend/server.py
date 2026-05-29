@@ -120,6 +120,46 @@ STATS_TTL = 3.0                       # cache stats aggregation for 3 s
 _stats_cache: Dict[str, Any] = {"data": None, "exp": 0.0}
 _stats_lock = asyncio.Lock()
 
+# ----------------- Generic JSON cache (Redis + in-memory fallback) -----------------
+# Used to cache the EXPENSIVE admin analytics aggregations (top-referrers full
+# group, stats-timeseries, global-stats) so the admin dashboard — which polls
+# these endpoints — does not re-run a full-collection scan on every poll. The
+# cache is shared across uvicorn workers when Redis is available.
+import json as _json_cache  # noqa: E402
+
+_mem_cache: Dict[str, Tuple[Any, float]] = {}
+
+async def _cache_get_json(key: str) -> Optional[Any]:
+    r = await get_redis()
+    if r is not None:
+        try:
+            raw = await r.get(key)
+            if raw is not None:
+                if isinstance(raw, (bytes, bytearray)):
+                    raw = raw.decode("utf-8")
+                return _json_cache.loads(raw)
+        except Exception:
+            pass
+    ent = _mem_cache.get(key)
+    if ent and ent[1] > time.time():
+        return ent[0]
+    return None
+
+async def _cache_set_json(key: str, value: Any, ttl: int) -> None:
+    r = await get_redis()
+    if r is not None:
+        try:
+            await r.set(key, _json_cache.dumps(value), ex=ttl)
+            return
+        except Exception:
+            pass
+    # memory fallback (also keep a bounded copy to avoid unbounded growth)
+    _mem_cache[key] = (value, time.time() + ttl)
+    if len(_mem_cache) > 256:
+        now_ = time.time()
+        for k in [k for k, v in _mem_cache.items() if v[1] <= now_][:128]:
+            _mem_cache.pop(k, None)
+
 
 def _client_ip(request: Request) -> str:
     """Best-effort client IP behind reverse-proxies (Kubernetes ingress).
@@ -200,11 +240,20 @@ async def _compute_stats() -> Dict[str, Any]:
         if _stats_cache["data"] and _stats_cache["exp"] > time.time():
             return _stats_cache["data"]
         live_threshold = datetime.now(timezone.utc) - LIVE_WINDOW
-        # 24h total (the TTL index keeps the collection at 24h naturally)
+        # "24h total" must count ONLY the last 24h. The TTL index on `ts` keeps
+        # ~400 days of history, so count_documents({}) would return the ALL-TIME
+        # total — that was the source of the "incohérence" (the /24h figure shown
+        # in the admin and on the public homepage was actually all-time).
+        since_24h = datetime.now(timezone.utc) - timedelta(hours=24)
         try:
-            total_24h = await db.views.count_documents({})
+            total_24h = await db.views.count_documents({"ts": {"$gte": since_24h}})
         except Exception:
             total_24h = 0
+        # All-time total of recorded plays (fast: uses collection metadata).
+        try:
+            total_all_time = await db.views.estimated_document_count()
+        except Exception:
+            total_all_time = 0
         # Per-channel live counts (+ members count globally)
         per_channel: Dict[str, int] = {}
         members_live = 0
@@ -226,6 +275,7 @@ async def _compute_stats() -> Dict[str, Any]:
         guests_live = max(0, live_total - members_live)
         data = {
             "total_24h": total_24h,
+            "total_all_time": total_all_time,
             "live_total": live_total,
             "members_live": members_live,
             "guests_live": guests_live,
@@ -800,6 +850,7 @@ async def get_stats():
     stats = await _compute_stats()
     return {
         "total_24h": stats["total_24h"],
+        "total_all_time": stats.get("total_all_time", 0),
         "live_total": stats["live_total"],
         "per_channel": stats.get("per_channel", {}),
     }
@@ -1500,6 +1551,7 @@ async def admin_live_stats(authorization: Optional[str] = Header(None)):
     stats = await _compute_stats()
     live_total = stats.get("live_total", 0)
     total_24h = stats.get("total_24h", 0)
+    total_all_time = stats.get("total_all_time", 0)
     per_channel = stats.get("per_channel", {})
 
     # Map per_channel counts to channel names (top 10)
@@ -1523,57 +1575,116 @@ async def admin_live_stats(authorization: Optional[str] = Header(None)):
         "members_online": stats.get("members_live", 0),
         "guests_online": stats.get("guests_live", live_total),
         "total_24h": total_24h,
+        "total_all_time": total_all_time,
         "top_channels": top_channels,
     }
 
 
 @api_router.get("/admin/top-referrers")
-async def admin_top_referrers(authorization: Optional[str] = Header(None), hours: int = 0, limit: int = 10):
-    """Top HTTP Referer hosts (admin-only).
+async def admin_top_referrers(
+    authorization: Optional[str] = Header(None),
+    hours: int = 0,
+    limit: int = 20,
+    offset: int = 0,
+    sort: str = "count",   # count | last | first
+    order: str = "desc",   # desc | asc
+):
+    """Top HTTP Referer hosts (admin-only), paginated & sortable.
 
-    * hours = 0 (default): all-time stats.
-    * hours > 0: restricts to the last N hours (capped to 30 days).
+    Query params:
+      * hours  — 0 (default) = all-time; >0 restricts to the last N hours
+                 (capped to 365 days).
+      * limit  — page size (1..100, default 20).
+      * offset — number of hosts to skip (pagination).
+      * sort   — "count" (call quantity, default), "last" (last call),
+                 "first" (first call).
+      * order  — "desc" (default) or "asc".
 
-    For each host we return the total call count + the timestamps of the
-    first and last calls (ISO-8601 UTC strings, suitable for new Date(...)
-    on the front-end)."""
+    For each host we return the total call count + the timestamps of the first
+    and last calls (ISO-8601 UTC strings). The FULL grouped list (every host) is
+    computed in a single aggregation and cached for 60 s, then sorted & sliced
+    in-process — so changing the page or the sort is instant and the heavy
+    full-collection scan runs at most once per minute regardless of polling.
+    """
     jwt = (authorization or "").removeprefix("Bearer ").strip()
     await _require_admin(jwt)
 
-    match_stage = {}
-    if hours and hours > 0:
-        since = datetime.now(timezone.utc) - timedelta(hours=min(hours, 24 * 30))
-        match_stage = {"$match": {"ts": {"$gte": since}}}
+    hours = max(0, min(int(hours or 0), 24 * 365))
+    limit = max(1, min(int(limit or 20), 100))
+    offset = max(0, int(offset or 0))
+    sort = sort if sort in ("count", "last", "first") else "count"
+    order = "asc" if (order or "").lower() == "asc" else "desc"
 
-    try:
-        pipeline = []
-        if match_stage:
-            pipeline.append(match_stage)
-        pipeline += [
-            {"$group": {
-                "_id": "$host",
-                "n": {"$sum": 1},
-                "first": {"$min": "$ts"},
-                "last": {"$max": "$ts"},
-            }},
-            {"$sort": {"n": -1}},
-            {"$limit": max(1, min(limit, 50))},
-        ]
-        rows = []
-        async for r in db.referrers.aggregate(pipeline):
-            first_dt = r.get("first")
-            last_dt = r.get("last")
-            rows.append({
-                "host": r["_id"],
-                "count": r["n"],
-                "first_call": first_dt.isoformat() if first_dt else None,
-                "last_call": last_dt.isoformat() if last_dt else None,
-            })
-    except Exception as e:
-        logger.warning(f"top-referrers aggregate failed: {e}")
-        rows = []
+    cache_key = f"ns:referrers:full:{hours}"
+    full = await _cache_get_json(cache_key)
+    if full is None:
+        match_stage: Dict[str, Any] = {}
+        if hours > 0:
+            since = datetime.now(timezone.utc) - timedelta(hours=hours)
+            match_stage = {"$match": {"ts": {"$gte": since}}}
+        full = []
+        try:
+            pipeline: List[Dict[str, Any]] = []
+            if match_stage:
+                pipeline.append(match_stage)
+            pipeline += [
+                {"$group": {
+                    "_id": "$host",
+                    "n": {"$sum": 1},
+                    "first": {"$min": "$ts"},
+                    "last": {"$max": "$ts"},
+                }},
+                {"$sort": {"n": -1}},
+            ]
+            async for r in db.referrers.aggregate(pipeline, allowDiskUse=True):
+                if not r.get("_id"):
+                    continue
+                first_dt = r.get("first")
+                last_dt = r.get("last")
+                full.append({
+                    "host": r["_id"],
+                    "count": int(r.get("n") or 0),
+                    "first_call": first_dt.isoformat() if first_dt else None,
+                    "last_call": last_dt.isoformat() if last_dt else None,
+                })
+            await _cache_set_json(cache_key, full, 60)
+        except Exception as e:
+            logger.warning(f"top-referrers aggregate failed: {e}")
+            full = []
 
-    return {"referrers": rows, "window_hours": hours, "all_time": hours == 0}
+    # Sort in-process. For date sorts, missing timestamps go to the bottom
+    # (treated as the most extreme value in the opposite direction).
+    reverse = order == "desc"
+
+    def _date_key(row: Dict[str, Any], field: str) -> str:
+        v = row.get(field)
+        # ISO-8601 strings sort chronologically as plain strings (same UTC offset).
+        # Empty string sorts before any real date; we push None to the far end so
+        # hosts without a timestamp never crowd the top.
+        if v:
+            return v
+        return "" if reverse else "9999"
+
+    if sort == "count":
+        full_sorted = sorted(full, key=lambda x: x.get("count", 0), reverse=reverse)
+    elif sort == "last":
+        full_sorted = sorted(full, key=lambda x: _date_key(x, "last_call"), reverse=reverse)
+    else:  # first
+        full_sorted = sorted(full, key=lambda x: _date_key(x, "first_call"), reverse=reverse)
+
+    total = len(full_sorted)
+    page = full_sorted[offset:offset + limit]
+
+    return {
+        "referrers": page,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "sort": sort,
+        "order": order,
+        "window_hours": hours,
+        "all_time": hours == 0,
+    }
 
 
 @api_router.get("/admin/stats-timeseries")
@@ -1637,28 +1748,55 @@ async def admin_stats_timeseries(
 
     date_fmt = "%Y-%m-%dT%H:00:00Z" if bucket == "hour" else "%Y-%m-%dT00:00:00Z"
 
+    # Serve from cache if fresh. The heavy aggregation (full scan + $addToSet of
+    # client IPs, up to a year of data) runs at most once per minute per range,
+    # instead of on every 30-60 s dashboard refresh.
+    cache_key = f"ns:timeseries:{rng}"
+    cached = await _cache_get_json(cache_key)
+    if cached is not None:
+        return cached
+
+    # Single pass over the matched docs:
+    #   * byBucket    — per-bucket counts (+ per-bucket distinct IPs for the chart)
+    #   * rangeUnique — distinct IPs over the WHOLE range (only the COUNT is
+    #                   returned, so the big IP set never crosses the wire). This
+    #                   is the correct "unique visitors over the period" figure;
+    #                   summing the per-bucket uniques would double-count anyone
+    #                   active on more than one day.
     pipeline = [
         {"$match": {"ts": {"$gte": start}}},
-        {"$group": {
-            "_id": {
-                "$dateToString": {
-                    "format": "%Y-%m-%dT%H:00:00Z" if bucket == "hour" else "%Y-%m-%dT00:00:00Z",
-                    "date": "$ts",
-                    "timezone": "UTC",
-                }
-            },
-            "total": {"$sum": 1},
-            "members_raw": {"$sum": {"$cond": [{"$eq": ["$is_member", True]}, 1, 0]}},
-            "vip_plays": {"$sum": {"$cond": [{"$eq": ["$is_vip", True]}, 1, 0]}},
-            "embed_plays": {"$sum": {"$cond": [{"$eq": ["$is_embed", True]}, 1, 0]}},
-            "ips": {"$addToSet": "$ip"},
+        {"$facet": {
+            "byBucket": [
+                {"$group": {
+                    "_id": {
+                        "$dateToString": {
+                            "format": "%Y-%m-%dT%H:00:00Z" if bucket == "hour" else "%Y-%m-%dT00:00:00Z",
+                            "date": "$ts",
+                            "timezone": "UTC",
+                        }
+                    },
+                    "total": {"$sum": 1},
+                    "members_raw": {"$sum": {"$cond": [{"$eq": ["$is_member", True]}, 1, 0]}},
+                    "vip_plays": {"$sum": {"$cond": [{"$eq": ["$is_vip", True]}, 1, 0]}},
+                    "embed_plays": {"$sum": {"$cond": [{"$eq": ["$is_embed", True]}, 1, 0]}},
+                    "ips": {"$addToSet": "$ip"},
+                }},
+                {"$sort": {"_id": 1}},
+            ],
+            "rangeUnique": [
+                {"$match": {"ip": {"$nin": [None, ""]}}},
+                {"$group": {"_id": None, "ips": {"$addToSet": "$ip"}}},
+                {"$project": {"_id": 0, "n": {"$size": "$ips"}}},
+            ],
         }},
-        {"$sort": {"_id": 1}},
     ]
 
     raw_by_t: Dict[str, Dict[str, Any]] = {}
+    range_unique_visitors = 0
     try:
-        async for r in db.views.aggregate(pipeline):
+        agg = await db.views.aggregate(pipeline, allowDiskUse=True).to_list(1)
+        facet = agg[0] if agg else {}
+        for r in facet.get("byBucket", []):
             ips = [ip for ip in (r.get("ips") or []) if ip]
             members_raw = int(r.get("members_raw") or 0)
             vip_plays = int(r.get("vip_plays") or 0)
@@ -1674,9 +1812,12 @@ async def admin_stats_timeseries(
                 "embed_plays": int(r.get("embed_plays") or 0),
                 "unique_visitors": len(set(ips)),
             }
+        ru = facet.get("rangeUnique") or []
+        range_unique_visitors = int(ru[0]["n"]) if ru else 0
     except Exception as e:
         logger.warning(f"stats-timeseries aggregate failed: {e}")
         raw_by_t = {}
+        range_unique_visitors = 0
 
     # Build the full bucket list (fill missing slots with zeros so the chart
     # is continuous even on empty days).
@@ -1698,13 +1839,18 @@ async def admin_stats_timeseries(
             totals[k] += b[k]
         cur += step
 
-    return {
+    result = {
         "range": rng,
         "bucket": bucket,
         "start": start.isoformat(),
         "buckets": buckets,
         "totals": totals,
+        # Correct distinct-visitors-over-the-whole-range count (NOT the sum of
+        # per-bucket uniques). The KPI card uses this value.
+        "range_unique_visitors": range_unique_visitors,
     }
+    await _cache_set_json(cache_key, result, 60)
+    return result
 
 
 @api_router.get("/admin/global-stats")
@@ -1712,6 +1858,10 @@ async def admin_global_stats(authorization: Optional[str] = Header(None)):
     """Total users, admins, vips, channels count (admin-only, uses Supabase service role)."""
     jwt = (authorization or "").removeprefix("Bearer ").strip()
     await _require_admin(jwt)
+
+    cached = await _cache_get_json("ns:global-stats")
+    if cached is not None:
+        return cached
 
     # Supabase counts via Prefer: count=exact, head request
     headers = {
@@ -1755,12 +1905,14 @@ async def admin_global_stats(authorization: Optional[str] = Header(None)):
     except Exception:
         total_channels = 0
 
-    return {
+    result = {
         "total_users": total_users,
         "admins": admins,
         "vips": vips,
         "total_channels": total_channels,
     }
+    await _cache_set_json("ns:global-stats", result, 60)
+    return result
 
 
 
