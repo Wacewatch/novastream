@@ -28,6 +28,12 @@ import {
   ToggleRight,
   ToggleLeft,
   LayoutDashboard,
+  ChevronLeft,
+  ChevronRight,
+  ArrowUp,
+  ArrowDown,
+  Hash,
+  Clock,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { supabase } from "@/lib/supabase";
@@ -59,6 +65,14 @@ export default function Admin() {
   const [liveStats, setLiveStats] = useState(null);
   const [referrers, setReferrers] = useState([]);
   const [globalStats, setGlobalStats] = useState(null);
+
+  // Referrers pagination / sorting
+  const REF_LIMIT = 20;
+  const [refSort, setRefSort] = useState("count");   // count | last | first
+  const [refOrder, setRefOrder] = useState("desc");  // desc | asc
+  const [refPage, setRefPage] = useState(0);
+  const [refTotal, setRefTotal] = useState(0);
+  const [refLoading, setRefLoading] = useState(false);
 
   // Football API keys module
   const [fbKeys, setFbKeys] = useState([]);
@@ -118,23 +132,55 @@ export default function Admin() {
     }
   }, []);
 
+  // Cheap real-time stats (polled every 5s): system + live only.
   const fetchAdminStats = useCallback(async () => {
     try {
       const headers = await authHeader();
-      const [sys, live, ref, glob] = await Promise.all([
+      const [sys, live] = await Promise.all([
         axios.get(`${API}/admin/system-stats`, { headers }).catch(() => ({ data: null })),
         axios.get(`${API}/admin/live-stats`, { headers }).catch(() => ({ data: null })),
-        axios.get(`${API}/admin/top-referrers?hours=0&limit=10`, { headers }).catch(() => ({ data: { referrers: [] } })),
-        axios.get(`${API}/admin/global-stats`, { headers }).catch(() => ({ data: null })),
       ]);
       if (sys.data) setSysStats(sys.data);
       if (live.data) setLiveStats(live.data);
-      setReferrers(ref.data?.referrers || []);
+    } catch (_) {
+      /* silent */
+    }
+  }, []);
+
+  // Heavier counts (polled every 60s; server-cached 60s).
+  const fetchGlobalStats = useCallback(async () => {
+    try {
+      const headers = await authHeader();
+      const glob = await axios.get(`${API}/admin/global-stats`, { headers }).catch(() => ({ data: null }));
       if (glob.data) setGlobalStats(glob.data);
     } catch (_) {
       /* silent */
     }
   }, []);
+
+  // Top referrers — paginated & sortable (server-cached 60s).
+  const fetchReferrers = useCallback(async () => {
+    setRefLoading(true);
+    try {
+      const headers = await authHeader();
+      const params = new URLSearchParams({
+        hours: "0",
+        limit: String(REF_LIMIT),
+        offset: String(refPage * REF_LIMIT),
+        sort: refSort,
+        order: refOrder,
+      });
+      const r = await axios
+        .get(`${API}/admin/top-referrers?${params.toString()}`, { headers })
+        .catch(() => ({ data: { referrers: [], total: 0 } }));
+      setReferrers(r.data?.referrers || []);
+      setRefTotal(r.data?.total ?? (r.data?.referrers?.length || 0));
+    } catch (_) {
+      /* silent */
+    } finally {
+      setRefLoading(false);
+    }
+  }, [refPage, refSort, refOrder]);
 
   // ========== Football API Keys ==========
   const reloadFbKeys = useCallback(async () => {
@@ -272,16 +318,38 @@ export default function Admin() {
     reloadFbKeys();
     reloadDaddyCfg();
     fetchAdminStats();
-    // Poll system/live stats every 5s
-    const t = setInterval(fetchAdminStats, 5000);
+    fetchGlobalStats();
+    // Real-time (cheap) stats every 5s; heavier counts every 60s.
+    const tFast = setInterval(fetchAdminStats, 5000);
+    const tSlow = setInterval(fetchGlobalStats, 60000);
+    return () => {
+      clearInterval(tFast);
+      clearInterval(tSlow);
+    };
+  }, [isAdmin, reloadUsers, reloadKeys, reloadFbKeys, reloadDaddyCfg, fetchAdminStats, fetchGlobalStats]);
+
+  // Referrers: refetch on sort/page change + light 30s auto-refresh.
+  useEffect(() => {
+    if (!isAdmin) return;
+    fetchReferrers();
+    const t = setInterval(fetchReferrers, 30000);
     return () => clearInterval(t);
-  }, [isAdmin, reloadUsers, reloadKeys, reloadFbKeys, reloadDaddyCfg, fetchAdminStats]);
+  }, [isAdmin, fetchReferrers]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return users;
     return users.filter((u) => (u.email || "").toLowerCase().includes(q));
   }, [users, search]);
+
+  // Only render the first N rows. Rendering tens of thousands of <tr> nodes
+  // (and re-rendering them on every 5s stats poll) was the main cause of the
+  // admin page feeling sluggish. Searching narrows the list to find anyone.
+  const USERS_RENDER_CAP = 100;
+  const displayedUsers = useMemo(
+    () => filtered.slice(0, USERS_RENDER_CAP),
+    [filtered],
+  );
 
   const stats = useMemo(() => {
     const total = globalStats?.total_users ?? users.length;
@@ -543,20 +611,54 @@ export default function Admin() {
 
         {/* Top Référents */}
         <section className="glass-heavy rounded-2xl p-5 border border-white/10" data-testid="admin-referrers-section">
-          <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center justify-between mb-4 gap-2 flex-wrap">
             <h3 className="text-lg font-bold flex items-center gap-2">
               <Globe size={18} className="text-cyan-400" /> Top Référents
-              <span className="text-sm font-normal text-white/40">/ Total</span>
+              {refLoading && <Loader2 size={13} className="animate-spin text-white/40" />}
             </h3>
-            <span className="text-xs text-white/40">{referrers.length} source(s)</span>
+            <span className="text-xs text-white/40">{refTotal.toLocaleString("fr-FR")} source(s)</span>
           </div>
+
+          {/* Sort controls */}
+          <div className="flex items-center gap-2 mb-4 flex-wrap" data-testid="referrers-sort">
+            <span className="text-[10px] uppercase tracking-wider text-white/40 mr-1">Trier par</span>
+            <div className="flex bg-white/[0.04] border border-white/10 rounded-lg p-0.5">
+              {[
+                { id: "count", label: "Quantité", Icon: Hash },
+                { id: "last", label: "Dernier appel", Icon: Clock },
+                { id: "first", label: "Premier appel", Icon: CalendarClock },
+              ].map(({ id, label, Icon }) => (
+                <button
+                  key={id}
+                  onClick={() => { setRefSort(id); setRefPage(0); }}
+                  className={`flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-md transition ${
+                    refSort === id ? "bg-cyan-400/20 text-cyan-300" : "text-white/55 hover:text-white"
+                  }`}
+                  data-testid={`ref-sort-${id}`}
+                >
+                  <Icon size={12} /> {label}
+                </button>
+              ))}
+            </div>
+            <button
+              onClick={() => { setRefOrder((o) => (o === "desc" ? "asc" : "desc")); setRefPage(0); }}
+              className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium rounded-lg border border-white/10 text-white/60 hover:text-white"
+              title={refOrder === "desc" ? "Décroissant" : "Croissant"}
+              data-testid="ref-order-toggle"
+            >
+              {refOrder === "desc" ? <ArrowDown size={13} /> : <ArrowUp size={13} />}
+              {refOrder === "desc" ? "Décroissant" : "Croissant"}
+            </button>
+          </div>
+
           {referrers.length === 0 ? (
             <p className="text-sm text-white/50 text-center py-4">Aucun référent enregistré pour l'instant.</p>
           ) : (
             <ol className="space-y-2" data-testid="referrers-list">
               {referrers.map((r, i) => {
-                const max = referrers[0]?.count || 1;
+                const max = Math.max(...referrers.map((x) => x.count || 0), 1);
                 const pct = (r.count / max) * 100;
+                const rank = refPage * REF_LIMIT + i + 1;
                 const fmt = (iso) => {
                   if (!iso) return "—";
                   try {
@@ -580,7 +682,7 @@ export default function Admin() {
                     />
                     <div className="relative flex items-center justify-between px-3 py-2 gap-3">
                       <span className="flex items-center gap-2 min-w-0 flex-1">
-                        <span className="text-white/40 text-xs tabular-nums w-5 shrink-0">#{i + 1}</span>
+                        <span className="text-white/40 text-xs tabular-nums w-7 shrink-0">#{rank}</span>
                         <Globe size={12} className="text-cyan-400 shrink-0" />
                         <span className="flex flex-col min-w-0">
                           <span className="text-white truncate text-sm">{r.host}</span>
@@ -600,6 +702,36 @@ export default function Admin() {
                 );
               })}
             </ol>
+          )}
+
+          {/* Pagination */}
+          {refTotal > REF_LIMIT && (
+            <div className="flex items-center justify-between mt-4 pt-3 border-t border-white/5" data-testid="referrers-pagination">
+              <span className="text-xs text-white/40 tabular-nums">
+                {refPage * REF_LIMIT + 1}–{Math.min((refPage + 1) * REF_LIMIT, refTotal)} sur {refTotal.toLocaleString("fr-FR")}
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setRefPage((p) => Math.max(0, p - 1))}
+                  disabled={refPage === 0 || refLoading}
+                  className="flex items-center gap-1 px-2.5 py-1.5 text-xs rounded-lg border border-white/10 text-white/70 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed"
+                  data-testid="ref-prev"
+                >
+                  <ChevronLeft size={14} /> Précédent
+                </button>
+                <span className="text-xs text-white/50 tabular-nums">
+                  {refPage + 1} / {Math.max(1, Math.ceil(refTotal / REF_LIMIT))}
+                </span>
+                <button
+                  onClick={() => setRefPage((p) => ((p + 1) * REF_LIMIT < refTotal ? p + 1 : p))}
+                  disabled={(refPage + 1) * REF_LIMIT >= refTotal || refLoading}
+                  className="flex items-center gap-1 px-2.5 py-1.5 text-xs rounded-lg border border-white/10 text-white/70 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed"
+                  data-testid="ref-next"
+                >
+                  Suivant <ChevronRight size={14} />
+                </button>
+              </div>
+            </div>
           )}
         </section>
 
@@ -982,7 +1114,7 @@ export default function Admin() {
                   </tr>
                 </thead>
                 <tbody>
-                  {filtered.map((u) => {
+                  {displayedUsers.map((u) => {
                     const role = u.role === "admin" ? "admin" : (u.role === "vip" || u.is_vip) ? "vip" : "member";
                     return (
                       <tr key={u.id} className="border-t border-white/5 hover:bg-white/[0.02]">
@@ -1036,6 +1168,12 @@ export default function Admin() {
                   })}
                 </tbody>
               </table>
+              {filtered.length > displayedUsers.length && (
+                <p className="text-xs text-white/40 text-center py-3 border-t border-white/5 mt-1">
+                  Affichage de {displayedUsers.length.toLocaleString("fr-FR")} sur{" "}
+                  {filtered.length.toLocaleString("fr-FR")} utilisateurs — affinez avec la recherche pour trouver un compte précis.
+                </p>
+              )}
             </div>
           )}
         </section>

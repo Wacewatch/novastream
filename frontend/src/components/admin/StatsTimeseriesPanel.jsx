@@ -91,7 +91,7 @@ export default function StatsTimeseriesPanel({ getAuthHeader }) {
 
   useEffect(() => {
     load();
-    const t = setInterval(load, 30000); // auto-refresh 30s
+    const t = setInterval(load, 60000); // auto-refresh 60s (server cache = 60s)
     return () => clearInterval(t);
   }, [load]);
 
@@ -116,7 +116,7 @@ export default function StatsTimeseriesPanel({ getAuthHeader }) {
           Statistiques détaillées
           {loading && <Loader2 size={14} className="animate-spin text-white/40" />}
           <span className="text-xs font-normal text-white/40 hidden sm:inline">
-            • auto-refresh 30 s
+            • auto-refresh 60 s
           </span>
         </h3>
         <div className="flex items-center gap-2">
@@ -177,7 +177,11 @@ export default function StatsTimeseriesPanel({ getAuthHeader }) {
               className="text-3xl font-extrabold tabular-nums"
               style={{ color }}
             >
-              {(totals[key] || 0).toLocaleString("fr-FR")}
+              {(
+                (key === "unique_visitors"
+                  ? (data?.range_unique_visitors ?? totals[key])
+                  : totals[key]) || 0
+              ).toLocaleString("fr-FR")}
             </p>
             <p className="text-[10px] text-white/35 mt-1">
               sur {RANGES.find((x) => x.id === range)?.label.toLowerCase()}
