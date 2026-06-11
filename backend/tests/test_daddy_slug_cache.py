@@ -11,7 +11,7 @@ import time
 import pytest
 import requests
 
-BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://player-ui-redesign.preview.emergentagent.com").rstrip("/")
+BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://secure-tv-pass.preview.emergentagent.com").rstrip("/")
 
 
 @pytest.fixture(scope="module")
