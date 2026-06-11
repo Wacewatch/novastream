@@ -743,26 +743,48 @@ async def _refresh_channels_async() -> None:
     finally:
         _cache["_refresh_in_progress"] = False
 
-async def resolve_stream(channel_url: str) -> str:
-    """Resolve channel -> signed HLS URL. Cached in Redis (TTL natif, partage
-    entre workers). Fallback memoire borne si Redis down."""
-    import hashlib
-    key = b"resolve:" + hashlib.md5(channel_url.encode()).hexdigest().encode()
-    r = await get_redis()
-    # 1) Cache hit
-    if r is not None:
-        try:
-            cached = await r.get(key)
-            if cached:
-                return cached.decode("utf-8")
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"redis get resolve failed: {e}")
-    else:
-        now = time.time()
-        c = _resolve_cache.get(channel_url)
-        if c and c[1] > now:
-            return c[0]
-    # 2) Miss -> upstream resolve
+# ──────────────────────────────────────────────────────────────────────────
+# External resolve proxy (deltawatch.php)
+# Per user request: TV channel resolution is delegated to a remote proxy that
+# manages its own vavoo signature pool. The proxy exposes
+# `?action=resolve&url=<channel_url>` and returns {"stream_url": "<m3u8>"}.
+# We fall back to direct vavoo.to/kool.to resolve if the proxy is unreachable.
+# ──────────────────────────────────────────────────────────────────────────
+DELTAWATCH_PROXY = os.environ.get(
+    "DELTAWATCH_PROXY",
+    "https://apis.wavewatch.top/deltawatch.php",
+)
+DELTAWATCH_TIMEOUT = float(os.environ.get("DELTAWATCH_TIMEOUT", "15"))
+
+async def _resolve_via_deltawatch(channel_url: str) -> Optional[str]:
+    """Ask the deltawatch.php proxy to resolve a channel URL. Returns the
+    signed HLS playlist URL on success, None on any failure (the caller is
+    responsible for falling back to a direct upstream resolve)."""
+    cx = await get_http_client()
+    try:
+        resp = await cx.get(
+            DELTAWATCH_PROXY,
+            params={"action": "resolve", "url": channel_url},
+            timeout=DELTAWATCH_TIMEOUT,
+        )
+        if resp.status_code != 200:
+            logger.warning(
+                f"deltawatch resolve non-200 ({resp.status_code}) for {channel_url}"
+            )
+            return None
+        data = resp.json()
+        if isinstance(data, dict):
+            stream = data.get("stream_url") or data.get("url")
+            if stream and isinstance(stream, str) and stream.startswith("http"):
+                return stream
+        return None
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"deltawatch resolve failed for {channel_url}: {e}")
+        return None
+
+async def _resolve_via_vavoo_direct(channel_url: str) -> Optional[str]:
+    """Legacy direct resolve against vavoo.to / kool.to. Used as a fallback if
+    the deltawatch proxy is unreachable."""
     sig = await get_signature()
     cx = await get_http_client()
     for base in UPSTREAM_BASES:
@@ -782,19 +804,58 @@ async def resolve_stream(channel_url: str) -> str:
             elif isinstance(data, dict):
                 stream_url = data.get("url") or data.get("streamUrl")
             if stream_url:
-                if r is not None:
-                    try:
-                        await r.set(key, stream_url.encode("utf-8"), ex=RESOLVE_TTL)
-                    except Exception as e:  # noqa: BLE001
-                        logger.warning(f"redis set resolve failed: {e}")
-                else:
-                    if len(_resolve_cache) > 5000:
-                        _resolve_cache.clear()
-                    _resolve_cache[channel_url] = (stream_url, time.time() + RESOLVE_TTL)
                 return stream_url
         except Exception as e:
-            logger.warning(f"resolve failed {base}: {e}")
-    raise HTTPException(status_code=502, detail="Flux non disponible")
+            logger.warning(f"vavoo direct resolve failed {base}: {e}")
+    return None
+
+async def resolve_stream(channel_url: str) -> str:
+    """Resolve channel -> signed HLS URL. Cached in Redis (TTL natif, partage
+    entre workers). Fallback memoire borne si Redis down.
+
+    Resolution strategy (per user request 2026-07):
+      1. Cache hit (Redis / in-memory)
+      2. deltawatch.php proxy (PRIMARY — owns its signature pool)
+      3. vavoo.to / kool.to direct (FALLBACK if proxy is unreachable)
+    """
+    import hashlib
+    key = b"resolve:" + hashlib.md5(channel_url.encode()).hexdigest().encode()
+    r = await get_redis()
+    # 1) Cache hit
+    if r is not None:
+        try:
+            cached = await r.get(key)
+            if cached:
+                return cached.decode("utf-8")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"redis get resolve failed: {e}")
+    else:
+        now = time.time()
+        c = _resolve_cache.get(channel_url)
+        if c and c[1] > now:
+            return c[0]
+
+    # 2) PRIMARY: deltawatch proxy
+    stream_url = await _resolve_via_deltawatch(channel_url)
+    # 3) FALLBACK: direct vavoo if proxy failed
+    if not stream_url:
+        logger.info(f"deltawatch proxy miss, falling back to direct vavoo for {channel_url}")
+        stream_url = await _resolve_via_vavoo_direct(channel_url)
+
+    if not stream_url:
+        raise HTTPException(status_code=502, detail="Flux non disponible")
+
+    # 4) Store in cache
+    if r is not None:
+        try:
+            await r.set(key, stream_url.encode("utf-8"), ex=RESOLVE_TTL)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"redis set resolve failed: {e}")
+    else:
+        if len(_resolve_cache) > 5000:
+            _resolve_cache.clear()
+        _resolve_cache[channel_url] = (stream_url, time.time() + RESOLVE_TTL)
+    return stream_url
 
 # ----------------- API Routes -----------------
 @api_router.get("/")
