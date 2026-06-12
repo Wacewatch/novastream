@@ -21,6 +21,11 @@ French live-TV streaming app (Vavoo-backed). User reported flaky UX (no loader, 
 - `/app/frontend/src/components/{ChannelCard, VideoPlayer, AdUnlockModal}.jsx`
 
 ## What's Been Implemented (latest first)
+### 2026-02-12 (session — fix: stale TV channel IDs break embeds on reload)
+- **Bug**: TV embeds (`/embed/{channel_id}`) worked on first load but returned `{"detail":"Chaîne introuvable"}` after a page reload / when bookmarked. Channel IDs are formatted `{raw_cid}-{md5_url_hash[:14]}` and the upstream-provided `raw_cid` portion is NOT stable across catalog refreshes (~15 min). The 14-char url-hash suffix IS stable. Old shared embed URLs / iframes therefore broke as soon as the in-memory catalog refreshed.
+- **Fix** (`/app/backend/server.py`): added `_find_channel(channels, channel_id)` helper which tries an exact `id` match first, then falls back to matching by the trailing 14-hex-char url-hash suffix. Wired into both `/api/v1/public/channel/{id}` and `/api/stream/{id}`. The stream endpoint now also returns the channel's *canonical* current id so stats stay consistent.
+- **Verified**: Both stale IDs from the user's screenshots (`...b28ff5c3-a2a36701e09a13` and `...b28fffc5e3-a2a36701e09a13`) now resolve to M6, the embed modal renders correctly, and the stream/HLS proxy returns the right signed URL. Truly unknown ids still 404.
+
 ### 2026-05-20 (current session #2 — UX polish + public API leak-proofing)
 - **DaddyTV iframe inside player overlay** (not full-page): `IframePlayer.jsx` rewritten to use `.player-shell > .player-frame` (16/9 centered, rounded, max 1280px), matching the HLS VideoPlayer layout. Top bar (logo/title/reload/external/fullscreen/close) floats over the iframe via absolute positioning.
 - **Public API leak-proofing**:

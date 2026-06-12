@@ -920,10 +920,38 @@ async def public_channels(
     result = [_public_channel(c, base) for c in out[:limit]]
     return {"total": len(result), "channels": result}
 
+def _find_channel(channels: List[Dict[str, Any]], channel_id: str) -> Optional[Dict[str, Any]]:
+    """Look up a channel by id with graceful fallback.
+
+    Channel IDs are formatted as `{raw_cid}-{14_hex_url_hash}`. The
+    `raw_cid` prefix comes from the upstream catalog and is NOT stable —
+    it can change between catalog refreshes (~15 min). The trailing
+    14-char md5-of-url suffix IS stable as long as the upstream URL
+    doesn't change. To keep previously-shared embed URLs / iframes
+    working after a catalog refresh we:
+      1) try an exact match first,
+      2) fall back to matching by the trailing url-hash suffix.
+    """
+    c = next((x for x in channels if x["id"] == channel_id), None)
+    if c:
+        return c
+    # Fallback: match by trailing 14-hex url-hash suffix (the stable part).
+    cid = (channel_id or "").strip()
+    suffix = cid.rsplit("-", 1)[-1].lower() if cid else ""
+    # Only accept the suffix if it looks like our 14-char hex url hash;
+    # otherwise we risk matching a wholly unrelated channel.
+    if len(suffix) == 14 and all(ch in "0123456789abcdef" for ch in suffix):
+        for x in channels:
+            xid = x.get("id") or ""
+            if xid.lower().endswith("-" + suffix) or xid.lower() == suffix:
+                return x
+    return None
+
+
 @api_router.get("/v1/public/channel/{channel_id}")
 async def public_channel(channel_id: str, request: Request):
     channels = await get_channels()
-    c = next((x for x in channels if x["id"] == channel_id), None)
+    c = _find_channel(channels, channel_id)
     if not c:
         raise HTTPException(status_code=404, detail="Chaîne introuvable")
     return _public_channel(c, _public_base(request))
@@ -947,7 +975,7 @@ async def get_stream_url(
                    /embed/{id} on this site or via a 3rd-party iframe)
     """
     channels = await get_channels()
-    channel = next((c for c in channels if c["id"] == channel_id), None)
+    channel = _find_channel(channels, channel_id)
     if not channel:
         raise HTTPException(status_code=404, detail="Chaîne introuvable")
     upstream = await resolve_stream(channel["url"])
@@ -957,8 +985,12 @@ async def get_stream_url(
         and len(authorization) > 20
     )
     user_id = _decode_jwt_sub(authorization) if is_member else None
+    # Use the channel's CURRENT canonical id for view tracking + response
+    # so stats and downstream caches stay consistent even when the caller
+    # used an older (raw_cid-changed) id that we resolved by url-hash.
+    canonical_id = channel["id"]
     asyncio.create_task(_record_view(
-        channel_id,
+        canonical_id,
         is_member=is_member,
         is_vip=bool(is_member and vip),
         is_embed=bool(embed),
@@ -966,7 +998,7 @@ async def get_stream_url(
         user_id=user_id,
     ))
     return {
-        "id": channel_id,
+        "id": canonical_id,
         "name": channel["name"],
         "proxy_url": f"/api/hls?u={quote(upstream, safe='')}",
     }
