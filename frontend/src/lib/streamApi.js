@@ -44,23 +44,41 @@ async function getCurrentProfile() {
 /**
  * Returns the "parent" page URL when we are running inside an iframe (e.g.
  * livewatch.top/embed/123 embedded by wavewatch.top). When NOT in an iframe
- * or when document.referrer is empty (Referrer-Policy: no-referrer), returns
- * "". This is what we forward to the backend as `?ref=…`.
+ * or when document.referrer is empty (Referrer-Policy: no-referrer), we fall
+ * back to `window.location.ancestorOrigins[0]` which gives the parent origin
+ * even when the parent has set a strict Referrer-Policy. This API is
+ * Chromium-only (~70% of users) — Firefox/Safari users with strict policy
+ * will still slip through. Returns "" when neither signal is available.
  */
 export function getParentReferrer() {
   try {
     const inIframe = window.self !== window.top;
     if (!inIframe) return "";
+    // 1) Standard document.referrer (works on Firefox/Safari/Chrome
+    //    when parent's Referrer-Policy allows it).
     const ref = document.referrer || "";
-    if (!ref) return "";
+    // 2) Chromium fallback: ancestorOrigins[0] is the IMMEDIATE parent
+    //    frame's origin. It is populated even when the parent sets
+    //    `<meta name="referrer" content="no-referrer">` or
+    //    `referrerpolicy="no-referrer"` on the iframe — which is why
+    //    sites like webflix.lol previously didn't appear in Top Référents.
+    let ancestor = "";
     try {
-      const r = new URL(ref);
+      const ao = window.location.ancestorOrigins;
+      if (ao && ao.length > 0) ancestor = ao[0] || "";
+    } catch (_) {
+      /* ignore */
+    }
+    const candidate = ref || ancestor;
+    if (!candidate) return "";
+    try {
+      const r = new URL(candidate);
       const own = new URL(window.location.href);
       if (r.host === own.host) return "";
     } catch {
       /* ignore */
     }
-    return ref;
+    return candidate;
   } catch {
     return "";
   }

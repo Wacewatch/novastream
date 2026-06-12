@@ -58,7 +58,7 @@ export default function Admin() {
   const [keysLoading, setKeysLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [generating, setGenerating] = useState(false);
-  const [genCount, setGenCount] = useState(5);
+  const [genCount, setGenCount] = useState(1);
 
   // New modules state
   const [sysStats, setSysStats] = useState(null);
