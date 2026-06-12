@@ -52,7 +52,7 @@ export default function Jack07Overlay({ match, detail: initialDetail, onClose })
     return () => { cancelled = true; };
   }, [matchId]);
 
-  // 2) Load streams (resolve all sources to playable URLs)
+  // 2) Load streams metadata (browser does the actual resolution)
   useEffect(() => {
     if (!matchId) return;
     let cancelled = false;
@@ -62,7 +62,7 @@ export default function Jack07Overlay({ match, detail: initialDetail, onClose })
       try {
         const r = await axios.get(`${API}/jack07/streams/${matchId}`);
         if (cancelled) return;
-        const list = (r.data?.streams || []).filter((s) => s.available && s.stream_url);
+        const list = (r.data?.streams || []).filter((s) => s.api_url);
         if (!list.length) {
           setStreamError("Aucune source disponible pour ce match");
           setStreams([]);
@@ -149,7 +149,7 @@ export default function Jack07Overlay({ match, detail: initialDetail, onClose })
             {/* ===== Player ===== */}
             {mode === "native" ? (
               <Jack07Player
-                streamUrl={activeStream?.stream_url}
+                apiUrl={activeStream?.api_url}
                 loading={loadingStreams}
                 error={streamError}
                 channelName={activeStream?.name || ""}
@@ -157,6 +157,23 @@ export default function Jack07Overlay({ match, detail: initialDetail, onClose })
               />
             ) : (
               <Jack07Iframe siteUrl={siteUrl} onBackToNative={() => setMode("native")} />
+            )}
+
+            {/* ===== Mode toggle — VISIBLE button per user request ===== */}
+            {siteUrl && (
+              <div className="flex justify-center">
+                <button
+                  onClick={() => setMode((m) => (m === "native" ? "iframe" : "native"))}
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white/5 border border-white/15 text-white/85 text-xs font-semibold hover:bg-white/10 transition"
+                  data-testid="jack07-toggle-mode"
+                >
+                  {mode === "native" ? (
+                    <>Basculer sur le lecteur Jack07 (iframe)</>
+                  ) : (
+                    <>Revenir au lecteur direct (natif)</>
+                  )}
+                </button>
+              </div>
             )}
 
             {/* ===== Server picker (native mode only — iframe has its own picker) ===== */}
@@ -245,11 +262,92 @@ export default function Jack07Overlay({ match, detail: initialDetail, onClose })
   );
 }
 
+// =====================================================================
+// Jack07 cipher helpers — reversed from /statics/*.js bundles
+// =====================================================================
+
+/** ROT47: each printable ASCII char shifted by 47 (range 33-126). */
+function rot47(s) {
+  let out = "";
+  for (const c of s) {
+    const n = c.charCodeAt(0);
+    out += (n >= 33 && n <= 126) ? String.fromCharCode(33 + ((n - 33 + 47) % 94)) : c;
+  }
+  return out;
+}
+
 /**
- * Minimal hls.js-backed player with our own controls. Rendered inline
- * (NOT fullscreen overlay) so the events/stats panels remain visible.
+ * Extract the m3u8 URL from the /api/stream/detail protobuf body.
+ * The URL lives at path (10, 2, 4) as a ROT47-encrypted string with an
+ * 8-byte garbage prefix. We don't need a full PB decoder — we just locate
+ * the ROT47 signature of "https://" inside the body and walk forward.
  */
-function Jack07Player({ streamUrl, loading, error, channelName, onFatalError }) {
+function extractM3u8FromPb(bytes) {
+  let txt = "";
+  for (let i = 0; i < bytes.length; i++) txt += String.fromCharCode(bytes[i]);
+  // ROT47 of 'https://' = '9EEADi^^'
+  const idx = txt.indexOf("9EEADi^^");
+  if (idx < 0) return null;
+  const start = Math.max(0, idx - 8);
+  let end = idx;
+  while (end < txt.length) {
+    const code = txt.charCodeAt(end);
+    if (code < 33 || code > 126) break;
+    end++;
+  }
+  const enc = txt.slice(start, end);
+  const dec = rot47(enc);
+  if (dec.length < 8) return null;
+  const url = dec.slice(8);
+  return url.toLowerCase().startsWith("http") ? url : null;
+}
+
+/**
+ * Encrypt rb-session header → AES-128-CBC token. Key & IV are baked into
+ * the Jack07 SPA bundle (`/statics/c6e43a94890.js` and friends).
+ * Returns the URI-encoded base64 ciphertext + 'a' suffix.
+ */
+async function encryptRbSession(rbSession) {
+  const enc = new TextEncoder().encode(rbSession);
+  // PKCS7 padding
+  const pad = 16 - (enc.length % 16);
+  const padded = new Uint8Array(enc.length + pad);
+  padded.set(enc);
+  padded.fill(pad, enc.length);
+  const keyBytes = new Uint8Array([
+    0xa7, 0x98, 0x1c, 0xc9, 0xeb, 0x2f, 0x4d, 0x19,
+    0xdc, 0xfe, 0xa5, 0x7b, 0x10, 0x1e, 0xcd, 0x89,
+  ]);
+  const iv = new Uint8Array([
+    0x80, 0x17, 0xd3, 0xa8, 0xf1, 0x40, 0x0d, 0x2f,
+    0, 0, 0, 0, 0, 0, 0, 0,
+  ]);
+  const key = await crypto.subtle.importKey("raw", keyBytes, { name: "AES-CBC" }, false, ["encrypt"]);
+  // SubtleCrypto AES-CBC auto-applies PKCS7 padding. We MUST NOT pad twice
+  // → encrypt the raw plaintext (NOT the padded buffer).
+  const ctBuf = await crypto.subtle.encrypt({ name: "AES-CBC", iv }, key, enc);
+  const ctArr = new Uint8Array(ctBuf);
+  let bin = "";
+  for (let i = 0; i < ctArr.length; i++) bin += String.fromCharCode(ctArr[i]);
+  const b64 = btoa(bin);
+  return encodeURIComponent(b64) + "a";
+}
+
+/**
+ * Minimal hls.js-backed player with our own controls. Performs the FULL
+ * Jack07 stream resolution client-side so the rb-session is bound to the
+ * user's browser/edge IP (segments authenticated with that IP serve fine).
+ *
+ *   apiUrl (server-built): /api/stream/detail?streamId=…&matchId=… &…
+ *
+ * The flow:
+ *   1. fetch(apiUrl) → grab `rb-session` header + protobuf body
+ *   2. parse field (10,2,4) ROT47-encoded URL → slice(8) → m3u8 URL
+ *   3. AES-CBC encrypt rb-session with the embedded key/iv → base64url + 'a'
+ *   4. Insert /token-XXX/ after host → final tokenized URL
+ *   5. Feed to hls.js
+ */
+function Jack07Player({ apiUrl, loading, error, channelName, onFatalError }) {
   const videoRef = useRef(null);
   const wrapRef = useRef(null);
   const hlsRef = useRef(null);
@@ -258,14 +356,47 @@ function Jack07Player({ streamUrl, loading, error, channelName, onFatalError }) 
   const [fs, setFs] = useState(false);
   const [playerErr, setPlayerErr] = useState(null);
   const [bufferingMsg, setBufferingMsg] = useState(null);
+  const [resolvedUrl, setResolvedUrl] = useState(null);
 
+  // Resolve stream URL whenever apiUrl changes
   useEffect(() => {
-    if (!streamUrl || !videoRef.current) return;
-    const video = videoRef.current;
+    if (!apiUrl) return;
+    let cancelled = false;
+    setResolvedUrl(null);
     setPlayerErr(null);
-    setBufferingMsg("Connexion au flux…");
+    setBufferingMsg("Récupération du flux…");
+    (async () => {
+      try {
+        const r = await fetch(apiUrl, { credentials: "omit" });
+        const rbSession = r.headers.get("rb-session");
+        if (!rbSession) throw new Error("rb-session manquante");
+        const buf = await r.arrayBuffer();
+        // Decode protobuf body to find ROT47-encoded URL (field 10.2.4)
+        const m3u8Url = extractM3u8FromPb(new Uint8Array(buf));
+        if (!m3u8Url) throw new Error("Flux introuvable dans la réponse");
+        // Encrypt rb-session → AES-CBC token
+        const token = await encryptRbSession(rbSession);
+        const u = new URL(m3u8Url);
+        const tokenedUrl = `${u.origin}/token-${token}${u.pathname}${u.search}`;
+        if (!cancelled) {
+          setResolvedUrl(tokenedUrl);
+          setBufferingMsg("Connexion au flux…");
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setPlayerErr(`Résolution échouée: ${e.message}`);
+          setBufferingMsg(null);
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [apiUrl]);
 
-    // Clean up any previous hls instance
+  // Attach hls.js when resolved URL changes
+  useEffect(() => {
+    if (!resolvedUrl || !videoRef.current) return;
+    const video = videoRef.current;
+
     if (hlsRef.current) {
       try { hlsRef.current.destroy(); } catch { /* noop */ }
       hlsRef.current = null;
@@ -274,7 +405,7 @@ function Jack07Player({ streamUrl, loading, error, channelName, onFatalError }) 
     const playPromise = () => video.play().then(() => setPlaying(true)).catch(() => setPlaying(false));
 
     if (video.canPlayType("application/vnd.apple.mpegurl")) {
-      video.src = streamUrl;
+      video.src = resolvedUrl;
       video.addEventListener("loadeddata", () => { setBufferingMsg(null); playPromise(); }, { once: true });
     } else if (Hls.isSupported()) {
       const hls = new Hls({
@@ -283,33 +414,24 @@ function Jack07Player({ streamUrl, loading, error, channelName, onFatalError }) 
         liveSyncDurationCount: 3,
         liveMaxLatencyDurationCount: 8,
         manifestLoadingTimeOut: 10000,
-        manifestLoadingMaxRetry: 4,
-        levelLoadingTimeOut: 10000,
-        levelLoadingMaxRetry: 4,
+        manifestLoadingMaxRetry: 3,
         fragLoadingTimeOut: 15000,
-        fragLoadingMaxRetry: 6,
+        fragLoadingMaxRetry: 3,
       });
       hlsRef.current = hls;
       hls.attachMedia(video);
-      hls.on(Hls.Events.MEDIA_ATTACHED, () => hls.loadSource(streamUrl));
+      hls.on(Hls.Events.MEDIA_ATTACHED, () => hls.loadSource(resolvedUrl));
       hls.on(Hls.Events.MANIFEST_PARSED, () => { setBufferingMsg(null); playPromise(); });
       hls.on(Hls.Events.ERROR, (_evt, data) => {
         if (data.fatal) {
           if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
             setPlayerErr("Flux protégé — bascule vers le lecteur Jack07…");
-            // Auto-fallback to iframe mode on the parent so the user can
-            // still watch the match. The CDN binds segments to the IP that
-            // resolved /api/stream/detail (our backend) and rejects others.
-            if (typeof onFatalError === "function") {
-              setTimeout(() => onFatalError(), 800);
-            }
+            if (typeof onFatalError === "function") setTimeout(() => onFatalError(), 800);
           } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
             try { hls.recoverMediaError(); } catch { setPlayerErr("Erreur média"); }
           } else {
             setPlayerErr("Erreur lecture");
-            if (typeof onFatalError === "function") {
-              setTimeout(() => onFatalError(), 800);
-            }
+            if (typeof onFatalError === "function") setTimeout(() => onFatalError(), 800);
           }
         }
       });
@@ -320,7 +442,7 @@ function Jack07Player({ streamUrl, loading, error, channelName, onFatalError }) 
     return () => {
       if (hlsRef.current) { try { hlsRef.current.destroy(); } catch { /* noop */ } hlsRef.current = null; }
     };
-  }, [streamUrl]);
+  }, [resolvedUrl, onFatalError]);
 
   useEffect(() => {
     const onFs = () => setFs(!!document.fullscreenElement);
@@ -347,9 +469,9 @@ function Jack07Player({ streamUrl, loading, error, channelName, onFatalError }) 
   };
 
   const reload = () => {
-    const v = videoRef.current; if (!v || !streamUrl) return;
+    const v = videoRef.current; if (!v || !resolvedUrl) return;
     if (hlsRef.current) hlsRef.current.startLoad();
-    v.currentTime = v.duration || 0; // jump to live edge
+    v.currentTime = v.duration || 0;
     v.play().catch(() => {});
   };
 

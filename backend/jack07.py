@@ -286,19 +286,23 @@ def _project_match(m: Dict[int, Any]) -> Optional[Dict[str, Any]]:
             break
 
     # field 100 holds scores: {1:home_scores, 2:away_scores}.
-    # Sub-fields: 10=full-time, 11=half-time, 15=ET, 16=PSO, etc. We surface
-    # the highest-priority observed value (FT > ET > 2H > HT).
+    # Sub-fields, observed empirically:
+    #   10 = total goals (FT/current)     ← what we want
+    #   11 = 2nd-half goals (additive)
+    #   15 = shots on goal (or some stat)
+    #   16 = corner-kicks / fouls (NOT goals; can be 5-8, 9-4 etc.)
+    # We surface field 10 only; fall back to 0 when missing (away teams in
+    # 0-X matches sometimes omit the field entirely).
     def _score(side: Dict[int, Any]) -> Optional[int]:
         if not isinstance(side, dict):
             return None
-        for k in (16, 15, 10, 11, 13, 12):
-            v = side.get(k)
-            if v is not None:
-                try:
-                    return int(v)
-                except Exception:  # noqa: BLE001
-                    pass
-        return None
+        v = side.get(10)
+        if v is None:
+            return 0
+        try:
+            return int(v)
+        except Exception:  # noqa: BLE001
+            return None
 
     scores_obj = _g(m, 100) or {}
     home_score = _score(_g(scores_obj, 1)) if home else None

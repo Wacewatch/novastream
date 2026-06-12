@@ -2248,47 +2248,59 @@ async def jack07_match_stats(match_id: str):
 
 @api_router.get("/jack07/streams/{match_id}")
 async def jack07_match_streams(match_id: str, request: Request):
-    """Available stream sources for a match (FIFA US, Canal FR, …), each
-    with the raw m3u8 URL. Jack07 segments use ephemeral CDN tokens that
-    can only be honoured by a browser executing Cloudflare JS, so we hand
-    the m3u8 URL directly to the client-side hls.js (CORS `*` is enabled
-    on the upstream CDN).
+    """Stream sources for a match. Returns the raw {streamId, name, siteType,
+    api_url} per source so the BROWSER can resolve each one itself — this is
+    required because the upstream CDN binds segment authentication to the IP
+    that called /api/stream/detail. If the backend resolves, segments fail
+    with HTTP 487 'Not Acceptable' on the browser side.
+
+    The browser then calls api_url directly (CORS `*`), reads the rb-session
+    response header, decodes the ROT47-protected URL, encrypts the session
+    with AES-CBC and prefixes the path with /token-…/ — see Jack07Player.jsx.
     """
     detail = await _jack07_detail(match_id)
     if not detail:
         raise HTTPException(status_code=404, detail="Match introuvable")
     raw_streams = detail.get("streams") or []
-
-    sem = asyncio.Semaphore(4)
-
-    async def _resolve_one(s: Dict[str, Any]) -> Dict[str, Any]:
-        async with sem:
-            url = await _jack07_resolve_stream(
-                match_id=match_id,
-                stream_id=str(s.get("id")),
-                site_type=int(s.get("type") or 2001),
-            )
-        if not url:
-            return {"id": s.get("id"), "name": s.get("name"), "available": False}
-        return {
-            "id": s.get("id"),
+    # Pick the first responsive API host (mirror of JACK07_API_HOSTS).
+    api_base = "https://apis-data10.tcore131ybdf.ru"
+    pub = []
+    for s in raw_streams:
+        sid = s.get("id")
+        site_type = int(s.get("type") or 2001)
+        if not sid:
+            continue
+        # The client will call this with credentials omitted (CORS `*`).
+        from urllib.parse import urlencode as _qs
+        params = {
+            "streamId": str(sid),
+            "siteType": str(site_type),
+            "continent": "NA",
+            "country": "US",
+            "digit": "seth",
+            "matchId": str(match_id),
+            "sportType": "1",
+        }
+        pub.append({
+            "id": sid,
             "name": s.get("name"),
             "quality": s.get("quality"),
-            "available": True,
-            "stream_url": url,  # raw m3u8 — browser plays it directly
-        }
-
-    resolved = await asyncio.gather(*[_resolve_one(s) for s in raw_streams])
+            "api_url": f"{api_base}/api/stream/detail?{_qs(params)}",
+        })
     return {
         "match_id": match_id,
         "title": detail.get("title"),
-        "streams": resolved,
+        "site_url": detail.get("site_url"),  # for iframe fallback
+        "streams": pub,
     }
 
 
 @api_router.get("/jack07/stream/{match_id}/{stream_id}")
 async def jack07_stream_resolve(match_id: str, stream_id: str, site_type: int = 2001):
-    """Resolve a single Jack07 source to the raw m3u8 URL."""
+    """Server-side resolve (legacy / for non-browser callers). Returns the
+    raw m3u8 URL but segments may not play from a browser due to the IP
+    binding described above. Prefer /api/jack07/streams/{mid} for the SPA.
+    """
     url = await _jack07_resolve_stream(
         match_id=match_id, stream_id=stream_id, site_type=site_type,
     )
