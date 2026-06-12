@@ -6,7 +6,7 @@ Tests all BossTV endpoints + regression tests for existing endpoints
 import requests
 import time
 
-BASE_URL = "https://preview-fait.preview.emergentagent.com"
+BASE_URL = "https://vavoo-proxy.preview.emergentagent.com"
 
 def test_bosstv_matches():
     """Test 1: GET /api/bosstv/matches - basic structure"""

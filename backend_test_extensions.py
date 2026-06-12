@@ -14,7 +14,7 @@ import time
 from typing import Dict, Any, List
 
 # Public preview URL
-BASE_URL = "https://preview-fait.preview.emergentagent.com"
+BASE_URL = "https://vavoo-proxy.preview.emergentagent.com"
 
 class TestResults:
     def __init__(self):

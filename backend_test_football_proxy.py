@@ -11,7 +11,7 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 
 # Backend URL from frontend/.env
-BASE_URL = "https://preview-fait.preview.emergentagent.com"
+BASE_URL = "https://vavoo-proxy.preview.emergentagent.com"
 
 # Test results
 results = {

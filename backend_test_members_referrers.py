@@ -19,7 +19,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 import httpx
 
 # Configuration
-BASE_URL = os.getenv("REACT_APP_BACKEND_URL", "https://preview-fait.preview.emergentagent.com")
+BASE_URL = os.getenv("REACT_APP_BACKEND_URL", "https://vavoo-proxy.preview.emergentagent.com")
 MONGO_URL = os.getenv("MONGO_URL", "mongodb://localhost:27017")
 DB_NAME = os.getenv("DB_NAME", "test_database")
 
