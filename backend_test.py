@@ -17,7 +17,7 @@ from urllib.parse import unquote, urlparse, parse_qs
 from typing import Dict, Any, List
 
 # Public preview URL
-BASE_URL = "https://vavoo-proxy.preview.emergentagent.com"
+BASE_URL = "https://preview-env-40.preview.emergentagent.com"
 
 class TestResults:
     def __init__(self):

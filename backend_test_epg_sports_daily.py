@@ -4,13 +4,13 @@ Backend test suite for NEW features:
 1. EPG module (/api/epg/*)
 2. Sports daily ticker (/api/sports/daily)
 
-Base URL: https://vavoo-proxy.preview.emergentagent.com
+Base URL: https://preview-env-40.preview.emergentagent.com
 """
 import requests
 import time
 from typing import Dict, Any
 
-BASE_URL = "https://vavoo-proxy.preview.emergentagent.com"
+BASE_URL = "https://preview-env-40.preview.emergentagent.com"
 
 def test_epg_status():
     """Test a) GET /api/epg/status"""
