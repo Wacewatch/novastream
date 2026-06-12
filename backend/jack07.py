@@ -30,7 +30,14 @@ logger = logging.getLogger("livewatch.jack07")
 # Endpoints (discovered by parsing the SPA JS bundle)
 # --------------------------------------------------------------------- #
 JACK07_SITE = "https://jack07eo.mpstickv5m73jgravity.my"
-JACK07_API = "https://apis-data-defra10.tcore131ybdf.ru"
+# Upstream API hosts (rotated regularly; the SPA bundle hot-swaps them).
+# Try each in order — the first responsive one wins. defra10 is currently
+# blocked from some clouds, apis-data10 is the public mirror.
+JACK07_API_HOSTS = [
+    "https://apis-data10.tcore131ybdf.ru",
+    "https://apis-data-defra10.tcore131ybdf.ru",
+]
+JACK07_API = JACK07_API_HOSTS[0]  # kept for backwards compat with imports
 LANG = 6   # French
 SPORT_FOOTBALL = 1
 
@@ -167,16 +174,25 @@ async def _get_client() -> httpx.AsyncClient:
 
 async def _fetch_pb(path: str, params: Dict[str, Any]) -> Optional[Dict[int, Any]]:
     cx = await _get_client()
-    try:
-        r = await cx.get(f"{JACK07_API}{path}", params=params, headers={
-            "Accept-Encoding": "gzip, deflate, br",
-        })
-        if r.status_code != 200 or not r.content:
-            return None
-        return pb_decode(r.content)
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"jack07 fetch failed {path}: {e}")
-        return None
+    last_err: Optional[Exception] = None
+    for host in JACK07_API_HOSTS:
+        try:
+            r = await cx.get(f"{host}{path}", params=params, headers={
+                # Don't request brotli (httpx may not auto-decompress br).
+                "Accept-Encoding": "gzip, deflate",
+            })
+            if r.status_code != 200 or not r.content:
+                continue
+            decoded = pb_decode(r.content)
+            if decoded is None:
+                continue
+            return decoded
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            continue
+    if last_err:
+        logger.warning(f"jack07 fetch failed {path}: {last_err}")
+    return None
 
 
 # --------------------------------------------------------------------- #
@@ -207,12 +223,23 @@ def _status_kind(s: int) -> str:
     return "scheduled"
 
 
+def _s(x: Any) -> str:
+    """Coerce a protobuf-decoded value to a clean string. Dicts/lists become ''."""
+    if x is None:
+        return ""
+    if isinstance(x, str):
+        return x
+    if isinstance(x, (int, float)):
+        return str(x)
+    return ""
+
+
 def _team(t: Optional[Dict[int, Any]]) -> Optional[Dict[str, Any]]:
     if not isinstance(t, dict):
         return None
     tid = _g(t, 1, default=0)
-    name = _g(t, 3, 2, default="") or ""
-    logo = _g(t, 4, default="") or ""
+    name = _s(_g(t, 3, 2, default=""))
+    logo = _s(_g(t, 4, default=""))
     if not (tid or name):
         return None
     return {"id": int(tid) if tid else 0, "name": name, "logo": logo}
@@ -240,10 +267,9 @@ def _project_match(m: Dict[int, Any]) -> Optional[Dict[str, Any]]:
         if not isinstance(entry, dict):
             continue
         if not _g(entry, 1) and _g(entry, 2):
-            title = _g(entry, 2, default="") or title
+            title = _s(_g(entry, 2, default="")) or title
             continue
         team_obj = _team(_g(entry, 10))
-        side = _g(entry, 1, default=0)
         if team_obj is None:
             continue
         # Empirically, 1st team entry is home, 2nd is away
@@ -273,9 +299,9 @@ def _project_match(m: Dict[int, Any]) -> Optional[Dict[str, Any]]:
     away_score = _score(_g(scores_obj, 2)) if away else None
 
     extras = _g(m, 150) or {}
-    match_slug = _g(extras, 20, default="") or ""
-    league_slug = _g(extras, 21, default="") or ""
-    season_slug = _g(extras, 22, default="") or ""
+    match_slug = _s(_g(extras, 20, default=""))
+    league_slug = _s(_g(extras, 21, default=""))
+    season_slug = _s(_g(extras, 22, default=""))
 
     # Build the jack07 site URL we will iframe
     site_url = ""
@@ -300,14 +326,14 @@ def _project_match(m: Dict[int, Any]) -> Optional[Dict[str, Any]]:
         "is_finished": _status_kind(status) == "finished",
         "league": {
             "id": int(_g(league, 1, default=0) or 0),
-            "name": _g(league, 3, 2, default="") or "",
-            "logo": _g(league, 4, default="") or "",
-            "country": _g(league, 80, 3, 2, default="") or "",
-            "country_logo": _g(league, 80, 4, default="") or "",
+            "name": _s(_g(league, 3, 2, default="")),
+            "logo": _s(_g(league, 4, default="")),
+            "country": _s(_g(league, 80, 3, 2, default="")),
+            "country_logo": _s(_g(league, 80, 4, default="")),
         },
         "season": {
             "id": int(_g(season, 1, default=0) or 0),
-            "name": _g(season, 50, 1, default="") or _g(season, 3, 2, default="") or "",
+            "name": _s(_g(season, 50, 1, default="")) or _s(_g(season, 3, 2, default="")),
         },
         "home": home,
         "away": away,
@@ -329,7 +355,7 @@ def _project_streams(detail_root: Dict[int, Any]) -> List[Dict[str, Any]]:
         if not isinstance(s, dict):
             continue
         sid = _g(s, 1, default=0)
-        name = _g(s, 3, default="") or ""
+        name = _s(_g(s, 3, default=""))
         if not sid or not name:
             continue
         out.append({
@@ -362,17 +388,17 @@ def _project_events(root: Dict[int, Any]) -> List[Dict[str, Any]]:
         if kind == 10001:
             continue  # skip period markers
         team_id = _g(ev, 2, 1) if isinstance(_g(ev, 2), dict) else None
-        minute = _g(ev, 4, default="") or ""
-        score = _g(ev, 5, default="") or ""
+        minute = _s(_g(ev, 4, default=""))
+        score = _s(_g(ev, 5, default=""))
         # field 6 sometimes carries a free-text label (e.g. "Foul")
-        label_raw = _g(ev, 6, default="") if isinstance(_g(ev, 6), str) else ""
+        label_raw = _s(_g(ev, 6, default=""))
         side = int(_g(ev, 7, default=0) or 0)  # 1=home, 2=away
         player = _g(ev, 10) or _g(ev, 20) or {}
-        player_name = _g(player, 3, 2, default="") if isinstance(player, dict) else ""
+        player_name = _s(_g(player, 3, 2, default="")) if isinstance(player, dict) else ""
         out.append({
             "kind": kind,
             "label": _EVENT_LABELS.get(kind, label_raw or "Event"),
-            "minute": str(minute),
+            "minute": minute,
             "score": score,
             "side": "home" if side == 1 else ("away" if side == 2 else ""),
             "team_id": int(team_id) if team_id else 0,
@@ -381,27 +407,54 @@ def _project_events(root: Dict[int, Any]) -> List[Dict[str, Any]]:
     return out
 
 
+# Statistic-type codes observed empirically (sportType=1 / football).
+_STAT_LABELS = {
+    100: "Attaques",
+    101: "Attaques dangereuses",
+    102: "Possession %",
+    103: "Tirs cadrés",
+    104: "Tirs non cadrés",
+    105: "Corners",
+    106: "Fautes",
+    107: "Hors-jeux",
+    108: "Touches",
+    109: "Cartons jaunes",
+    110: "Cartons rouges",
+    111: "Coups francs",
+    112: "Passes",
+    113: "Précision passes %",
+    114: "Sauvegardes",
+    115: "Tacles",
+}
+
+
 def _project_stats(root: Dict[int, Any]) -> List[Dict[str, Any]]:
-    """Each stat row carries a metric label and two numbers (home/away).
-    The protobuf wire shape uses field 1 for metric definition and fields
-    10/11 for the home/away values respectively. We emit a flat list so
-    the frontend can render arbitrary rows."""
+    """Each stat row carries a metric code (field 3) and home/away values
+    (fields 10, 11). We map the code to a human label via _STAT_LABELS."""
     items = _as_list(_g(root, 10, 1))
     out: List[Dict[str, Any]] = []
     for s in items:
         if not isinstance(s, dict):
             continue
-        label = _g(s, 1, 2, default="") or _g(s, 2, default="") or ""
-        # home/away numeric values are commonly at fields 10 & 11
+        # Prefer the upstream-provided text label if present (path 1.2 / 2),
+        # otherwise fall back to the numeric code → French label map.
+        code = int(_g(s, 3, default=0) or 0)
+        label = (
+            _s(_g(s, 1, 2, default=""))
+            or _s(_g(s, 2, default=""))
+            or _STAT_LABELS.get(code)
+            or f"Stat {code}"
+        )
+        # home/away numeric values are at fields 10 & 11
         home_v = _g(s, 10, default=None)
         away_v = _g(s, 11, default=None)
-        # Some rows use 3/4 instead (percentages already pre-formatted)
         if home_v is None and away_v is None:
             home_v = _g(s, 3, default=None)
             away_v = _g(s, 4, default=None)
-        if not label and home_v is None and away_v is None:
+        if home_v is None and away_v is None and not label:
             continue
         out.append({
+            "code": code,
             "label": label,
             "home": _to_num(home_v),
             "away": _to_num(away_v),

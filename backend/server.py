@@ -81,6 +81,47 @@ UPSTREAM_BASES = ["https://vavoo.to", "https://kool.to"]
 # instead of the real channel. lokke.app ping returns the working signature.
 PING_URLS = ["https://www.lokke.app/api/app/ping", "https://www.vavoo.tv/api/app/ping"]
 USER_AGENT_STREAM = "VAVOO/2.6"
+
+# ----------------- Deltawatch proxy (user-controlled obfuscation hop) -----------------
+# When configured via DELTAWATCH_URL, resolution and HLS playback (manifest +
+# segments) are routed through the user-controlled PHP proxy that already
+# handles vavoo addonSig, m3u8 rewriting and segment pass-through. The
+# Deltawatch endpoint is contacted with:
+#   POST  ?action=resolve       body {"url": "<channel_url>"}
+#   GET   ?action=hls_manifest&url=<m3u8>
+#   GET   ?action=hls_segment&url=<segment>
+# If DELTAWATCH_URL is empty the legacy direct path (vavoo.to/kool.to) is used.
+DELTAWATCH_URL = (os.environ.get("DELTAWATCH_URL") or "").strip().rstrip("/?")
+DELTAWATCH_TIMEOUT = float(os.environ.get("DELTAWATCH_TIMEOUT", "15"))
+# Deltawatch availability flag — automatically flipped off after consecutive
+# failures so the resolver/HLS path degrades gracefully to direct upstream.
+_dw_state: Dict[str, Any] = {"healthy": bool(DELTAWATCH_URL), "fail_count": 0, "cooldown_until": 0.0}
+
+def _dw_enabled() -> bool:
+    if not DELTAWATCH_URL:
+        return False
+    if _dw_state["healthy"]:
+        return True
+    return time.time() >= _dw_state["cooldown_until"]
+
+def _dw_mark_failure() -> None:
+    _dw_state["fail_count"] += 1
+    if _dw_state["fail_count"] >= 3:
+        _dw_state["healthy"] = False
+        _dw_state["cooldown_until"] = time.time() + 60  # 60s cool-down
+        _dw_state["fail_count"] = 0
+
+def _dw_mark_success() -> None:
+    _dw_state["healthy"] = True
+    _dw_state["fail_count"] = 0
+    _dw_state["cooldown_until"] = 0.0
+
+def _dw_wrap(u: str, action: str) -> str:
+    """Return the Deltawatch-wrapped URL for a given upstream URL.
+    action ∈ {'hls_manifest', 'hls_segment', 'pipe'}.
+    """
+    from urllib.parse import quote as _q
+    return f"{DELTAWATCH_URL}?action={action}&url={_q(u, safe='')}"
 LANG = "fr"
 REGION = "US"  # US returns broad multi-country catalog
 CLIENT_VERSION = "3.0.2"
@@ -788,6 +829,46 @@ async def _refresh_channels_async() -> None:
     finally:
         _cache["_refresh_in_progress"] = False
 
+async def _resolve_via_deltawatch(channel_url: str) -> Optional[str]:
+    """Try the Deltawatch ?action=resolve path. Returns the signed HLS URL or
+    None if Deltawatch is unconfigured, unhealthy, or returned no URL.
+    """
+    if not _dw_enabled():
+        return None
+    cx = await get_http_client()
+    try:
+        # The PHP proxy accepts both GET (?action=resolve&url=…) and POST with
+        # a JSON body. GET is simpler and triggers the PHP-side cache the same
+        # way the embed flow does.
+        from urllib.parse import quote as _q
+        url = f"{DELTAWATCH_URL}?action=resolve&url={_q(channel_url, safe='')}"
+        r = await cx.get(url, headers={"User-Agent": USER_AGENT_STREAM}, timeout=DELTAWATCH_TIMEOUT)
+        if r.status_code != 200:
+            _dw_mark_failure()
+            return None
+        # Deltawatch returns JSON {stream_url: "…"} on success, or {error: "…"}.
+        try:
+            data = r.json()
+        except Exception:  # noqa: BLE001
+            _dw_mark_failure()
+            return None
+        if isinstance(data, dict):
+            stream_url = (
+                data.get("stream_url")
+                or data.get("url")
+                or data.get("streamUrl")
+            )
+            if stream_url:
+                _dw_mark_success()
+                return str(stream_url)
+        _dw_mark_failure()
+        return None
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"deltawatch resolve failed: {e}")
+        _dw_mark_failure()
+        return None
+
+
 async def resolve_stream(channel_url: str) -> str:
     """Resolve channel -> signed HLS URL. Cached in Redis (TTL natif, partage
     entre workers). Fallback memoire borne si Redis down."""
@@ -807,7 +888,21 @@ async def resolve_stream(channel_url: str) -> str:
         c = _resolve_cache.get(channel_url)
         if c and c[1] > now:
             return c[0]
-    # 2) Miss -> upstream resolve
+    # 2) Miss -> try Deltawatch proxy first (user-controlled obfuscation hop)
+    dw_url = await _resolve_via_deltawatch(channel_url)
+    if dw_url:
+        if r is not None:
+            try:
+                await r.set(key, dw_url.encode("utf-8"), ex=RESOLVE_TTL)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"redis set resolve failed: {e}")
+        else:
+            if len(_resolve_cache) > 5000:
+                _resolve_cache.clear()
+            _resolve_cache[channel_url] = (dw_url, time.time() + RESOLVE_TTL)
+        return dw_url
+
+    # 3) Deltawatch unavailable -> direct upstream resolve
     sig = await get_signature()
     cx = await get_http_client()
     for base in UPSTREAM_BASES:
@@ -1110,13 +1205,31 @@ async def hls_proxy(t: Optional[str] = None, u: Optional[str] = None):
     # Segments (.ts, .key, .m4s, …): stream directly, NO cache
     try:
         cx = await get_http_client()
+        # Route via Deltawatch when configured. PHP proxy streams the segment
+        # back with proper content-type. Falls through to direct if it fails.
+        # IMPORTANT: don't double-wrap — if the URL is already a Deltawatch
+        # one (because the playlist returned by Deltawatch already pointed
+        # back to itself), use it as-is.
+        already_dw = bool(DELTAWATCH_URL) and u.startswith(DELTAWATCH_URL)
+        seg_url = u if already_dw else (_dw_wrap(u, "hls_segment") if _dw_enabled() else u)
         upstream_req = cx.build_request(
             "GET",
-            u,
+            seg_url,
             headers={"User-Agent": USER_AGENT_STREAM},
             timeout=httpx.Timeout(30.0, connect=10.0),
         )
         r = await cx.send(upstream_req, stream=True)
+        if r.status_code >= 400 and _dw_enabled() and seg_url != u:
+            # Deltawatch errored on this segment — retry direct.
+            await r.aclose()
+            _dw_mark_failure()
+            upstream_req = cx.build_request(
+                "GET",
+                u,
+                headers={"User-Agent": USER_AGENT_STREAM},
+                timeout=httpx.Timeout(30.0, connect=10.0),
+            )
+            r = await cx.send(upstream_req, stream=True)
         if r.status_code >= 400:
             await r.aclose()
             raise HTTPException(status_code=502, detail=f"Erreur amont: HTTP {r.status_code}")
@@ -1142,7 +1255,22 @@ async def _fetch_playlist(u: str) -> Tuple[bytes, str, float]:
     `_hls_cache[u]` on success and pops itself from `_hls_inflight` at the end."""
     try:
         cx = await get_http_client()
-        r = await cx.get(u, headers={"User-Agent": USER_AGENT_STREAM}, timeout=15.0)
+        # Route via Deltawatch when configured & healthy. The PHP proxy handles
+        # the upstream m3u8 download, leaves the manifest body intact so we can
+        # still rewrite individual segment URLs to /api/hls?t=… for caching.
+        fetch_url = _dw_wrap(u, "hls_manifest") if _dw_enabled() else u
+        try:
+            r = await cx.get(fetch_url, headers={"User-Agent": USER_AGENT_STREAM}, timeout=15.0)
+            if _dw_enabled() and r.status_code != 200:
+                _dw_mark_failure()
+                # Retry direct if Deltawatch returned an error
+                r = await cx.get(u, headers={"User-Agent": USER_AGENT_STREAM}, timeout=15.0)
+            elif _dw_enabled():
+                _dw_mark_success()
+        except Exception:
+            if _dw_enabled():
+                _dw_mark_failure()
+            r = await cx.get(u, headers={"User-Agent": USER_AGENT_STREAM}, timeout=15.0)
         ct = r.headers.get("content-type", "").lower()
         is_m3u8 = ("mpegurl" in ct) or ("application/vnd.apple" in ct) or (".m3u8" in u.lower().split("?")[0])
         if is_m3u8:
@@ -2006,6 +2134,158 @@ async def admin_global_stats(authorization: Optional[str] = Header(None)):
     await _cache_set_json("ns:global-stats", result, 60)
     return result
 
+
+
+
+
+# =====================================================================
+# JACK07 TV — match list + detail + events + statistics (protobuf scraper)
+# Embeds the jack07eo.mpstickv5m73jgravity.my player page via iframe (their
+# site allows framing). Real-time data (events, stats) is served from our
+# /api/jack07/* endpoints so the UI can poll without exposing the upstream
+# host. Public namespace under /api/v1/public/jack07/* mirrors the same
+# data with opaque embed tokens (no upstream URL leaked).
+# =====================================================================
+from jack07 import fetch_matches as _jack07_matches, fetch_detail as _jack07_detail  # noqa: E402
+from jack07 import fetch_events as _jack07_events, fetch_stats as _jack07_stats  # noqa: E402
+import base64 as _b64  # noqa: E402
+
+
+def _b64url_encode(s: str) -> str:
+    return _b64.urlsafe_b64encode(s.encode("utf-8")).rstrip(b"=").decode("ascii")
+
+
+def _b64url_decode(token: str) -> str:
+    pad = "=" * ((4 - len(token) % 4) % 4)
+    return _b64.urlsafe_b64decode((token + pad).encode("ascii")).decode("utf-8")
+
+
+def _jack07_public_base(request: Request) -> str:
+    """External base URL used for building opaque embed URLs."""
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or ""
+    proto = request.headers.get("x-forwarded-proto") or ("https" if request.url.scheme == "https" else "http")
+    return f"{proto}://{host}".rstrip("/")
+
+
+@api_router.get("/jack07/matches")
+async def jack07_matches_list(sport: int = 1, language: int = 6):
+    """List Jack07 matches (live + upcoming + finished).
+
+    Query params:
+      - sport: sport type (1 = Football, default)
+      - language: language code (6 = French, default)
+    """
+    try:
+        matches = await _jack07_matches(sport_type=sport, language=language)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"jack07 matches failed: {e}")
+        raise HTTPException(status_code=502, detail="Jack07 indisponible")
+
+    live = [m for m in matches if m.get("is_live")]
+    upcoming = [m for m in matches if m.get("status_kind") == "scheduled"]
+    finished = [m for m in matches if m.get("is_finished")]
+    leagues = sorted({
+        (m.get("league") or {}).get("name")
+        for m in matches
+        if isinstance((m.get("league") or {}).get("name"), str) and (m.get("league") or {}).get("name")
+    })
+    return {
+        "matches": matches,
+        "total": len(matches),
+        "live_count": len(live),
+        "upcoming_count": len(upcoming),
+        "finished_count": len(finished),
+        "leagues": leagues,
+    }
+
+
+@api_router.get("/jack07/detail/{match_id}")
+async def jack07_match_detail(match_id: str, request: Request):
+    """Match detail with stream sources and the iframable site URL."""
+    detail = await _jack07_detail(match_id)
+    if not detail:
+        raise HTTPException(status_code=404, detail="Match introuvable")
+    # Build a proxied embed URL that points to the jack07 site page.
+    # We expose the raw site_url because the site does not enforce CSP
+    # frame-ancestors — but the public route below masks it via a token.
+    return detail
+
+
+@api_router.get("/jack07/events/{match_id}")
+async def jack07_match_events(match_id: str):
+    """Live match events (goals, cards, substitutions, fouls)."""
+    return {"events": await _jack07_events(match_id)}
+
+
+@api_router.get("/jack07/stats/{match_id}")
+async def jack07_match_stats(match_id: str):
+    """Match statistics (possession, shots, attacks, etc.)."""
+    return {"stats": await _jack07_stats(match_id)}
+
+
+@api_router.get("/jack07/streams/{match_id}")
+async def jack07_match_streams(match_id: str):
+    """Just the available stream sources for a match (FIFA US, Canal FR, …).
+    The actual playback happens via the iframable site_url returned by /detail/.
+    """
+    detail = await _jack07_detail(match_id)
+    if not detail:
+        raise HTTPException(status_code=404, detail="Match introuvable")
+    return {
+        "site_url": detail.get("site_url"),
+        "streams": detail.get("streams") or [],
+    }
+
+
+# ----------------- Public Jack07 API (token-masked embeds) -----------------
+def _jack07_public_match(m: Dict[str, Any], base: str) -> Dict[str, Any]:
+    """Strip upstream-identifying fields and add opaque embed URLs."""
+    out = {k: v for k, v in m.items() if k not in ("site_url", "league_slug", "match_slug", "season_slug")}
+    # Single embed per match (the iframed page itself contains the source picker).
+    token = _b64url_encode(m["id"])
+    out["embeds"] = [
+        {"label": "Lecture", "embed_url": f"{base}/embed/jack07/t/{token}"},
+    ]
+    return out
+
+
+@api_router.get("/v1/public/jack07/matches")
+async def public_jack07_matches(request: Request):
+    """Public listing — no upstream URLs exposed, only opaque embed tokens."""
+    base = _jack07_public_base(request)
+    data = await jack07_matches_list()
+    matches_pub = [_jack07_public_match(m, base) for m in (data.get("matches") or [])]
+    return {
+        "total": data.get("total", 0),
+        "live_count": data.get("live_count", 0),
+        "upcoming_count": data.get("upcoming_count", 0),
+        "finished_count": data.get("finished_count", 0),
+        "leagues": data.get("leagues") or [],
+        "matches": matches_pub,
+    }
+
+
+@api_router.get("/v1/public/jack07/detail/{match_id}")
+async def public_jack07_detail(match_id: str, request: Request):
+    detail = await _jack07_detail(match_id)
+    if not detail:
+        raise HTTPException(status_code=404, detail="Match introuvable")
+    base = _jack07_public_base(request)
+    pub = _jack07_public_match(detail, base)
+    pub["events"] = await _jack07_events(match_id)
+    pub["stats"] = await _jack07_stats(match_id)
+    return pub
+
+
+@app.get("/embed/jack07/t/{token}")
+async def jack07_embed_token_redirect(token: str):
+    """Opaque-token embed: decode → 302 to /embed/jack07/{matchId} (SPA route)."""
+    from fastapi.responses import RedirectResponse
+    try:
+        match_id = _b64url_decode(token)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Token invalide")
+    return RedirectResponse(url=f"/embed/jack07/{match_id}", status_code=302)
 
 
 # ----------------- Extensions (DaddyTV / Sports / Football / Admin keys) -----------------

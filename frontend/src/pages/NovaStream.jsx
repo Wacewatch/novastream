@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import axios from "axios";
 import {
   Search, Globe2, Loader2, Tv2, Users, Heart, Radio, Trophy,
-  Flame, Info as InfoIcon, Crown,
+  Flame, Info as InfoIcon, Crown, Zap,
 } from "lucide-react";
 import ChannelCard from "@/components/ChannelCard";
 import AdUnlockModal from "@/components/AdUnlockModal";
@@ -15,6 +15,8 @@ import DaddyTab from "@/components/tabs/DaddyTab";
 import SportsTab from "@/components/tabs/SportsTab";
 import FootballTab from "@/components/tabs/FootballTab";
 import BossTvTab from "@/components/tabs/BossTvTab";
+import Jack07TvTab from "@/components/tabs/Jack07TvTab";
+import Jack07Overlay from "@/components/Jack07Overlay";
 import InfoTab from "@/components/tabs/InfoTab";
 import { useFavorites } from "@/hooks/useFavorites";
 import { fetchTvStream, fetchDaddyStream } from "@/lib/streamApi";
@@ -49,6 +51,7 @@ const SPORTS_SUBTABS = [
   { id: "sports", label: "Sports", icon: Trophy },
   { id: "football", label: "Football Live", icon: Flame },
   { id: "bosstv", label: "BossTV", icon: Crown },
+  { id: "jack07", label: "Jack07 TV", icon: Zap },
   { id: "info", label: "Informations", icon: InfoIcon },
 ];
 
@@ -112,6 +115,10 @@ export default function NovaStream() {
   // BossTV — same shape as football
   const [bossOpen, setBossOpen] = useState(null);
   // bossOpen: { match, servers, activeServerId, streamUrl, loading }
+
+  // Jack07 TV — iframe overlay + live events/stats panel
+  const [jack07Open, setJack07Open] = useState(null);
+  // jack07Open: { match, detail }
 
   // ---------- Bootstrap ----------
   useEffect(() => {
@@ -230,6 +237,18 @@ export default function NovaStream() {
     }
   };
 
+  const handlePickJack07 = async (match) => {
+    // Prefetch detail so the overlay opens with site_url ready right after the ad.
+    setPending({ kind: "jack07", payload: { match, loading: true } });
+    try {
+      const r = await axios.get(`${API}/jack07/detail/${match.id}`);
+      setPending({ kind: "jack07", payload: { match, detail: r.data, loading: false } });
+    } catch (e) {
+      console.error(e);
+      setPending({ kind: "jack07", payload: { match, detail: null, loading: false } });
+    }
+  };
+
   // ---------- Ad unlocked → open the actual player ----------
   const handleUnlocked = async () => {
     if (!pending) return;
@@ -290,6 +309,11 @@ export default function NovaStream() {
 
     if (kind === "bosstv") {
       setBossOpen(payload);
+      return;
+    }
+
+    if (kind === "jack07") {
+      setJack07Open(payload);
       return;
     }
   };
@@ -536,6 +560,9 @@ export default function NovaStream() {
         {activeTab === "sports" && sportsSubTab === "bosstv" && (
           <BossTvTab onPickMatch={handlePickBoss} />
         )}
+        {activeTab === "sports" && sportsSubTab === "jack07" && (
+          <Jack07TvTab onPickMatch={handlePickJack07} />
+        )}
         {activeTab === "sports" && sportsSubTab === "info" && (
           <InfoTab onResolveChannel={handlePickInfo} />
         )}
@@ -687,6 +714,15 @@ export default function NovaStream() {
       {bossOpen && !bossOpen.streamUrl && !bossOpen.loading && (
         <FootballNoServersOverlay match={bossOpen.match} onClose={() => setBossOpen(null)} />
       )}
+
+      {/* ===== Jack07 TV overlay (iframe + live events/stats panel) ===== */}
+      {jack07Open && (
+        <Jack07Overlay
+          match={jack07Open.match}
+          detail={jack07Open.detail}
+          onClose={() => setJack07Open(null)}
+        />
+      )}
     </div>
   );
 }
@@ -706,6 +742,8 @@ function pendingChannelLabel(p) {
       return { name: p.payload?.match?.title || "Match" };
     case "bosstv":
       return { name: p.payload?.match?.title || "Match" };
+    case "jack07":
+      return { name: p.payload?.match?.title || `${p.payload?.match?.home?.name || ""} vs ${p.payload?.match?.away?.name || ""}` };
     default:
       return { name: "" };
   }

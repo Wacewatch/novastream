@@ -163,6 +163,42 @@ const SECTIONS = [
 }`,
   },
   {
+    key: "jack07",
+    accent: "#f59e0b",
+    title: "Jack07 TV",
+    intro:
+      "Football Jack07 : liste de matchs en direct + à venir + terminés, scores live, événements (buts, cartons, fautes, remplacements) et statistiques (possession, tirs, attaques, etc.). Chaque match propose un embed[] opaque (iframe player + panneau infos en dessous). Endpoints détaillés disponibles pour pollers temps réel : /api/jack07/events/{mid} et /api/jack07/stats/{mid} (rafraîchis ~15 s côté serveur).",
+    url: `${BACKEND_URL}/api/v1/public/jack07/matches`,
+    sample: `{
+  "total":           190,
+  "live_count":      7,
+  "upcoming_count":  183,
+  "finished_count":  0,
+  "leagues":         ["Premier League", "FIFA World Cup", "..."],
+  "matches": [
+    {
+      "id":            "4327501",
+      "title":         "Waterford United vs Sligo Rovers",
+      "kick_off_ts":   1781289900,
+      "kick_off_iso":  "2026-06-12T18:45:00+00:00",
+      "status":        103,
+      "status_label":  "2H",
+      "status_kind":   "live",
+      "is_live":       true,
+      "is_finished":   false,
+      "league":        { "id": 4524, "name": "Irlande Premier Division", "logo": "https://…", "country": "Irlande" },
+      "home":          { "id": 207714, "name": "Waterford Football Club", "logo": "https://…" },
+      "away":          { "id": 207706, "name": "Sligo Rovers",            "logo": "https://…" },
+      "home_score":    4,
+      "away_score":    5,
+      "embeds": [
+        { "label": "Lecture", "embed_url": "${BACKEND_URL}/embed/jack07/t/…" }
+      ]
+    }
+  ]
+}`,
+  },
+  {
     key: "daily",
     accent: "#22d3ee",
     title: "Matchs du jour",

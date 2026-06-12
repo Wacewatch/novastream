@@ -10,6 +10,7 @@ import FootballEmbedPage from "@/pages/FootballEmbedPage";
 import FootballTokenRedirect from "@/pages/FootballTokenRedirect";
 import BossTvEmbedPage from "@/pages/BossTvEmbedPage";
 import BossTvTokenRedirect from "@/pages/BossTvTokenRedirect";
+import Jack07EmbedPage from "@/pages/Jack07EmbedPage";
 import ApiDocs from "@/pages/ApiDocs";
 import MultiView from "@/pages/MultiView";
 import Login from "@/pages/Login";
@@ -35,6 +36,7 @@ function App() {
               <Route path="/embed/football/:matchId/:serverIdx?" element={<FootballEmbedPage />} />
               <Route path="/embed/bosstv/t/:token" element={<BossTvTokenRedirect />} />
               <Route path="/embed/bosstv/:matchId/:serverIdx?" element={<BossTvEmbedPage />} />
+              <Route path="/embed/jack07/:matchId" element={<Jack07EmbedPage />} />
               <Route path="/docs" element={<ApiDocs />} />
               <Route path="/multiview" element={<MultiView />} />
               <Route path="/login" element={<Login />} />
