@@ -21,6 +21,22 @@ French live-TV streaming app (Vavoo-backed). User reported flaky UX (no loader, 
 - `/app/frontend/src/components/{ChannelCard, VideoPlayer, AdUnlockModal}.jsx`
 
 ## What's Been Implemented (latest first)
+### 2026-02-12 (Jack07 TV + Deltawatch proxy)
+- **Deltawatch upstream-hop for Vavoo TV**: `/api/backend/server.py` now routes Vavoo resolution AND HLS playback (manifest + segments) through `https://apis.wavewatch.top/deltawatch.php` (env `DELTAWATCH_URL`). Token format extended with optional `nodw` flag so the legacy direct path is preserved when bypassed (Jack07 streams use the flag). Auto-fallback if Deltawatch fails 3× consecutively. Stream tokens now embed flags as `<exp>|<flags>|<url>||<hmac>` (legacy `<exp>|<url>||<hmac>` still accepted).
+- **Jack07 TV** — new Sports subtab (next to BossTV). Backend (`/app/backend/jack07.py` + 8 routes in `server.py`):
+  - `/api/jack07/matches` — 187+ football matches with league, teams, score, status, live/upcoming/finished buckets. Protobuf-decoded; rotates between `apis-data10.tcore131ybdf.ru` and `…-defra10…ru`. Brotli disabled (`Accept-Encoding: gzip, deflate`).
+  - `/api/jack07/detail/{mid}` — full match detail + streams[] + site_url.
+  - `/api/jack07/events/{mid}` — real-time goals/cards/fouls/subs (15 s cache).
+  - `/api/jack07/stats/{mid}` — possession, shots, attacks, etc. (15 s cache, French labels mapped from numeric codes 100-115).
+  - `/api/jack07/streams/{mid}` — resolves each source (FIFA US, DAZN ES, Canal FR, …) to a playable m3u8 URL via `/api/stream/detail` + ROT47 cipher.
+  - `/api/jack07/stream/{mid}/{sid}` — single-source resolve.
+  - `/api/v1/public/jack07/matches`, `/api/v1/public/jack07/detail/{mid}` — public namespace with opaque embed tokens (no upstream slugs leaked).
+  - `/embed/jack07/t/{token}` — backend 302 to SPA route.
+- **Jack07 frontend** — `Jack07TvTab.jsx` (live/upcoming/finished filter + league pills + search), `Jack07Overlay.jsx` (modal with player at top + score banner + events panel + stats panel below). Native hls.js player tries first; auto-falls back to iframing Jack07's player page when the CDN rejects segments (HTTP 487 — the upstream binds segments to the IP that resolved /api/stream/detail, which is our backend, not the user's browser). Server picker shown in native mode. Standalone embed at `/embed/jack07/:matchId`.
+- **Pydantic core fix**: downgraded `pydantic-core` to `2.27.2` to match `pydantic 2.10.4` (was 2.46.4 which broke imports).
+- **Env files restored**: `/app/backend/.env` and `/app/frontend/.env` were missing on fork start. Recreated with MongoDB local + Supabase project + Deltawatch URL.
+- **ApiDocs**: new "Jack07 TV" card listing `/api/v1/public/jack07/matches` with sample payload.
+
 ### 2026-02-12 (session — fix: stale TV channel IDs break embeds on reload)
 - **Bug**: TV embeds (`/embed/{channel_id}`) worked on first load but returned `{"detail":"Chaîne introuvable"}` after a page reload / when bookmarked. Channel IDs are formatted `{raw_cid}-{md5_url_hash[:14]}` and the upstream-provided `raw_cid` portion is NOT stable across catalog refreshes (~15 min). The 14-char url-hash suffix IS stable. Old shared embed URLs / iframes therefore broke as soon as the in-memory catalog refreshed.
 - **Fix** (`/app/backend/server.py`): added `_find_channel(channels, channel_id)` helper which tries an exact `id` match first, then falls back to matching by the trailing 14-hex-char url-hash suffix. Wired into both `/api/v1/public/channel/{id}` and `/api/stream/{id}`. The stream endpoint now also returns the channel's *canonical* current id so stats stay consistent.

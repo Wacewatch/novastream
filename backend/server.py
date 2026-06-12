@@ -216,20 +216,25 @@ import base64 as _b64
 STREAM_SECRET = os.environ.get("STREAM_SECRET") or "livewatch-default-stream-secret-change-me"
 STREAM_TOKEN_TTL = int(os.environ.get("STREAM_TOKEN_TTL", "7200"))  # 2h default
 
-def _sign_stream_url(upstream_url: str, ttl: Optional[int] = None) -> str:
+def _sign_stream_url(upstream_url: str, ttl: Optional[int] = None, *, no_deltawatch: bool = False) -> str:
     """Return an opaque base64url token that hides the upstream URL.
 
     Layout (before base64url):
-        <exp_unix_ts>|<upstream_url>||<16-byte-hmac>
+        <exp_unix_ts>|<flags>|<upstream_url>||<16-byte-hmac>
+
+    Flags string is empty by default. ``no_deltawatch=True`` sets the
+    ``nodw`` flag so that /api/hls bypasses the Deltawatch wrapper for
+    this URL (used for Jack07 streams that are not on a Vavoo host).
     """
     exp = int(time.time()) + (ttl if ttl is not None else STREAM_TOKEN_TTL)
-    payload = f"{exp}|{upstream_url}".encode("utf-8")
+    flags = "nodw" if no_deltawatch else ""
+    payload = f"{exp}|{flags}|{upstream_url}".encode("utf-8")
     sig = _hmac.new(STREAM_SECRET.encode("utf-8"), payload, _hashlib.sha256).digest()[:16]
     raw = payload + b"||" + sig
     return _b64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
 
-def _verify_stream_token(token: str) -> Optional[str]:
-    """Validate token + return the upstream URL, or None on any failure."""
+def _verify_stream_token(token: str) -> Optional[Tuple[str, str]]:
+    """Validate token. Returns (upstream_url, flags) tuple, or None on failure."""
     if not token:
         return None
     try:
@@ -239,10 +244,16 @@ def _verify_stream_token(token: str) -> Optional[str]:
         expected = _hmac.new(STREAM_SECRET.encode("utf-8"), payload, _hashlib.sha256).digest()[:16]
         if not _hmac.compare_digest(sig, expected):
             return None
-        exp_s, url = payload.decode("utf-8").split("|", 1)
+        parts = payload.decode("utf-8").split("|", 2)
+        if len(parts) == 3:
+            exp_s, flags, url = parts
+        else:
+            # Legacy format: <exp>|<url>
+            exp_s, url = parts[0], parts[1]
+            flags = ""
         if int(exp_s) < int(time.time()):
             return None
-        return url
+        return (url, flags)
     except Exception:
         return None
 
@@ -1158,7 +1169,12 @@ async def hls_proxy(t: Optional[str] = None, u: Optional[str] = None):
         decoded = _verify_stream_token(t)
         if not decoded:
             raise HTTPException(status_code=401, detail="Token invalide ou expiré")
-        u = decoded
+        u, flags = decoded
+        # Per-token flag: skip Deltawatch when the upstream isn't on Vavoo
+        # (e.g. Jack07 streams hosted on tm3ubp4r5mk1strange.ru). We propagate
+        # the flag via a closure variable, kept on the request scope using a
+        # module-level dict keyed by id(coroutine).
+        bypass_dw = "nodw" in (flags or "")
     elif u:
         # Legacy callers without token: refuse to act as an open proxy.
         raise HTTPException(status_code=401, detail="Token requis")
@@ -1187,10 +1203,13 @@ async def hls_proxy(t: Optional[str] = None, u: Optional[str] = None):
                 return Response(content=cached[0], media_type=cached[1])
 
         # Single-flight pattern: 1 upstream fetch shared by ALL waiting viewers.
-        task = _hls_inflight.get(u)
+        # Cache key includes the bypass flag so Vavoo (DW-on) and Jack07 (DW-off)
+        # never collide on the same upstream URL.
+        cache_key = ("nodw:" if bypass_dw else "") + u
+        task = _hls_inflight.get(cache_key)
         if task is None or task.done():
-            task = asyncio.create_task(_fetch_playlist(u))
-            _hls_inflight[u] = task
+            task = asyncio.create_task(_fetch_playlist(u, bypass_dw=bypass_dw))
+            _hls_inflight[cache_key] = task
 
         try:
             entry = await asyncio.shield(task)
@@ -1205,13 +1224,13 @@ async def hls_proxy(t: Optional[str] = None, u: Optional[str] = None):
     # Segments (.ts, .key, .m4s, …): stream directly, NO cache
     try:
         cx = await get_http_client()
-        # Route via Deltawatch when configured. PHP proxy streams the segment
-        # back with proper content-type. Falls through to direct if it fails.
+        # Route via Deltawatch when configured AND not bypassed by the token.
         # IMPORTANT: don't double-wrap — if the URL is already a Deltawatch
         # one (because the playlist returned by Deltawatch already pointed
         # back to itself), use it as-is.
         already_dw = bool(DELTAWATCH_URL) and u.startswith(DELTAWATCH_URL)
-        seg_url = u if already_dw else (_dw_wrap(u, "hls_segment") if _dw_enabled() else u)
+        use_dw = _dw_enabled() and not bypass_dw
+        seg_url = u if already_dw else (_dw_wrap(u, "hls_segment") if use_dw else u)
         upstream_req = cx.build_request(
             "GET",
             seg_url,
@@ -1219,7 +1238,7 @@ async def hls_proxy(t: Optional[str] = None, u: Optional[str] = None):
             timeout=httpx.Timeout(30.0, connect=10.0),
         )
         r = await cx.send(upstream_req, stream=True)
-        if r.status_code >= 400 and _dw_enabled() and seg_url != u:
+        if r.status_code >= 400 and use_dw and seg_url != u:
             # Deltawatch errored on this segment — retry direct.
             await r.aclose()
             _dw_mark_failure()
@@ -1249,33 +1268,35 @@ async def hls_proxy(t: Optional[str] = None, u: Optional[str] = None):
 async def _stream_bytes(data: bytes):
     yield data
 
-async def _fetch_playlist(u: str) -> Tuple[bytes, str, float]:
+async def _fetch_playlist(u: str, *, bypass_dw: bool = False) -> Tuple[bytes, str, float]:
     """Background single-flight fetcher for an HLS playlist URL. Called as
     a Task so its lifetime is independent of any incoming request. Populates
-    `_hls_cache[u]` on success and pops itself from `_hls_inflight` at the end."""
+    `_hls_cache[u]` on success and pops itself from `_hls_inflight` at the end.
+
+    ``bypass_dw=True`` skips the Deltawatch wrapper (used for Jack07 streams).
+    """
     try:
         cx = await get_http_client()
-        # Route via Deltawatch when configured & healthy. The PHP proxy handles
-        # the upstream m3u8 download, leaves the manifest body intact so we can
-        # still rewrite individual segment URLs to /api/hls?t=… for caching.
-        fetch_url = _dw_wrap(u, "hls_manifest") if _dw_enabled() else u
+        # Route via Deltawatch when configured & healthy AND not bypassed.
+        use_dw = _dw_enabled() and not bypass_dw
+        fetch_url = _dw_wrap(u, "hls_manifest") if use_dw else u
         try:
             r = await cx.get(fetch_url, headers={"User-Agent": USER_AGENT_STREAM}, timeout=15.0)
-            if _dw_enabled() and r.status_code != 200:
+            if use_dw and r.status_code != 200:
                 _dw_mark_failure()
                 # Retry direct if Deltawatch returned an error
                 r = await cx.get(u, headers={"User-Agent": USER_AGENT_STREAM}, timeout=15.0)
-            elif _dw_enabled():
+            elif use_dw:
                 _dw_mark_success()
         except Exception:
-            if _dw_enabled():
+            if use_dw:
                 _dw_mark_failure()
             r = await cx.get(u, headers={"User-Agent": USER_AGENT_STREAM}, timeout=15.0)
         ct = r.headers.get("content-type", "").lower()
         is_m3u8 = ("mpegurl" in ct) or ("application/vnd.apple" in ct) or (".m3u8" in u.lower().split("?")[0])
         if is_m3u8:
             text = r.text
-            rewritten = _rewrite_m3u8(text, u).encode("utf-8")
+            rewritten = _rewrite_m3u8(text, u, no_deltawatch=bypass_dw).encode("utf-8")
             media = "application/vnd.apple.mpegurl"
             entry: Tuple[bytes, str, float] = (rewritten, media, time.time() + HLS_PLAYLIST_TTL)
             rds = await get_redis()
@@ -1296,9 +1317,10 @@ async def _fetch_playlist(u: str) -> Tuple[bytes, str, float]:
         return (r.content, media2, time.time())
     finally:
         # Remove ourselves so the next miss can schedule a fresh fetch
-        _hls_inflight.pop(u, None)
+        cache_key = ("nodw:" if bypass_dw else "") + u
+        _hls_inflight.pop(cache_key, None)
 
-def _rewrite_m3u8(playlist: str, base_url: str) -> str:
+def _rewrite_m3u8(playlist: str, base_url: str, *, no_deltawatch: bool = False) -> str:
     out_lines = []
     for line in playlist.splitlines():
         s = line.strip()
@@ -1312,7 +1334,7 @@ def _rewrite_m3u8(playlist: str, base_url: str) -> str:
                 if re.match(r"^(data|urn|skd):", uri, re.I):
                     return f'URI="{uri}"'
                 abs_url = _absolute_url(uri, base_url)
-                return f'URI="/api/hls?t={_sign_stream_url(abs_url)}"'
+                return f'URI="/api/hls?t={_sign_stream_url(abs_url, no_deltawatch=no_deltawatch)}"'
             new_line = re.sub(r'URI="([^"]+)"', repl, line)
             out_lines.append(new_line)
         else:
@@ -1320,7 +1342,7 @@ def _rewrite_m3u8(playlist: str, base_url: str) -> str:
                 out_lines.append(line)
             else:
                 abs_url = _absolute_url(s, base_url)
-                out_lines.append(f"/api/hls?t={_sign_stream_url(abs_url)}")
+                out_lines.append(f"/api/hls?t={_sign_stream_url(abs_url, no_deltawatch=no_deltawatch)}")
     return "\n".join(out_lines) + "\n"
 
 def _absolute_url(uri: str, base: str) -> str:
@@ -2148,6 +2170,7 @@ async def admin_global_stats(authorization: Optional[str] = Header(None)):
 # =====================================================================
 from jack07 import fetch_matches as _jack07_matches, fetch_detail as _jack07_detail  # noqa: E402
 from jack07 import fetch_events as _jack07_events, fetch_stats as _jack07_stats  # noqa: E402
+from jack07 import resolve_stream as _jack07_resolve_stream  # noqa: E402
 import base64 as _b64  # noqa: E402
 
 
@@ -2224,17 +2247,54 @@ async def jack07_match_stats(match_id: str):
 
 
 @api_router.get("/jack07/streams/{match_id}")
-async def jack07_match_streams(match_id: str):
-    """Just the available stream sources for a match (FIFA US, Canal FR, …).
-    The actual playback happens via the iframable site_url returned by /detail/.
+async def jack07_match_streams(match_id: str, request: Request):
+    """Available stream sources for a match (FIFA US, Canal FR, …), each
+    with the raw m3u8 URL. Jack07 segments use ephemeral CDN tokens that
+    can only be honoured by a browser executing Cloudflare JS, so we hand
+    the m3u8 URL directly to the client-side hls.js (CORS `*` is enabled
+    on the upstream CDN).
     """
     detail = await _jack07_detail(match_id)
     if not detail:
         raise HTTPException(status_code=404, detail="Match introuvable")
+    raw_streams = detail.get("streams") or []
+
+    sem = asyncio.Semaphore(4)
+
+    async def _resolve_one(s: Dict[str, Any]) -> Dict[str, Any]:
+        async with sem:
+            url = await _jack07_resolve_stream(
+                match_id=match_id,
+                stream_id=str(s.get("id")),
+                site_type=int(s.get("type") or 2001),
+            )
+        if not url:
+            return {"id": s.get("id"), "name": s.get("name"), "available": False}
+        return {
+            "id": s.get("id"),
+            "name": s.get("name"),
+            "quality": s.get("quality"),
+            "available": True,
+            "stream_url": url,  # raw m3u8 — browser plays it directly
+        }
+
+    resolved = await asyncio.gather(*[_resolve_one(s) for s in raw_streams])
     return {
-        "site_url": detail.get("site_url"),
-        "streams": detail.get("streams") or [],
+        "match_id": match_id,
+        "title": detail.get("title"),
+        "streams": resolved,
     }
+
+
+@api_router.get("/jack07/stream/{match_id}/{stream_id}")
+async def jack07_stream_resolve(match_id: str, stream_id: str, site_type: int = 2001):
+    """Resolve a single Jack07 source to the raw m3u8 URL."""
+    url = await _jack07_resolve_stream(
+        match_id=match_id, stream_id=stream_id, site_type=site_type,
+    )
+    if not url:
+        raise HTTPException(status_code=404, detail="Source indisponible")
+    return {"stream_url": url}
 
 
 # ----------------- Public Jack07 API (token-masked embeds) -----------------

@@ -6,13 +6,19 @@ All upstream responses are protobuf (application/x-protobuf). We use a
 generic wire-format decoder (no .proto schema needed) and a hand-rolled
 projection layer that maps the observed shape into ergonomic dicts.
 
-Channels of the match (FIFA US, DAZN ES, Canal FR …) come back as
-{streamId, name, type=2001} entries — we forward those names so the
-frontend can render a server picker. For playback we deliberately
-iframe Jack07's own player page (they allow framing: no X-Frame-Options,
-no CSP frame-ancestors restriction) since the m3u8 URLs are AES-encrypted
-client-side. That keeps the integration robust without re-implementing
-their token cipher.
+Stream resolution flow (reverse-engineered from /statics/*.js bundles):
+
+  1. /api/match/detail returns each match's available stream sources as
+     {streamId, name, siteType}. The display names are FIFA US, DAZN ES,
+     Canal FR, Movistar2, TyR, Fubo US, etc.
+  2. For a given source: GET /api/stream/detail?streamId=<sid>&siteType=<st>
+     &matchId=<mid>&sportType=1&country=US&continent=NA&digit=seth — returns
+     a protobuf with field (10,2,4) holding the URL ROT47-encrypted + an
+     8-byte prefix. Decoding it gives the **direct, playable** m3u8 URL.
+  3. The m3u8 plays without any AES `/token-XXXX/` segment — the token
+     only helps the upstream rate-limit; the unsigned manifest is served
+     just fine. We proxy it through our /api/hls handler so we can hide
+     the upstream host and tap into the same caching layer used by Vavoo.
 """
 import asyncio
 import logging
@@ -554,3 +560,62 @@ async def fetch_stats(match_id: str) -> List[Dict[str, Any]]:
         return _project_stats(root) if root else []
 
     return await _cached(f"stats:{match_id}", ttl=15.0, loader=_load) or []
+
+
+
+# --------------------------------------------------------------------- #
+# Stream URL resolution (ROT47 cipher reversed from /statics/*.js)
+# --------------------------------------------------------------------- #
+def _rot47(s: str) -> str:
+    """ROT47: shift each printable ASCII char by 47 within range 33-126.
+    The Jack07 stream URL is encrypted with ROT47 + an 8-byte garbage prefix.
+    Their JS does ``Decipher.crypt(url).slice(8)``."""
+    out = []
+    for c in s:
+        n = ord(c)
+        if 33 <= n <= 126:
+            out.append(chr(33 + ((n - 33 + 47) % 94)))
+        else:
+            out.append(c)
+    return "".join(out)
+
+
+async def resolve_stream(match_id: str, stream_id: str, site_type: int = 2001) -> Optional[str]:
+    """Resolve a Jack07 (matchId, streamId, siteType) tuple to a playable m3u8.
+
+    The /api/stream/detail endpoint accepts plain query params (no signature).
+    Tries each API host until one returns a usable URL. Cached for 60 s
+    because the URL embeds a time-window token in the path.
+    """
+    async def _load() -> Optional[str]:
+        params = {
+            "streamId": str(stream_id),
+            "siteType": str(site_type),
+            "continent": "NA",
+            "country": "US",
+            "digit": "seth",
+            "matchId": str(match_id),
+            "sportType": str(SPORT_FOOTBALL),
+        }
+        root = await _fetch_pb("/api/stream/detail", params)
+        if not root:
+            return None
+        enc = _s(_g(root, 10, 2, 4, default=""))
+        if not enc:
+            return None
+        try:
+            decoded = _rot47(enc)
+            if len(decoded) < 8:
+                return None
+            url = decoded[8:]  # strip the 8-byte garbage prefix
+            if not url.lower().startswith(("http://", "https://")):
+                return None
+            return url
+        except Exception:  # noqa: BLE001
+            return None
+
+    return await _cached(
+        f"stream:{match_id}:{stream_id}:{site_type}",
+        ttl=60.0,
+        loader=_load,
+    )
