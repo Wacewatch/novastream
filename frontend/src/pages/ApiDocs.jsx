@@ -163,6 +163,43 @@ const SECTIONS = [
 }`,
   },
   {
+    key: "daily",
+    accent: "#22d3ee",
+    title: "Matchs du jour",
+    intro:
+      "Bandeau \"Matchs du jour\" : tous les matchs (foot principalement) avec heure de coup d'envoi, logos d'équipes, scores live, statut (live / à venir / terminé) et ligue. Paramètre optionnel ?date=YYYY-MM-DD (défaut : aujourd'hui).",
+    url: `${BACKEND_URL}/api/v1/public/sports/daily`,
+    sample: `{
+  "date":            "2026-06-12",
+  "total":           6,
+  "live_count":      0,
+  "upcoming_count":  6,
+  "finished_count":  0,
+  "leagues":         ["FIFA World Cup", "Primera División (Chile)", "..."],
+  "matches": [
+    {
+      "id":              "760416",
+      "league":          "FIFA World Cup",
+      "league_slug":     "fifa.world",
+      "country":         "",
+      "kick_off":        "2026-06-12T19:00Z",
+      "kick_off_label":  "19:00",
+      "status_short":    "NS",
+      "status_label":    "",
+      "elapsed":         null,
+      "is_live":         false,
+      "is_finished":     false,
+      "home_name":       "Canada",
+      "home_logo":       "https://…/can.png",
+      "home_goals":      null,
+      "away_name":       "Bosnia-Herzegovina",
+      "away_logo":       "https://…/bih.png",
+      "away_goals":      null
+    }
+  ]
+}`,
+  },
+  {
     key: "info",
     accent: "#3b82f6",
     title: "Informations (Planning)",

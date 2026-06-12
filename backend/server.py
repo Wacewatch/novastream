@@ -161,6 +161,51 @@ async def _cache_set_json(key: str, value: Any, ttl: int) -> None:
             _mem_cache.pop(k, None)
 
 
+# ----------------- Signed stream tokens -----------------
+# Replace the previous open `/api/hls?u=<RAW_M3U8_URL>` query format with an
+# opaque `?t=<TOKEN>` so callers can no longer extract the raw upstream m3u8
+# URL by inspecting DevTools. Tokens are HMAC-signed with `STREAM_SECRET`,
+# carry the upstream URL + expiry, and are validated on every /api/hls call.
+# This keeps the public embed flow (modal + player) working untouched while
+# making direct hot-linking / m3u8 extraction non-trivial.
+import hmac as _hmac
+import hashlib as _hashlib
+import base64 as _b64
+
+STREAM_SECRET = os.environ.get("STREAM_SECRET") or "livewatch-default-stream-secret-change-me"
+STREAM_TOKEN_TTL = int(os.environ.get("STREAM_TOKEN_TTL", "7200"))  # 2h default
+
+def _sign_stream_url(upstream_url: str, ttl: Optional[int] = None) -> str:
+    """Return an opaque base64url token that hides the upstream URL.
+
+    Layout (before base64url):
+        <exp_unix_ts>|<upstream_url>||<16-byte-hmac>
+    """
+    exp = int(time.time()) + (ttl if ttl is not None else STREAM_TOKEN_TTL)
+    payload = f"{exp}|{upstream_url}".encode("utf-8")
+    sig = _hmac.new(STREAM_SECRET.encode("utf-8"), payload, _hashlib.sha256).digest()[:16]
+    raw = payload + b"||" + sig
+    return _b64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+def _verify_stream_token(token: str) -> Optional[str]:
+    """Validate token + return the upstream URL, or None on any failure."""
+    if not token:
+        return None
+    try:
+        pad = "=" * (-len(token) % 4)
+        raw = _b64.urlsafe_b64decode(token + pad)
+        payload, sig = raw.rsplit(b"||", 1)
+        expected = _hmac.new(STREAM_SECRET.encode("utf-8"), payload, _hashlib.sha256).digest()[:16]
+        if not _hmac.compare_digest(sig, expected):
+            return None
+        exp_s, url = payload.decode("utf-8").split("|", 1)
+        if int(exp_s) < int(time.time()):
+            return None
+        return url
+    except Exception:
+        return None
+
+
 def _client_ip(request: Request) -> str:
     """Best-effort client IP behind reverse-proxies (Kubernetes ingress).
 
@@ -1000,15 +1045,30 @@ async def get_stream_url(
     return {
         "id": canonical_id,
         "name": channel["name"],
-        "proxy_url": f"/api/hls?u={quote(upstream, safe='')}",
+        "proxy_url": f"/api/hls?t={_sign_stream_url(upstream)}",
     }
 
 @api_router.get("/hls")
-async def hls_proxy(u: str):
+async def hls_proxy(t: Optional[str] = None, u: Optional[str] = None):
     """Proxy HLS playlists & segments. Playlists are micro-cached (2 s) so
     that thousands of concurrent viewers on the same channel result in a
     single upstream fetch every 2 s. Uses a single-flight Task so all
-    waiting viewers wake up in parallel (not serialized like a Lock)."""
+    waiting viewers wake up in parallel (not serialized like a Lock).
+
+    Security: accepts ONLY a signed opaque `?t=<token>` parameter that hides
+    the upstream URL. The legacy `?u=<raw_url>` form is rejected (401) so
+    external callers can no longer extract the raw m3u8 from DevTools.
+    """
+    if t:
+        decoded = _verify_stream_token(t)
+        if not decoded:
+            raise HTTPException(status_code=401, detail="Token invalide ou expiré")
+        u = decoded
+    elif u:
+        # Legacy callers without token: refuse to act as an open proxy.
+        raise HTTPException(status_code=401, detail="Token requis")
+    else:
+        raise HTTPException(status_code=400, detail="Paramètre manquant")
     now = time.time()
     # Quick test: is this a playlist URL (.m3u8)?
     looks_like_playlist = ".m3u8" in u.lower().split("?")[0]
@@ -1124,7 +1184,7 @@ def _rewrite_m3u8(playlist: str, base_url: str) -> str:
                 if re.match(r"^(data|urn|skd):", uri, re.I):
                     return f'URI="{uri}"'
                 abs_url = _absolute_url(uri, base_url)
-                return f'URI="/api/hls?u={quote(abs_url, safe="")}"'
+                return f'URI="/api/hls?t={_sign_stream_url(abs_url)}"'
             new_line = re.sub(r'URI="([^"]+)"', repl, line)
             out_lines.append(new_line)
         else:
@@ -1132,7 +1192,7 @@ def _rewrite_m3u8(playlist: str, base_url: str) -> str:
                 out_lines.append(line)
             else:
                 abs_url = _absolute_url(s, base_url)
-                out_lines.append(f"/api/hls?u={quote(abs_url, safe='')}")
+                out_lines.append(f"/api/hls?t={_sign_stream_url(abs_url)}")
     return "\n".join(out_lines) + "\n"
 
 def _absolute_url(uri: str, base: str) -> str:

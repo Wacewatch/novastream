@@ -125,7 +125,7 @@ def test_hls_single_flight_concurrent(session):
         rs = session.get(f"{API}/stream/{ch['id']}", timeout=30)
         if rs.status_code == 200:
             data = rs.json()
-            if data.get("proxy_url", "").startswith("/api/hls?u="):
+            if data.get("proxy_url", "").startswith("/api/hls?t="):
                 proxy_url = data["proxy_url"]
                 break
     if not proxy_url:

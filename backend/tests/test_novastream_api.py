@@ -111,12 +111,11 @@ def test_stream_returns_proxy_url_hidden_source(session, french_channels):
         r = session.get(f"{API}/stream/{ch['id']}", timeout=30)
         if r.status_code == 200:
             data = r.json()
-            if data.get("proxy_url", "").startswith("/api/hls?u="):
+            if data.get("proxy_url", "").startswith("/api/hls?t="):
                 proxy_url = data["proxy_url"]
                 success = True
-                # source must not appear in response (except as encoded form in u= param)
+                # source must not appear in response — token is opaque base64
                 body_lower = r.text.lower()
-                # since URL is %-encoded, raw 'vavoo' / 'kool.to' should not appear
                 for w in FORBIDDEN_WORDS:
                     assert w not in body_lower, f"Forbidden {w} in /stream response"
                 break
@@ -131,7 +130,7 @@ def test_hls_proxy_rewrites_m3u8(session):
     proxy_url = getattr(pytest, "proxy_url", None)
     if not proxy_url:
         pytest.skip("No stream resolved in prior test")
-    # proxy_url looks like /api/hls?u=<encoded>
+    # proxy_url looks like /api/hls?t=<opaque_signed_token>
     full_url = f"{BASE_URL}{proxy_url}"
     r = session.get(full_url, timeout=30)
     assert r.status_code == 200
@@ -141,9 +140,9 @@ def test_hls_proxy_rewrites_m3u8(session):
     # Upstream domain references must not appear in the m3u8
     for w in FORBIDDEN_WORDS:
         assert w not in body_lower, f"Forbidden word '{w}' leaked into m3u8 playlist"
-    # Every non-comment, non-empty line should be /api/hls?u=
+    # Every non-comment, non-empty line should be /api/hls?t=<signed_token>
     for line in text.splitlines():
         s = line.strip()
         if not s or s.startswith("#"):
             continue
-        assert s.startswith("/api/hls?u="), f"Unrewritten line in m3u8: {s[:80]}"
+        assert s.startswith("/api/hls?t="), f"Unrewritten line in m3u8: {s[:80]}"
