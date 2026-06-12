@@ -1,0 +1,503 @@
+"""Jack07 TV scraper — decodes protobuf-encoded match data from the
+jack07eo.mpstickv5m73jgravity.my API and exposes a clean JSON view.
+
+Source of truth: https://jack07eo.mpstickv5m73jgravity.my (Football).
+All upstream responses are protobuf (application/x-protobuf). We use a
+generic wire-format decoder (no .proto schema needed) and a hand-rolled
+projection layer that maps the observed shape into ergonomic dicts.
+
+Channels of the match (FIFA US, DAZN ES, Canal FR …) come back as
+{streamId, name, type=2001} entries — we forward those names so the
+frontend can render a server picker. For playback we deliberately
+iframe Jack07's own player page (they allow framing: no X-Frame-Options,
+no CSP frame-ancestors restriction) since the m3u8 URLs are AES-encrypted
+client-side. That keeps the integration robust without re-implementing
+their token cipher.
+"""
+import asyncio
+import logging
+import struct
+import time
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
+
+import httpx
+
+logger = logging.getLogger("livewatch.jack07")
+
+# --------------------------------------------------------------------- #
+# Endpoints (discovered by parsing the SPA JS bundle)
+# --------------------------------------------------------------------- #
+JACK07_SITE = "https://jack07eo.mpstickv5m73jgravity.my"
+JACK07_API = "https://apis-data-defra10.tcore131ybdf.ru"
+LANG = 6   # French
+SPORT_FOOTBALL = 1
+
+_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36"
+)
+
+
+# --------------------------------------------------------------------- #
+# Generic protobuf wire-format decoder (no schema required)
+# --------------------------------------------------------------------- #
+def _read_varint(buf: bytes, pos: int) -> Tuple[int, int]:
+    n = 0
+    shift = 0
+    while True:
+        b = buf[pos]
+        pos += 1
+        n |= (b & 0x7F) << shift
+        if not (b & 0x80):
+            return n, pos
+        shift += 7
+
+
+def pb_decode(buf: bytes, depth: int = 0) -> Optional[Dict[int, Any]]:
+    """Decode a protobuf message into a {field_num: value | [value, …]} dict.
+    Length-delimited fields are recursively decoded when they look like
+    nested messages; otherwise they're returned as a utf-8 string. Returns
+    None if the buffer is not a valid protobuf message at the given depth.
+    """
+    out: Dict[int, Any] = {}
+    pos = 0
+    L = len(buf)
+    while pos < L:
+        try:
+            tag, pos = _read_varint(buf, pos)
+        except Exception:  # noqa: BLE001
+            return None
+        field = tag >> 3
+        wire = tag & 7
+        if wire == 0:  # varint
+            try:
+                v, pos = _read_varint(buf, pos)
+            except Exception:  # noqa: BLE001
+                return None
+            _pb_push(out, field, v)
+        elif wire == 1:  # 64-bit double
+            if pos + 8 > L:
+                return None
+            v = struct.unpack_from("<d", buf, pos)[0]
+            pos += 8
+            _pb_push(out, field, v)
+        elif wire == 2:  # length-delimited
+            try:
+                ln, pos = _read_varint(buf, pos)
+            except Exception:  # noqa: BLE001
+                return None
+            if pos + ln > L:
+                return None
+            data = buf[pos:pos + ln]
+            pos += ln
+            sub = pb_decode(data, depth + 1) if depth < 12 else None
+            if sub is not None and len(sub) > 0:
+                _pb_push(out, field, sub)
+            else:
+                try:
+                    s = data.decode("utf-8")
+                    if all((0x20 <= ord(c) <= 0x7E) or ord(c) >= 0x80 for c in s):
+                        _pb_push(out, field, s)
+                    else:
+                        _pb_push(out, field, data.hex())
+                except UnicodeDecodeError:
+                    _pb_push(out, field, data.hex())
+        elif wire == 5:  # 32-bit float
+            if pos + 4 > L:
+                return None
+            v = struct.unpack_from("<f", buf, pos)[0]
+            pos += 4
+            _pb_push(out, field, v)
+        else:
+            return None
+    return out
+
+
+def _pb_push(d: Dict[int, Any], k: int, v: Any) -> None:
+    if k in d:
+        if not isinstance(d[k], list):
+            d[k] = [d[k]]
+        d[k].append(v)
+    else:
+        d[k] = v
+
+
+def _as_list(x: Any) -> List[Any]:
+    if x is None:
+        return []
+    return x if isinstance(x, list) else [x]
+
+
+def _g(d: Optional[Dict[int, Any]], *path: int, default: Any = None) -> Any:
+    """Safely read d[path[0]][path[1]]… Returns default if any step is missing."""
+    cur: Any = d
+    for k in path:
+        if not isinstance(cur, dict):
+            return default
+        if k not in cur:
+            return default
+        cur = cur[k]
+    return cur if cur is not None else default
+
+
+# --------------------------------------------------------------------- #
+# HTTP helper
+# --------------------------------------------------------------------- #
+_client: Optional[httpx.AsyncClient] = None
+
+
+async def _get_client() -> httpx.AsyncClient:
+    global _client
+    if _client is None or _client.is_closed:
+        _client = httpx.AsyncClient(
+            timeout=httpx.Timeout(15.0, connect=8.0),
+            headers={
+                "User-Agent": _UA,
+                "Origin": JACK07_SITE,
+                "Referer": JACK07_SITE + "/",
+                "Accept-Language": "fr-FR,fr;q=0.9",
+            },
+            follow_redirects=True,
+            limits=httpx.Limits(max_keepalive_connections=20, max_connections=50),
+        )
+    return _client
+
+
+async def _fetch_pb(path: str, params: Dict[str, Any]) -> Optional[Dict[int, Any]]:
+    cx = await _get_client()
+    try:
+        r = await cx.get(f"{JACK07_API}{path}", params=params, headers={
+            "Accept-Encoding": "gzip, deflate, br",
+        })
+        if r.status_code != 200 or not r.content:
+            return None
+        return pb_decode(r.content)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"jack07 fetch failed {path}: {e}")
+        return None
+
+
+# --------------------------------------------------------------------- #
+# Projection: protobuf → clean dicts
+# --------------------------------------------------------------------- #
+# Status codes (observed empirically). 101+ = live, 0 = scheduled,
+# 4 = finished. Anything else is reported as "scheduled".
+_STATUS_LABELS = {
+    0: "scheduled",
+    1: "scheduled",
+    3: "scheduled",
+    4: "finished",
+    101: "1H",
+    102: "HT",
+    103: "2H",
+    104: "ET",
+    105: "BT",
+    106: "P",
+    13: "AET",
+}
+
+
+def _status_kind(s: int) -> str:
+    if s == 4:
+        return "finished"
+    if 100 <= s <= 110 or s == 13:
+        return "live"
+    return "scheduled"
+
+
+def _team(t: Optional[Dict[int, Any]]) -> Optional[Dict[str, Any]]:
+    if not isinstance(t, dict):
+        return None
+    tid = _g(t, 1, default=0)
+    name = _g(t, 3, 2, default="") or ""
+    logo = _g(t, 4, default="") or ""
+    if not (tid or name):
+        return None
+    return {"id": int(tid) if tid else 0, "name": name, "logo": logo}
+
+
+def _project_match(m: Dict[int, Any]) -> Optional[Dict[str, Any]]:
+    """Map a raw match protobuf dict to a clean JSON-friendly object."""
+    if not isinstance(m, dict):
+        return None
+    match_id = _g(m, 1)
+    if not match_id:
+        return None
+    kickoff_ms = _g(m, 3, default=0) or 0
+    status = int(_g(m, 4, default=0) or 0)
+    league = _g(m, 10) or {}
+    season = _g(m, 11) or {}
+
+    # field 30 carries [title, team1, team2] (one entry has just `2`=title,
+    # the others have `1`=side, `10`=team object).
+    teams_raw = _as_list(_g(m, 30))
+    title = ""
+    home: Optional[Dict[str, Any]] = None
+    away: Optional[Dict[str, Any]] = None
+    for entry in teams_raw:
+        if not isinstance(entry, dict):
+            continue
+        if not _g(entry, 1) and _g(entry, 2):
+            title = _g(entry, 2, default="") or title
+            continue
+        team_obj = _team(_g(entry, 10))
+        side = _g(entry, 1, default=0)
+        if team_obj is None:
+            continue
+        # Empirically, 1st team entry is home, 2nd is away
+        if home is None:
+            home = team_obj
+        else:
+            away = team_obj
+            break
+
+    # field 100 holds scores: {1:home_scores, 2:away_scores}.
+    # Sub-fields: 10=full-time, 11=half-time, 15=ET, 16=PSO, etc. We surface
+    # the highest-priority observed value (FT > ET > 2H > HT).
+    def _score(side: Dict[int, Any]) -> Optional[int]:
+        if not isinstance(side, dict):
+            return None
+        for k in (16, 15, 10, 11, 13, 12):
+            v = side.get(k)
+            if v is not None:
+                try:
+                    return int(v)
+                except Exception:  # noqa: BLE001
+                    pass
+        return None
+
+    scores_obj = _g(m, 100) or {}
+    home_score = _score(_g(scores_obj, 1)) if home else None
+    away_score = _score(_g(scores_obj, 2)) if away else None
+
+    extras = _g(m, 150) or {}
+    match_slug = _g(extras, 20, default="") or ""
+    league_slug = _g(extras, 21, default="") or ""
+    season_slug = _g(extras, 22, default="") or ""
+
+    # Build the jack07 site URL we will iframe
+    site_url = ""
+    if match_id and league_slug and match_slug:
+        site_url = (
+            f"{JACK07_SITE}/fr/football/{league_slug}-{match_id}/"
+            f"{match_slug}.html"
+        )
+
+    return {
+        "id": str(match_id),
+        "title": title or (f"{home['name']} vs {away['name']}" if home and away else ""),
+        "kick_off_ts": int(kickoff_ms / 1000) if kickoff_ms else 0,
+        "kick_off_iso": (
+            datetime.fromtimestamp(kickoff_ms / 1000, tz=timezone.utc).isoformat()
+            if kickoff_ms else ""
+        ),
+        "status": status,
+        "status_label": _STATUS_LABELS.get(status, ""),
+        "status_kind": _status_kind(status),
+        "is_live": _status_kind(status) == "live",
+        "is_finished": _status_kind(status) == "finished",
+        "league": {
+            "id": int(_g(league, 1, default=0) or 0),
+            "name": _g(league, 3, 2, default="") or "",
+            "logo": _g(league, 4, default="") or "",
+            "country": _g(league, 80, 3, 2, default="") or "",
+            "country_logo": _g(league, 80, 4, default="") or "",
+        },
+        "season": {
+            "id": int(_g(season, 1, default=0) or 0),
+            "name": _g(season, 50, 1, default="") or _g(season, 3, 2, default="") or "",
+        },
+        "home": home,
+        "away": away,
+        "home_score": home_score,
+        "away_score": away_score,
+        "match_slug": match_slug,
+        "league_slug": league_slug,
+        "season_slug": season_slug,
+        "site_url": site_url,
+    }
+
+
+def _project_streams(detail_root: Dict[int, Any]) -> List[Dict[str, Any]]:
+    """field 10.2 in /match/detail = list of stream entries.
+    Each: {1:streamId, 3:name "FIFA US", 5:1, 8:?, 9:type=2001}"""
+    streams_raw = _as_list(_g(detail_root, 10, 2))
+    out: List[Dict[str, Any]] = []
+    for s in streams_raw:
+        if not isinstance(s, dict):
+            continue
+        sid = _g(s, 1, default=0)
+        name = _g(s, 3, default="") or ""
+        if not sid or not name:
+            continue
+        out.append({
+            "id": str(sid),
+            "name": name,
+            "type": int(_g(s, 9, default=0) or 0),
+            "quality": int(_g(s, 11, default=0) or 0),
+        })
+    return out
+
+
+# Event type codes observed:
+#   101 = Goal,  102 = Penalty goal, 103 = Own goal, 104 = Missed penalty,
+#   106 = Foul,  108 = Substitution, 110 = Yellow card, 111 = Red card,
+#   112 = Second yellow, 10001 = period marker (kickoff/half-time/full-time)
+_EVENT_LABELS = {
+    101: "Goal", 102: "Penalty", 103: "Own goal", 104: "Missed penalty",
+    106: "Foul", 108: "Substitution", 110: "Yellow card", 111: "Red card",
+    112: "Second yellow", 10001: "Period",
+}
+
+
+def _project_events(root: Dict[int, Any]) -> List[Dict[str, Any]]:
+    items = _as_list(_g(root, 10, 1))
+    out: List[Dict[str, Any]] = []
+    for ev in items:
+        if not isinstance(ev, dict):
+            continue
+        kind = int(_g(ev, 3, default=0) or 0)
+        if kind == 10001:
+            continue  # skip period markers
+        team_id = _g(ev, 2, 1) if isinstance(_g(ev, 2), dict) else None
+        minute = _g(ev, 4, default="") or ""
+        score = _g(ev, 5, default="") or ""
+        # field 6 sometimes carries a free-text label (e.g. "Foul")
+        label_raw = _g(ev, 6, default="") if isinstance(_g(ev, 6), str) else ""
+        side = int(_g(ev, 7, default=0) or 0)  # 1=home, 2=away
+        player = _g(ev, 10) or _g(ev, 20) or {}
+        player_name = _g(player, 3, 2, default="") if isinstance(player, dict) else ""
+        out.append({
+            "kind": kind,
+            "label": _EVENT_LABELS.get(kind, label_raw or "Event"),
+            "minute": str(minute),
+            "score": score,
+            "side": "home" if side == 1 else ("away" if side == 2 else ""),
+            "team_id": int(team_id) if team_id else 0,
+            "player": player_name,
+        })
+    return out
+
+
+def _project_stats(root: Dict[int, Any]) -> List[Dict[str, Any]]:
+    """Each stat row carries a metric label and two numbers (home/away).
+    The protobuf wire shape uses field 1 for metric definition and fields
+    10/11 for the home/away values respectively. We emit a flat list so
+    the frontend can render arbitrary rows."""
+    items = _as_list(_g(root, 10, 1))
+    out: List[Dict[str, Any]] = []
+    for s in items:
+        if not isinstance(s, dict):
+            continue
+        label = _g(s, 1, 2, default="") or _g(s, 2, default="") or ""
+        # home/away numeric values are commonly at fields 10 & 11
+        home_v = _g(s, 10, default=None)
+        away_v = _g(s, 11, default=None)
+        # Some rows use 3/4 instead (percentages already pre-formatted)
+        if home_v is None and away_v is None:
+            home_v = _g(s, 3, default=None)
+            away_v = _g(s, 4, default=None)
+        if not label and home_v is None and away_v is None:
+            continue
+        out.append({
+            "label": label,
+            "home": _to_num(home_v),
+            "away": _to_num(away_v),
+        })
+    return out
+
+
+def _to_num(x: Any) -> Any:
+    if isinstance(x, dict):
+        # nested values are common for stats — try to surface a string repr
+        return _g(x, 2, default=None) or _g(x, 1, default=None)
+    if isinstance(x, float):
+        return round(x, 2)
+    return x
+
+
+# --------------------------------------------------------------------- #
+# Public async API used by /api/jack07/*
+# --------------------------------------------------------------------- #
+@dataclass
+class _CacheEntry:
+    value: Any
+    exp: float
+
+
+_cache: Dict[str, _CacheEntry] = {}
+_locks: Dict[str, asyncio.Lock] = {}
+
+
+async def _cached(key: str, ttl: float, loader):
+    now = time.time()
+    ent = _cache.get(key)
+    if ent and ent.exp > now:
+        return ent.value
+    lk = _locks.setdefault(key, asyncio.Lock())
+    async with lk:
+        # double-check after the lock
+        ent = _cache.get(key)
+        if ent and ent.exp > now:
+            return ent.value
+        val = await loader()
+        if val is not None:
+            _cache[key] = _CacheEntry(val, now + ttl)
+        return val
+
+
+async def fetch_matches(sport_type: int = SPORT_FOOTBALL, language: int = LANG) -> List[Dict[str, Any]]:
+    """List live + upcoming matches. Cached 60 s (live data changes fast)."""
+    async def _load() -> List[Dict[str, Any]]:
+        root = await _fetch_pb("/api/match/live", {"sportType": sport_type, "language": language})
+        if not root:
+            return []
+        items = _as_list(_g(root, 10, 1))
+        out = [m for m in (_project_match(x) for x in items) if m]
+        # Sort: live first (by status), then upcoming by kick-off
+        out.sort(key=lambda x: (
+            0 if x["is_live"] else (1 if x["status_kind"] == "scheduled" else 2),
+            x.get("kick_off_ts") or 0,
+        ))
+        return out
+
+    return await _cached(f"matches:{sport_type}:{language}", ttl=60.0, loader=_load) or []
+
+
+async def fetch_detail(match_id: str) -> Optional[Dict[str, Any]]:
+    """Match details + stream sources list (streamId, name)."""
+    async def _load() -> Optional[Dict[str, Any]]:
+        root = await _fetch_pb("/api/match/detail", {
+            "matchId": match_id, "sportType": SPORT_FOOTBALL, "language": LANG, "stream": "true",
+        })
+        if not root:
+            return None
+        match = _project_match(_g(root, 10, 1) or {})
+        if not match:
+            return None
+        match["streams"] = _project_streams(root)
+        return match
+
+    return await _cached(f"detail:{match_id}", ttl=30.0, loader=_load)
+
+
+async def fetch_events(match_id: str) -> List[Dict[str, Any]]:
+    async def _load() -> List[Dict[str, Any]]:
+        root = await _fetch_pb("/api/match/event", {
+            "matchId": match_id, "sportType": SPORT_FOOTBALL, "language": LANG,
+        })
+        return _project_events(root) if root else []
+
+    return await _cached(f"events:{match_id}", ttl=15.0, loader=_load) or []
+
+
+async def fetch_stats(match_id: str) -> List[Dict[str, Any]]:
+    async def _load() -> List[Dict[str, Any]]:
+        root = await _fetch_pb("/api/match/statistic", {
+            "matchId": match_id, "sportType": SPORT_FOOTBALL, "language": LANG,
+        })
+        return _project_stats(root) if root else []
+
+    return await _cached(f"stats:{match_id}", ttl=15.0, loader=_load) or []
