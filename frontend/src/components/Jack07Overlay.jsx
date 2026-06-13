@@ -567,16 +567,10 @@ function Jack07Iframe({ siteUrl, onBackToNative }) {
 
   const buildSrc = useCallback(() => {
     if (!siteUrl) return "about:blank";
-    // Server-side sanitised page: /api/jack07/embed/{mid} fetches the
-    // Jack07 HTML, injects `<base href>` to keep relative URLs working,
-    // and applies a CSS overlay that hides every selector we observed
-    // via DevTools (.middle-wrapper / .detail-tabs-place / .data-wrapper
-    // / .KEjcHh / .C9WQdz / ._78AmlI / 2nd .pstics, plus the Copier URL
-    // sibling) — only the .iframe-wropper player remains, full screen.
-    const mid = (siteUrl.match(/-(\d{4,})\//) || [])[1];
-    if (mid) {
-      return `${process.env.REACT_APP_BACKEND_URL}/api/jack07/embed/${mid}?_t=${Date.now()}`;
-    }
+    // ORIGINAL Jack07 URL — proxying through our backend broke playback
+    // (Jack07 SPA shows "Something went wrong" because cookies/storage
+    // don't carry across origins). We just iframe the upstream URL and
+    // hide the chrome with a parent-level CSS overlay (see below).
     const base = siteUrl.split("#")[0];
     const sep = base.includes("?") ? "&" : "?";
     return `${base}${sep}autoplay=1&muted=1&_t=${Date.now()}`;
@@ -646,15 +640,27 @@ function Jack07Iframe({ siteUrl, onBackToNative }) {
       <iframe
         src={buildSrcRef.current || siteUrl}
         title="Jack07 player"
-        className="absolute left-0 top-0 w-full h-full"
+        className="absolute left-0 top-0"
         style={{
+          // From DevTools on the actual Jack07 site at 750-px viewport,
+          // the `.iframe-wropper` (the player) measures EXACTLY 750 × 422
+          // (= 16/9). Everything below it inside `.livestream-page` (URL
+          // copier bar, .middle-wrapper sponsor, .detail-tabs-place,
+          // .pstics stats, .data-wrapper, .KEjcHh × 3, .C9WQdz) is at
+          // y > 422 in the page's coordinate system. So we render the
+          // iframe at 1500 × 845 (= 750 × 422 doubled for sharpness) and
+          // scale it down to the wrapper — only the player area is in view.
+          width: "1500px",
+          height: "845px",
+          transform: "scale(var(--ifrScale, 1))",
+          transformOrigin: "top left",
           border: "none",
           background: "#000",
         }}
         ref={iframeRef}
         allow="autoplay; encrypted-media; fullscreen; picture-in-picture; clipboard-write; web-share"
         allowFullScreen
-        referrerPolicy="strict-origin-when-cross-origin"
+        referrerPolicy="no-referrer-when-downgrade"
         scrolling="no"
         onLoad={() => setLoaded(true)}
         data-testid="jack07-iframe"
