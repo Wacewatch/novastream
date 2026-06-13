@@ -235,6 +235,31 @@ async def _fetch_pb(path: str, params: Dict[str, Any]) -> Optional[Dict[int, Any
     return None
 
 
+async def _fetch_pb_with_headers(path: str, params: Dict[str, Any]) -> Optional[Tuple[Dict[int, Any], Dict[str, str]]]:
+    """Like _fetch_pb but also returns the upstream response headers — we
+    need `rb-session` from /api/stream/detail to build the AES `/token-…/`
+    URL prefix that gates segment authentication."""
+    cx = await _get_client()
+    last_err: Optional[Exception] = None
+    for host in JACK07_API_HOSTS:
+        try:
+            r = await cx.get(f"{host}{path}", params=params, headers={
+                "Accept-Encoding": "gzip, deflate",
+            })
+            if r.status_code != 200 or not r.content:
+                continue
+            decoded = pb_decode(r.content)
+            if decoded is None:
+                continue
+            return decoded, dict(r.headers)
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            continue
+    if last_err:
+        logger.warning(f"jack07 fetch failed {path}: {last_err}")
+    return None
+
+
 # --------------------------------------------------------------------- #
 # Projection: protobuf → clean dicts
 # --------------------------------------------------------------------- #
@@ -339,8 +364,18 @@ def _project_match(m: Dict[int, Any], sport_type: int = SPORT_FOOTBALL) -> Optio
             return None
 
     scores_obj = _g(m, 100) or {}
-    home_score = _score(_g(scores_obj, 1)) if home else None
-    away_score = _score(_g(scores_obj, 2)) if away else None
+    # Only surface scores for matches that are actually live or finished.
+    # Upstream populates these fields even for scheduled matches (carry-over
+    # from the previous fixture between the same teams) which made the UI
+    # show "Naftan 3-1 Isloch" on a kick-off-later card. status 4 = FT,
+    # 100-110 + 13 = in-play.
+    status_kind_now = _status_kind(status)
+    if status_kind_now in ("live", "finished"):
+        home_score = _score(_g(scores_obj, 1)) if home else None
+        away_score = _score(_g(scores_obj, 2)) if away else None
+    else:
+        home_score = None
+        away_score = None
 
     # Individual sports (tennis, motorsport, fighting) often leave the team
     # entries empty and only populate the title 'Player A vs Player B'.
@@ -641,11 +676,14 @@ def _rot47(s: str) -> str:
 
 
 async def resolve_stream(match_id: str, stream_id: str, site_type: int = 2001, sport_type: int = SPORT_FOOTBALL) -> Optional[str]:
-    """Resolve a Jack07 (matchId, streamId, siteType) tuple to a playable m3u8.
+    """Resolve a Jack07 (matchId, streamId, siteType) tuple to a TOKENISED
+    m3u8 URL that includes the `/token-<aes>/` path prefix.
 
-    The /api/stream/detail endpoint accepts plain query params (no signature).
-    Tries each API host until one returns a usable URL. Cached for 60 s
-    because the URL embeds a time-window token in the path.
+    The Jack07 CDN gates every segment behind an outer `/token-<base64>/`
+    path segment whose value is AES-CBC(rb-session) (key/iv reversed from
+    /statics/*.js). Without this prefix, both the manifest and the segments
+    fall into an infinite 302 redirect loop on Cloudflare. We do the AES
+    server-side so the browser only ever sees our `/api/hls?t=…` proxy URL.
     """
     async def _load() -> Optional[str]:
         params = {
@@ -657,11 +695,16 @@ async def resolve_stream(match_id: str, stream_id: str, site_type: int = 2001, s
             "matchId": str(match_id),
             "sportType": str(sport_type),
         }
-        root = await _fetch_pb("/api/stream/detail", params)
-        if not root:
+        got = await _fetch_pb_with_headers("/api/stream/detail", params)
+        if not got:
             return None
+        root, headers = got
         enc = _s(_g(root, 10, 2, 4, default=""))
         if not enc:
+            return None
+        rb_session = headers.get("rb-session") or headers.get("Rb-Session") or ""
+        if not rb_session:
+            logger.warning("jack07 resolve_stream: rb-session header missing")
             return None
         try:
             decoded = _rot47(enc)
@@ -670,8 +713,9 @@ async def resolve_stream(match_id: str, stream_id: str, site_type: int = 2001, s
             url = decoded[8:]  # strip the 8-byte garbage prefix
             if not url.lower().startswith(("http://", "https://")):
                 return None
-            return url
-        except Exception:  # noqa: BLE001
+            return _wrap_with_token(url, rb_session)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"jack07 resolve_stream: {e}")
             return None
 
     return await _cached(
@@ -679,3 +723,35 @@ async def resolve_stream(match_id: str, stream_id: str, site_type: int = 2001, s
         ttl=60.0,
         loader=_load,
     )
+
+
+# AES key/IV verbatim from /statics/*.js (Jack07 SPA bundle).
+_JACK07_AES_KEY = bytes([0xa7, 0x98, 0x1c, 0xc9, 0xeb, 0x2f, 0x4d, 0x19,
+                         0xdc, 0xfe, 0xa5, 0x7b, 0x10, 0x1e, 0xcd, 0x89])
+_JACK07_AES_IV = bytes([0x80, 0x17, 0xd3, 0xa8, 0xf1, 0x40, 0x0d, 0x2f,
+                        0, 0, 0, 0, 0, 0, 0, 0])
+
+
+def _wrap_with_token(url: str, rb_session: str) -> str:
+    """Insert /token-{aes_b64(rb_session)}a/ between netloc and the rest of
+    the path. Matches what the Jack07 SPA does in Player.vue."""
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    from cryptography.hazmat.primitives import padding as _pad
+    from urllib.parse import urlparse, quote as _quote
+    import base64 as _b64
+
+    padder = _pad.PKCS7(128).padder()
+    pt = padder.update(rb_session.encode("utf-8")) + padder.finalize()
+    cipher = Cipher(algorithms.AES(_JACK07_AES_KEY), modes.CBC(_JACK07_AES_IV))
+    ct = cipher.encryptor().update(pt) + b""
+    # IMPORTANT: encode "/" too. The Jack07 SPA uses encodeURIComponent which
+    # percent-encodes "/". If left raw, urljoin treats it as a path separator
+    # and our /api/hls proxy ends up rewriting segments under a wrong base.
+    token = _quote(_b64.b64encode(ct).decode("ascii"), safe="") + "a"
+
+    u = urlparse(url)
+    new_path = f"/token-{token}{u.path}"
+    rebuilt = f"{u.scheme}://{u.netloc}{new_path}"
+    if u.query:
+        rebuilt += f"?{u.query}"
+    return rebuilt

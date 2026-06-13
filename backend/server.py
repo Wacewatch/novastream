@@ -2250,6 +2250,28 @@ async def jack07_match_detail(match_id: str, request: Request, sport: int = 1):
     return detail
 
 
+@api_router.get("/jack07/stream-counts")
+async def jack07_stream_counts(ids: str, sport: int = 1):
+    """Bulk source-count lookup. `ids` is a CSV of match IDs.
+
+    Used by the Jack07 TV tab to display "X sources" on each LIVE match
+    card without leaking upstream URLs. Detail responses are cached 30 s,
+    so repeat calls are cheap. Capped at 30 ids per request to bound
+    upstream load.
+    """
+    id_list = [s.strip() for s in (ids or "").split(",") if s.strip()][:30]
+    if not id_list:
+        return {"counts": {}}
+    async def _one(mid: str) -> Tuple[str, int]:
+        try:
+            d = await _jack07_detail(mid, sport_type=sport)
+            return mid, len((d or {}).get("streams") or [])
+        except Exception:  # noqa: BLE001
+            return mid, 0
+    results = await asyncio.gather(*[_one(m) for m in id_list], return_exceptions=False)
+    return {"counts": {mid: n for mid, n in results}}
+
+
 @api_router.get("/jack07/events/{match_id}")
 async def jack07_match_events(match_id: str, sport: int = 1):
     """Live match events (goals, cards, substitutions, fouls)."""
@@ -2264,49 +2286,49 @@ async def jack07_match_stats(match_id: str, sport: int = 1):
 
 @api_router.get("/jack07/streams/{match_id}")
 async def jack07_match_streams(match_id: str, request: Request, sport: int = 1):
-    """Stream sources for a match. Resolves each source server-side and
-    returns a **signed `proxy_url`** that funnels playback through our
-    `/api/hls` proxy (with the `nodw` flag so Deltawatch is bypassed for
-    Jack07 hosts). The browser never sees the upstream URL and segments
-    don't need any client-side AES dance — the proxy fetches from our
-    backend IP which matches the rb-session binding.
+    """Stream sources for a match.
+
+    Returns BOTH a client-side `api_url` (call /api/stream/detail directly
+    from the browser to get a per-user-IP rb-session — required because the
+    Jack07 segment CDN is geo-restricted and refuses traffic from our
+    backend IP) AND a server-resolved `proxy_url` kept as fallback for
+    backend-friendly hosts. The browser tries `api_url` first; if it fails
+    (CORS or geo-block) it falls back to the iframe player.
     """
     detail = await _jack07_detail(match_id, sport_type=sport)
     if not detail:
         raise HTTPException(status_code=404, detail="Match introuvable")
     raw_streams = detail.get("streams") or []
+    # Pick the first responsive API host (mirror of JACK07_API_HOSTS).
+    api_base = "https://apis-data10.tcore131ybdf.ru"
     pub: List[Dict[str, Any]] = []
-    # Resolve all sources in parallel to keep response time low.
-    async def _resolve_one(s: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    from urllib.parse import urlencode as _qs
+    for s in raw_streams:
         sid = s.get("id")
         site_type = int(s.get("type") or 2001)
         if not sid:
-            return None
-        url = await _jack07_resolve_stream(
-            match_id=match_id, stream_id=str(sid),
-            site_type=site_type, sport_type=sport,
-        )
-        if not url:
-            return None
-        token = _sign_stream_url(url, no_deltawatch=True)
-        return {
+            continue
+        params = {
+            "streamId": str(sid),
+            "siteType": str(site_type),
+            "continent": "NA",
+            "country": "US",
+            "digit": "seth",
+            "matchId": str(match_id),
+            "sportType": str(sport),
+        }
+        pub.append({
             "id": sid,
             "name": s.get("name"),
             "quality": s.get("quality"),
-            "proxy_url": f"/api/hls?t={token}",
-        }
-
-    resolved = await asyncio.gather(
-        *[_resolve_one(s) for s in raw_streams],
-        return_exceptions=True,
-    )
-    for item in resolved:
-        if isinstance(item, dict) and item.get("proxy_url"):
-            pub.append(item)
+            # Direct upstream API the browser hits — bypasses our backend
+            # which is sometimes geo-blocked on segment edges.
+            "api_url": f"{api_base}/api/stream/detail?{_qs(params)}",
+        })
     return {
         "match_id": match_id,
         "title": detail.get("title"),
-        "site_url": detail.get("site_url"),  # for iframe fallback only
+        "site_url": detail.get("site_url"),  # iframe fallback
         "streams": pub,
     }
 

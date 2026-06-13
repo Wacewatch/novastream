@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import axios from "axios";
 import Hls from "hls.js";
 import {
@@ -7,16 +7,118 @@ import {
 } from "lucide-react";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
-const BACKEND_BASE = process.env.REACT_APP_BACKEND_URL || "";
+
+// AES-CBC key/IV reverse-engineered from /statics/*.js of the Jack07 SPA.
+// The Jack07 CDN gates segment authentication behind `/token-<aes>/...`.
+// We do the AES IN THE BROWSER because the segment CDN edge is geo-locked
+// to the user's IP — a server-side proxy gets 403 on segments even when the
+// manifest itself returns 200.
+const _AES_KEY = new Uint8Array([0xa7,0x98,0x1c,0xc9,0xeb,0x2f,0x4d,0x19,0xdc,0xfe,0xa5,0x7b,0x10,0x1e,0xcd,0x89]);
+const _AES_IV  = new Uint8Array([0x80,0x17,0xd3,0xa8,0xf1,0x40,0x0d,0x2f,0,0,0,0,0,0,0,0]);
+
+function _rot47(s) {
+  let out = "";
+  for (let i = 0; i < s.length; i++) {
+    const n = s.charCodeAt(i);
+    if (n >= 33 && n <= 126) out += String.fromCharCode(33 + ((n - 33 + 47) % 94));
+    else out += s[i];
+  }
+  return out;
+}
+
+// Minimal protobuf reader — we only need length-delimited (wire type 2) and
+// varint (0). Sufficient to walk to field 10.2.4 in the /stream/detail body.
+function _pbReadVarint(buf, pos) {
+  let n = 0, s = 0, i = pos;
+  while (i < buf.length) {
+    const b = buf[i++];
+    n |= (b & 0x7F) << s;
+    if (!(b & 0x80)) return { value: n, pos: i };
+    s += 7;
+  }
+  return { value: n, pos: i };
+}
+function _pbFindField(buf, fieldNumber) {
+  let pos = 0;
+  while (pos < buf.length) {
+    const t = _pbReadVarint(buf, pos);
+    pos = t.pos;
+    const fnum = t.value >>> 3;
+    const wire = t.value & 7;
+    if (wire === 2) {
+      const L = _pbReadVarint(buf, pos);
+      const len = L.value;
+      pos = L.pos;
+      const slice = buf.subarray(pos, pos + len);
+      pos += len;
+      if (fnum === fieldNumber) return slice;
+    } else if (wire === 0) {
+      pos = _pbReadVarint(buf, pos).pos;
+    } else if (wire === 1) {
+      pos += 8;
+    } else if (wire === 5) {
+      pos += 4;
+    } else {
+      break;
+    }
+  }
+  return null;
+}
+function _bytesToLatin1(buf) {
+  let s = "";
+  for (let i = 0; i < buf.length; i++) s += String.fromCharCode(buf[i]);
+  return s;
+}
+
+async function _aesEncryptB64(plaintext) {
+  const enc = new TextEncoder().encode(plaintext);
+  const key = await crypto.subtle.importKey("raw", _AES_KEY, { name: "AES-CBC" }, false, ["encrypt"]);
+  // SubtleCrypto AES-CBC auto-applies PKCS7 — pass raw plaintext.
+  const ct = await crypto.subtle.encrypt({ name: "AES-CBC", iv: _AES_IV }, key, enc);
+  let bin = "";
+  const u8 = new Uint8Array(ct);
+  for (let i = 0; i < u8.length; i++) bin += String.fromCharCode(u8[i]);
+  return btoa(bin);
+}
 
 /**
- * Jack07 TV playback overlay.
- *
- * The BACKEND resolves each Jack07 stream and returns a signed `proxy_url`
- * pointing at our `/api/hls` HLS proxy. The proxy handles the ROT47 +
- * rb-session IP binding entirely server-side, so the browser just needs to
- * feed `proxy_url` to hls.js. If playback fails for any reason we fall
- * back to iframing the Jack07 site player (which carries its own session).
+ * Calls /api/stream/detail directly, extracts the ROT47-protected m3u8 URL,
+ * AES-encrypts the rb-session header into a `/token-<aes>/` prefix and
+ * returns the playable, IP-bound m3u8 URL. Throws on any failure.
+ */
+async function resolveJack07Stream(apiUrl) {
+  const r = await fetch(apiUrl, { method: "GET", credentials: "omit" });
+  if (!r.ok) throw new Error(`upstream ${r.status}`);
+  const rbSession = r.headers.get("rb-session") || r.headers.get("Rb-Session");
+  if (!rbSession) throw new Error("rb-session header missing");
+  const buf = new Uint8Array(await r.arrayBuffer());
+
+  // Walk fields: 10 → 2 → 4. Each is wire-type 2 (length-delimited).
+  const f10 = _pbFindField(buf, 10);
+  if (!f10) throw new Error("pb field 10 missing");
+  const f10_2 = _pbFindField(f10, 2);
+  if (!f10_2) throw new Error("pb field 10.2 missing");
+  const f10_2_4 = _pbFindField(f10_2, 4);
+  if (!f10_2_4) throw new Error("pb field 10.2.4 missing");
+
+  const encStr = _bytesToLatin1(f10_2_4);
+  const decoded = _rot47(encStr);
+  if (decoded.length < 8) throw new Error("decoded too short");
+  const cleanUrl = decoded.slice(8);
+  if (!/^https?:\/\//i.test(cleanUrl)) throw new Error("not a URL");
+
+  const tokenB64 = await _aesEncryptB64(rbSession);
+  // encodeURIComponent — must encode "/" so urljoin in the player doesn't
+  // mis-parse the path. Append the trailing "a" the SPA does (length byte).
+  const token = encodeURIComponent(tokenB64) + "a";
+  const u = new URL(cleanUrl);
+  return `${u.protocol}//${u.host}/token-${token}${u.pathname}${u.search}`;
+}
+
+/**
+ * Jack07 TV playback overlay. Resolves streams CLIENT-SIDE (see comments
+ * above) and feeds the IP-bound m3u8 URL to hls.js. Falls back to the
+ * Jack07 iframe player if resolution or playback fails.
  */
 export default function Jack07Overlay({ match, detail: initialDetail, onClose }) {
   const sportType = match?.sport_type || initialDetail?.sport_type || 1;
@@ -31,6 +133,7 @@ export default function Jack07Overlay({ match, detail: initialDetail, onClose })
 
   const matchId = match?.id || detail?.id;
 
+  // Fetch full detail (kept fresh in case prefetch was stale)
   useEffect(() => {
     if (!matchId) return;
     let cancelled = false;
@@ -38,11 +141,12 @@ export default function Jack07Overlay({ match, detail: initialDetail, onClose })
       try {
         const r = await axios.get(`${API}/jack07/detail/${matchId}`, { params: { sport: sportType } });
         if (!cancelled) setDetail(r.data);
-      } catch { /* keep initial */ }
+      } catch { /* keep prefetch */ }
     })();
     return () => { cancelled = true; };
   }, [matchId, sportType]);
 
+  // Fetch stream sources (with upstream api_url for client-side resolve)
   useEffect(() => {
     if (!matchId) return;
     let cancelled = false;
@@ -52,7 +156,7 @@ export default function Jack07Overlay({ match, detail: initialDetail, onClose })
       try {
         const r = await axios.get(`${API}/jack07/streams/${matchId}`, { params: { sport: sportType } });
         if (cancelled) return;
-        const list = (r.data?.streams || []).filter((s) => s.proxy_url);
+        const list = (r.data?.streams || []).filter((s) => s.api_url);
         if (!list.length) {
           setStreamError("Aucune source disponible pour ce match");
           setStreams([]);
@@ -94,6 +198,19 @@ export default function Jack07Overlay({ match, detail: initialDetail, onClose })
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
+  // ---- Auto-fallback to iframe if no source resolves in 3 s ----
+  useEffect(() => {
+    if (mode !== "native" || loadingStreams) return;
+    if (streamError && (detail?.site_url || match?.site_url)) {
+      const t = setTimeout(() => setMode("iframe"), 3000);
+      return () => clearTimeout(t);
+    }
+  }, [streamError, loadingStreams, mode, detail?.site_url, match?.site_url]);
+
+  const handleFatal = useCallback(() => {
+    if (detail?.site_url || match?.site_url) setMode("iframe");
+  }, [detail?.site_url, match?.site_url]);
+
   const activeStream = streams?.find((s) => s.id === activeId) || streams?.[0];
   const siteUrl = detail?.site_url || match?.site_url || "";
 
@@ -106,6 +223,7 @@ export default function Jack07Overlay({ match, detail: initialDetail, onClose })
   const statusLabel = detail?.status_label || match?.status_label || "";
   const leagueName = detail?.league?.name || match?.league?.name || "";
   const sportLabel = detail?.sport || match?.sport || "";
+  const sourcesCount = streams?.length ?? 0;
 
   return (
     <div className="fixed inset-0 z-[80] bg-black/95 backdrop-blur-md overflow-y-auto" data-testid="jack07-overlay">
@@ -128,6 +246,11 @@ export default function Jack07Overlay({ match, detail: initialDetail, onClose })
                   {statusLabel}
                 </span>
               )}
+              {sourcesCount > 0 && (
+                <span className="text-amber-400 font-semibold" data-testid="jack07-sources-count">
+                  {sourcesCount} source{sourcesCount > 1 ? "s" : ""}
+                </span>
+              )}
             </div>
           </div>
           <button onClick={onClose} className="iframe-player-btn iframe-player-btn-close" title="Fermer" data-testid="jack07-close">
@@ -139,11 +262,11 @@ export default function Jack07Overlay({ match, detail: initialDetail, onClose })
           <div className="mx-auto max-w-6xl space-y-4">
             {mode === "native" ? (
               <Jack07Player
-                proxyUrl={activeStream?.proxy_url}
+                apiUrl={activeStream?.api_url}
                 loading={loadingStreams}
                 error={streamError}
                 channelName={activeStream?.name || ""}
-                onFatalError={() => siteUrl && setMode("iframe")}
+                onFatalError={handleFatal}
               />
             ) : (
               <Jack07Iframe siteUrl={siteUrl} onBackToNative={() => setMode("native")} />
@@ -245,11 +368,11 @@ export default function Jack07Overlay({ match, detail: initialDetail, onClose })
 }
 
 /**
- * Minimal hls.js-backed player. Feeds `proxyUrl` (an /api/hls?t=… URL on
- * our own backend) straight to hls.js. The backend handles all upstream
- * authentication so this component stays simple.
+ * hls.js-backed player. Calls `resolveJack07Stream(apiUrl)` to obtain an
+ * IP-bound tokenised m3u8 URL, then plays it. If resolution or playback
+ * fails (network / hls fatal), bubbles up via `onFatalError`.
  */
-function Jack07Player({ proxyUrl, loading, error, channelName, onFatalError }) {
+function Jack07Player({ apiUrl, loading, error, channelName, onFatalError }) {
   const videoRef = useRef(null);
   const wrapRef = useRef(null);
   const hlsRef = useRef(null);
@@ -260,10 +383,9 @@ function Jack07Player({ proxyUrl, loading, error, channelName, onFatalError }) {
   const [buffering, setBuffering] = useState(false);
 
   useEffect(() => {
-    if (!proxyUrl || !videoRef.current) return;
+    if (!apiUrl || !videoRef.current) return;
+    let cancelled = false;
     const video = videoRef.current;
-    const absUrl = proxyUrl.startsWith("http") ? proxyUrl : `${BACKEND_BASE}${proxyUrl}`;
-
     setPlayerErr(null);
     setBuffering(true);
 
@@ -272,49 +394,66 @@ function Jack07Player({ proxyUrl, loading, error, channelName, onFatalError }) {
       hlsRef.current = null;
     }
 
-    const playPromise = () => video.play().then(() => setPlaying(true)).catch(() => setPlaying(false));
-
-    if (video.canPlayType("application/vnd.apple.mpegurl")) {
-      video.src = absUrl;
-      const onLoaded = () => { setBuffering(false); playPromise(); };
-      video.addEventListener("loadeddata", onLoaded, { once: true });
-      return () => { video.removeEventListener("loadeddata", onLoaded); };
-    }
-
-    if (!Hls.isSupported()) {
-      setPlayerErr("HLS non supporté par ce navigateur");
+    const fail = (msg) => {
+      if (cancelled) return;
+      setPlayerErr(msg);
       setBuffering(false);
-      return;
-    }
+      if (typeof onFatalError === "function") setTimeout(() => onFatalError(), 800);
+    };
 
-    const hls = new Hls({
-      enableWorker: true,
-      lowLatencyMode: true,
-      liveSyncDurationCount: 3,
-      liveMaxLatencyDurationCount: 8,
-      manifestLoadingTimeOut: 12000,
-      manifestLoadingMaxRetry: 3,
-      fragLoadingTimeOut: 20000,
-      fragLoadingMaxRetry: 4,
-    });
-    hlsRef.current = hls;
-    hls.attachMedia(video);
-    hls.on(Hls.Events.MEDIA_ATTACHED, () => hls.loadSource(absUrl));
-    hls.on(Hls.Events.MANIFEST_PARSED, () => { setBuffering(false); playPromise(); });
-    hls.on(Hls.Events.ERROR, (_evt, data) => {
-      if (!data.fatal) return;
-      if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-        try { hls.recoverMediaError(); } catch { setPlayerErr("Erreur média"); }
-      } else {
-        setPlayerErr("Flux indisponible — bascule vers le lecteur Jack07…");
-        if (typeof onFatalError === "function") setTimeout(() => onFatalError(), 800);
+    (async () => {
+      let m3u8Url;
+      try {
+        m3u8Url = await resolveJack07Stream(apiUrl);
+      } catch (e) {
+        fail("Source indisponible — bascule vers le lecteur Jack07…");
+        return;
       }
-    });
+      if (cancelled) return;
+
+      const playPromise = () => video.play().then(() => setPlaying(true)).catch(() => setPlaying(false));
+
+      if (video.canPlayType("application/vnd.apple.mpegurl")) {
+        video.src = m3u8Url;
+        const onLoaded = () => { if (!cancelled) { setBuffering(false); playPromise(); } };
+        video.addEventListener("loadeddata", onLoaded, { once: true });
+        return;
+      }
+
+      if (!Hls.isSupported()) {
+        fail("HLS non supporté par ce navigateur");
+        return;
+      }
+
+      const hls = new Hls({
+        enableWorker: true,
+        lowLatencyMode: true,
+        liveSyncDurationCount: 3,
+        liveMaxLatencyDurationCount: 8,
+        manifestLoadingTimeOut: 12000,
+        manifestLoadingMaxRetry: 2,
+        fragLoadingTimeOut: 20000,
+        fragLoadingMaxRetry: 4,
+      });
+      hlsRef.current = hls;
+      hls.attachMedia(video);
+      hls.on(Hls.Events.MEDIA_ATTACHED, () => hls.loadSource(m3u8Url));
+      hls.on(Hls.Events.MANIFEST_PARSED, () => { if (!cancelled) { setBuffering(false); playPromise(); } });
+      hls.on(Hls.Events.ERROR, (_evt, data) => {
+        if (!data.fatal || cancelled) return;
+        if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+          try { hls.recoverMediaError(); } catch { fail("Erreur média"); }
+        } else {
+          fail("Flux indisponible — bascule vers le lecteur Jack07…");
+        }
+      });
+    })();
 
     return () => {
+      cancelled = true;
       if (hlsRef.current) { try { hlsRef.current.destroy(); } catch { /* noop */ } hlsRef.current = null; }
     };
-  }, [proxyUrl, onFatalError]);
+  }, [apiUrl, onFatalError]);
 
   useEffect(() => {
     const onFs = () => setFs(!!document.fullscreenElement);
@@ -328,18 +467,12 @@ function Jack07Player({ proxyUrl, loading, error, channelName, onFatalError }) {
     if (v.paused) v.play().then(() => setPlaying(true)).catch(() => {});
     else { v.pause(); setPlaying(false); }
   };
-
-  const toggleMute = () => {
-    const v = videoRef.current; if (!v) return;
-    v.muted = !v.muted; setMuted(v.muted);
-  };
-
+  const toggleMute = () => { const v = videoRef.current; if (!v) return; v.muted = !v.muted; setMuted(v.muted); };
   const toggleFs = () => {
     const el = wrapRef.current; if (!el) return;
     if (document.fullscreenElement) document.exitFullscreen?.();
     else el.requestFullscreen?.();
   };
-
   const reload = () => {
     const v = videoRef.current; if (!v) return;
     if (hlsRef.current) hlsRef.current.startLoad();
@@ -421,7 +554,6 @@ function Jack07Iframe({ siteUrl, onBackToNative }) {
     const u = siteUrl.split("#")[0];
     ifr.src = u + (u.includes("?") ? "&" : "?") + "_t=" + Date.now();
   };
-
   const toggleFs = () => {
     const el = wrapRef.current; if (!el) return;
     if (document.fullscreenElement) document.exitFullscreen?.();

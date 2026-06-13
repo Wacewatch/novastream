@@ -1,0 +1,44 @@
+{
+  "summary": "Iteration 9 validates the four Jack07 fixes + the regular TV channel playback restoration. Backend pytest: 6/6 pass. Frontend Playwright end-to-end: upcoming Football match cards no longer expose any score block (0 cards with score among 37 scheduled cards visible), live cards correctly show '▶ X sources disponibles' OR '✕ Aucune source pour le moment', scheduled cards show '▶ Sources au coup d'envoi' — no generic 'Sources multi-serveurs' anywhere. Click on the live match 4330229 (2 sources) opens AdUnlockModal → step1 → step2 → Jack07Overlay with [data-testid='jack07-sources-count']='2 sources'. Browser DOES make the client-side GET to https://apis-data10.tcore131ybdf.ru/api/stream/detail?streamId=729424&siteType=2001&matchId=4330229&sportType=1 (HTTP 200). The subsequent hls.js fetch to fhlsport723.tm3ubp4r5mk1strange.ru/.../index.m3u8 is blocked by CORS in the browser (documented upstream limitation) — the 3-second auto-fallback then flips the overlay into iframe mode (jack07-iframe-wrap visible, jack07-toggle-mode 'Revenir au lecteur direct (natif)' visible, NO 'Flux indisponible' error rendered). The embedded iframe loads the Jack07 native site player so the user can actually watch. Regular TV channels: /api/channels + /api/stream/{id} returns a valid HLS manifest with body starting '#EXTM3U' and content-type application/vnd.apple.mpegurl; backend logs confirm GET https://apis.wavewatch.top/deltawatch.php?action=resolve + ?action=hls_manifest both return 200 (DELTAWATCH_URL + STREAM_SECRET env vars correctly loaded).",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {
+        "flow": "Jack07 native HLS playback (segment CDN)",
+        "issue": "Documented upstream limitation — the segment edge host fhlsport*.tm3ubp4r5mk1strange.ru returns CORS-blocked / ERR_FAILED for browser XHR. The api/stream/detail handshake itself succeeds (200) and yields a valid manifest URL+token, but the segments cannot be played by hls.js in the browser. Auto-fallback to iframe handles this gracefully (3s timer). Not a regression — accepted end-state per problem statement.",
+        "affected_selectors": ["jack07-video", "jack07-iframe-wrap"]
+      }
+    ],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_jack07_iter9.py",
+    "/app/test_reports/pytest/iter9_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "GOOD: jack07.py _project_match (lines 366-378) explicitly nulls home_score/away_score unless status_kind is 'live' or 'finished'. Verified at the API layer (0 scheduled cards with non-null scores in /api/jack07/matches?sport=1) and at the UI layer (0 cards with a 'N-N' score block among 37 scheduled Football cards rendered).",
+    "GOOD: /api/jack07/streams/{id} (server.py:2287-2333) returns `api_url` per stream — the public client-side resolution endpoint https://apis-data10.tcore131ybdf.ru/api/stream/detail?streamId=...&siteType=...&matchId=...&sportType=... — no longer exposing a /api/hls proxy_url for Jack07, sidestepping the backend-IP geo block on segment edges. Verified by curl + by the browser actually hitting that endpoint and getting 200.",
+    "GOOD: /api/jack07/stream-counts (server.py:2253-2272) — bulk endpoint with 30-id cap, asyncio.gather, exception-safe (returns 0 on error). Backed by the 30s _jack07_detail cache so repeat calls are O(1).",
+    "GOOD: Jack07TvTab.jsx sourcesLabel logic + [data-testid='jack07-card-sources-{id}'] shows the exact three flavours per match status: 'X sources disponibles' (>0 sources, live), 'Aucune source pour le moment' (0 sources, live), 'Sources au coup d'envoi' (scheduled). No legacy 'Sources multi-serveurs' anywhere.",
+    "GOOD: Jack07Overlay.jsx auto-fallback timer fires within 3s of streamError event so the iframe (jack07-iframe-wrap) becomes visible without user action when client-side HLS fails — confirmed in Playwright run (iframeWrap=true within ~3.7s of opening overlay).",
+    "GOOD: DELTAWATCH_URL + STREAM_SECRET restored in /app/backend/.env. Backend logs show httpx GET to https://apis.wavewatch.top/deltawatch.php?action=resolve&url=... and ?action=hls_manifest&url=... both 200. /api/stream/{channel_id} → proxy_url body is real HLS (#EXTM3U)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_jack07_iter9.py (NEW — 6 pytest cases: scheduled-no-score guarantee, live/finished score type sanity, streams returning client-side api_url contract, stream-counts bulk contract + empty-ids edge, regular channel HLS manifest fetch)"
+  ],
+  "success_rate": {
+    "backend": "100% (6/6 iter9 pytest cases pass)",
+    "frontend": "100% on critical journey (Sports hub → Jack07 sub-tab → 188 matches loaded with correct sport badges → scheduled cards show no score + 'Sources au coup d'envoi' → live cards show score + 'X sources disponibles' or 'Aucune source pour le moment' → click live card with 2 sources → AdUnlockModal step1+2 → Jack07Overlay with sources-count='2 sources' → browser hits apis-data10.tcore131ybdf.ru/api/stream/detail 200 → segment CDN CORS-blocked → 3s auto-fallback flips to iframe with toggle-mode button)"
+  },
+  "test_credentials": "Not required.",
+  "seed_data_creation": "None.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Iter9 fixes are healthy. Re-run pytest with REACT_APP_BACKEND_URL exported: `REACT_APP_BACKEND_URL=$(grep REACT_APP_BACKEND_URL /app/frontend/.env|cut -d= -f2) pytest /app/backend/tests/test_jack07_iter9.py -v`. Note: hls.js native playback of Jack07 segments will keep failing from headless/CI IPs because the segment CDN fhlsport*.tm3ubp4r5mk1strange.ru enforces a CORS rule rejecting browser XHR — this is documented and the 3s auto-fallback to iframe is the accepted end-state. End-users on real networks may still get native playback if the CDN whitelists their IP. The iframe player (rendered via [data-testid='jack07-iframe-wrap']) embeds the upstream Jack07 site which provides its own working player + alternate sources (Others/TNT CL/TyR seen in run), so users still watch. For the regular TV tab make sure DELTAWATCH_URL + STREAM_SECRET stay in /app/backend/.env — without them /api/stream/{id} would 500 and channels wouldn't play.",
+  "rca of the issue": "User-reported bugs and the verified fixes: (1) 'Ekibastuzets 1-1 FK Arys' score on a scheduled card — root cause: upstream protobuf field 100 carries the score block from the PREVIOUS fixture between the same teams even when status=scheduled. Fix: _project_match now gates scores on status_kind in ('live','finished'), returning None otherwise. Verified 0 scheduled cards expose a score. (2) Direct playback failed with 'Connexion au flux…' — root cause: backend resolves the manifest fine but the segment edge CDN (streamas16.pha5102cdga.xyz / fhlsport*.tm3ubp4r5mk1strange.ru) geo-blocks our backend IP and CORS-rejects browser XHR alike. Fix: stop server-side proxying for Jack07 streams; instead return `api_url` so the browser performs the AES-CBC+ROT47+protobuf walk directly (where the user's IP is more likely accepted by the CDN). When CORS still blocks (CI/headless networks), a 3s auto-fallback rotates the overlay into iframe mode where the upstream site's own player (different origin, different CDN rules) plays. (3) Match cards needed source counts — added /api/jack07/stream-counts bulk endpoint backed by the 30s detail cache; UI calls it once per visible page of LIVE matches and renders 'X sources disponibles' / 'Aucune source pour le moment' / 'Sources au coup d'envoi'. (4) Auto-fallback — Jack07Overlay starts a 3s timer on mount that flips to iframe if no source resolves; verified the iframe was visible within ~3.7s of clicking the live card. (5) TV channels broken — DELTAWATCH_URL and STREAM_SECRET were missing from /app/backend/.env; restored, backend logs now show deltawatch.php?action=resolve + action=hls_manifest 200, /api/stream/{id} returns a proxy_url whose body is real HLS."
+}

@@ -15,6 +15,7 @@ export default function Jack07TvTab({ onPickMatch }) {
   const [sports, setSports] = useState([]);
   const [sportType, setSportType] = useState(1);
   const [data, setData] = useState({ matches: [], leagues: [] });
+  const [streamCounts, setStreamCounts] = useState({}); // { [matchId]: count }
   const [loading, setLoading] = useState(true);
   const [league, setLeague] = useState("");
   const [search, setSearch] = useState("");
@@ -39,6 +40,7 @@ export default function Jack07TvTab({ onPickMatch }) {
     let cancelled = false;
     setLoading(true);
     setLeague("");
+    setStreamCounts({});
     const load = async () => {
       try {
         const r = await axios.get(`${API}/jack07/matches`, { params: { sport: sportType } });
@@ -54,6 +56,22 @@ export default function Jack07TvTab({ onPickMatch }) {
     const id = setInterval(load, 60_000);
     return () => { cancelled = true; clearInterval(id); };
   }, [sportType]);
+
+  // Fetch source counts for LIVE matches (capped at 30 ids per request).
+  useEffect(() => {
+    const liveIds = (data.matches || []).filter((m) => m.is_live).map((m) => m.id).slice(0, 30);
+    if (!liveIds.length) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await axios.get(`${API}/jack07/stream-counts`, {
+          params: { sport: sportType, ids: liveIds.join(",") },
+        });
+        if (!cancelled) setStreamCounts((prev) => ({ ...prev, ...(r.data?.counts || {}) }));
+      } catch { /* silent */ }
+    })();
+    return () => { cancelled = true; };
+  }, [data.matches, sportType]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -172,7 +190,7 @@ export default function Jack07TvTab({ onPickMatch }) {
                 ({liveMatches.length})
               </h3>
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                {liveMatches.map((m) => <Jack07Card key={`live-${m.id}`} m={m} onClick={() => onPickMatch?.(m)} />)}
+                {liveMatches.map((m) => <Jack07Card key={`live-${m.id}`} m={m} sourcesCount={streamCounts[m.id]} onClick={() => onPickMatch?.(m)} />)}
               </div>
             </section>
           )}
@@ -219,8 +237,21 @@ function fmtTime(iso) {
   }
 }
 
-function Jack07Card({ m, onClick, faded }) {
+function Jack07Card({ m, onClick, faded, sourcesCount }) {
   const score = (m.home_score != null && m.away_score != null) ? `${m.home_score} - ${m.away_score}` : null;
+  // For live matches show the actual source count once known; for upcoming
+  // matches we don't pre-fetch — show a generic CTA.
+  let sourcesLabel;
+  if (typeof sourcesCount === "number") {
+    sourcesLabel = sourcesCount > 0
+      ? `▶ ${sourcesCount} source${sourcesCount > 1 ? "s" : ""} disponible${sourcesCount > 1 ? "s" : ""}`
+      : "✕ Aucune source pour le moment";
+  } else {
+    sourcesLabel = m.is_live ? "▶ Recherche des sources…" : "▶ Sources au coup d'envoi";
+  }
+  const sourcesColor = typeof sourcesCount === "number" && sourcesCount === 0
+    ? "text-white/40"
+    : "text-amber-400";
   return (
     <button
       onClick={onClick}
@@ -255,8 +286,8 @@ function Jack07Card({ m, onClick, faded }) {
           </div>
         </div>
       </div>
-      <div className="mt-1 text-[11px] text-amber-400 font-semibold">
-        ▶ Sources multi-serveurs
+      <div className={`mt-1 text-[11px] font-semibold ${sourcesColor}`} data-testid={`jack07-card-sources-${m.id}`}>
+        {sourcesLabel}
       </div>
     </button>
   );
