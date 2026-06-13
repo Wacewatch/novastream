@@ -2398,6 +2398,129 @@ async def jack07_manifest_proxy(match_id: str, stream_id: str, site_type: int = 
     )
 
 
+@api_router.get("/jack07/embed/{match_id}")
+async def jack07_clean_embed(match_id: str, sport: int = 1, slug: Optional[str] = None):
+    """Serve a *sanitised* copy of the Jack07 match page that hides every
+    DOM element except the player iframe / video. Solves the
+    'iframe shows the whole site' problem the user keeps hitting — we
+    inject a `<base href>` so relative URLs keep resolving to Jack07's
+    origin, plus a `<style>` block that hides the page chrome (header,
+    nav, Copier URL bar, channel list, score, charts, footer).
+    """
+    # Resolve the upstream HTML URL from match detail
+    detail = await _jack07_detail(match_id, sport_type=sport)
+    if not detail:
+        raise HTTPException(status_code=404, detail="Match introuvable")
+    site_url: str = detail.get("site_url") or ""
+    if not site_url:
+        raise HTTPException(status_code=404, detail="Page Jack07 indisponible")
+    if site_url.split("#")[0].endswith(".html") and "?" not in site_url:
+        site_url = site_url + "?autoplay=1&muted=1"
+
+    cx = await get_http_client()
+    try:
+        r = await cx.get(
+            site_url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
+                "Accept-Language": "fr-FR,fr;q=0.9",
+            },
+            timeout=httpx.Timeout(15.0),
+        )
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"Upstream fetch failed: {e}")
+    if r.status_code != 200 or "<html" not in r.text.lower():
+        raise HTTPException(status_code=502, detail=f"Upstream HTTP {r.status_code}")
+
+    html = r.text
+    # Compute the base origin so relative assets keep resolving correctly.
+    from urllib.parse import urlparse as _urlparse
+    p = _urlparse(site_url)
+    base_href = f"{p.scheme}://{p.netloc}/"
+
+    # Build the surgical CSS overlay.
+    #   1. Hide every direct child of #__layout EXCEPT the one that contains
+    #      the player (Jack07's player lives inside a `.video-detail-page`
+    #      or `.livestream-page` container — both seen in the SPA).
+    #   2. Inside the player container, hide:
+    #      - the URL-copier bar (`.copy-link`)
+    #      - the APK/TV/TG chiclets (`.app-list`, `.btn-row`)
+    #      - the channel/server picker (`.live-source-list`, `.other-source`)
+    #      - the tabs (Aperçu/Alignements/H2H — `.tab-list`)
+    #      - the score panel and team info (`.team-info`, `.score-panel`)
+    #      - any ads (`[class*="ad-"]`, `iframe[src*="ads"]`)
+    #   3. Tight padding/margins so the surviving player fills the viewport.
+    overlay_css = """
+    <style id="livewatch-clean">
+      html, body, #__layout, #__nuxt { background:#000 !important; margin:0 !important; padding:0 !important; overflow:hidden !important; height:100% !important; }
+      /* Hide every section except the player area */
+      header, footer, nav, aside,
+      .head-nav, .header-wrap, .top-bar, .topbar, .header,
+      .copy-link, .copy-url, .url-copier, .copy-wrap,
+      .app-list, .btn-row, .download-btn-list, .btn-app, .app-btn,
+      .live-source-list, .other-source, .source-list, .stream-source,
+      .tab-list, .tab-nav, .tab-bar, .match-tab,
+      .team-info, .score-panel, .team-vs, .vs-block, .score-block,
+      .stats-chart, .stats-wrap, .stats-block, .chart-block,
+      .matchInfo, .match-info, .match-header,
+      .footer, .copyright, .links-list,
+      [class*="ad-banner"], [class*="ads-"], [id*="banner"],
+      iframe[src*="ads"], iframe[src*="ad."],
+      .gtag, .gtm, script {
+        display: none !important;
+        visibility: hidden !important;
+        height: 0 !important;
+      }
+      /* The remaining player container fills the viewport */
+      .video-detail-page, .livestream-page, .video-wrap, .player-wrap,
+      .player-box, .video-box, .player-container, [class*="player-frame"] {
+        position: fixed !important;
+        inset: 0 !important;
+        width: 100vw !important;
+        height: 100vh !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        background: #000 !important;
+      }
+      .video-detail-page > *, .livestream-page > * { display: none !important; }
+      .video-detail-page .video-wrap, .video-detail-page .player-wrap,
+      .livestream-page  .video-wrap, .livestream-page  .player-wrap,
+      .video-detail-page video, .livestream-page video,
+      .video-detail-page iframe, .livestream-page iframe {
+        display: block !important;
+        position: absolute !important;
+        inset: 0 !important;
+        width: 100% !important;
+        height: 100% !important;
+      }
+    </style>
+    """.strip()
+
+    # Inject <base> + overlay CSS just before </head>. Also add a meta
+    # referrer policy so child fetches send the original Jack07 origin.
+    head_inject = (
+        f'<base href="{base_href}">\n'
+        '<meta name="referrer" content="strict-origin-when-cross-origin">\n'
+        f'{overlay_css}\n'
+    )
+    if "</head>" in html:
+        html = html.replace("</head>", head_inject + "</head>", 1)
+    else:
+        html = head_inject + html
+
+    return Response(
+        content=html,
+        media_type="text/html; charset=utf-8",
+        headers={
+            "Cache-Control": "public, max-age=30",
+            # Required to allow our iframe to embed this page even though
+            # it loads scripts that talk to the Jack07 origin.
+            "X-Frame-Options": "ALLOWALL",
+            "Content-Security-Policy": "frame-ancestors *;",
+        },
+    )
+
+
 @api_router.get("/jack07/streams/{match_id}")
 async def jack07_match_streams(match_id: str, request: Request, sport: int = 1):
     """Stream sources for a match. Returns multiple playback strategies per
