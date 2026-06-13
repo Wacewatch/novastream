@@ -567,15 +567,9 @@ function Jack07Iframe({ siteUrl, onBackToNative }) {
 
   const buildSrc = useCallback(() => {
     if (!siteUrl) return "about:blank";
-    // Prefer the server-side sanitised page (`/api/jack07/embed/{mid}`)
-    // which strips the Jack07 site chrome (URL Copier bar, APK/TV/TG
-    // chiclets, channel picker, score panel, Aperçu/H2H tabs, stats
-    // chart) and only keeps the player surface. Falls back to the raw
-    // site_url if matchId is missing.
-    const mid = (siteUrl.match(/-(\d{4,})\//) || [])[1];
-    if (mid) {
-      return `${process.env.REACT_APP_BACKEND_URL}/api/jack07/embed/${mid}?_t=${Date.now()}`;
-    }
+    // Use the ORIGINAL Jack07 URL directly — the proxy approach breaks
+    // playback (Referer mismatch). We mask the bottom strip visually
+    // with an overlay instead of trying to crop the iframe content.
     const base = siteUrl.split("#")[0];
     const sep = base.includes("?") ? "&" : "?";
     return `${base}${sep}autoplay=1&muted=1&_t=${Date.now()}`;
@@ -592,10 +586,21 @@ function Jack07Iframe({ siteUrl, onBackToNative }) {
     return () => document.removeEventListener("fullscreenchange", onFs);
   }, []);
 
-  // Embed is now a clean player-only HTML served by our backend at full
-  // wrapper size — no scaling/translation needed. Effect kept as no-op
-  // for backwards compat with the previous design and easy revert.
-  useEffect(() => {}, [loaded]);
+  // Responsive: scale the 1920-px-wide iframe to wrapper width.
+  useEffect(() => {
+    const wrap = wrapRef.current;
+    const ifr = iframeRef.current;
+    if (!wrap || !ifr) return;
+    const apply = () => {
+      const w = wrap.clientWidth || 1920;
+      ifr.style.setProperty("--ifrScale", String(w / 1920));
+    };
+    apply();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(apply);
+    ro.observe(wrap);
+    return () => ro.disconnect();
+  }, [loaded]);
 
   if (!siteUrl) {
     return (
@@ -646,21 +651,31 @@ function Jack07Iframe({ siteUrl, onBackToNative }) {
       <iframe
         src={buildSrcRef.current || siteUrl}
         title="Jack07 player"
-        className="absolute left-0 top-0 w-full h-full"
+        className="absolute left-0 top-0"
         style={{
+          // Force big-desktop layout: at 1920-px viewport the Jack07 SPA
+          // expands the <video> element to fill the entire viewport width
+          // in a true 16:9. We render iframe at 1920×1080 and scale to fit
+          // the wrapper width — so we only see the player, never the site
+          // chrome that sits BELOW the 1080-px clip.
+          width: "1920px",
+          height: "1080px",
+          transform: "scale(var(--ifrScale, 1))",
+          transformOrigin: "top left",
           border: "none",
           background: "#000",
         }}
         ref={iframeRef}
         allow="autoplay; encrypted-media; fullscreen; picture-in-picture; clipboard-write; web-share"
         allowFullScreen
-        referrerPolicy="strict-origin-when-cross-origin"
+        referrerPolicy="no-referrer-when-downgrade"
         scrolling="no"
         onLoad={() => setLoaded(true)}
         data-testid="jack07-iframe"
       />
-      {/* No bottom mask needed — the iframe is sized to stop precisely
-          before the Copier URL bar, so nothing of the site chrome leaks. */}
+      {/* No bottom mask — the iframe is forced 1920×1080 so the Jack07
+          page renders at big-desktop layout where the player IS 16:9 full
+          width; everything below the player is outside the iframe height. */}
       {!loaded && (
         <div className="absolute inset-0 flex items-center justify-center bg-black/70 pointer-events-none">
           <Loader2 className="animate-spin text-amber-400" size={28} />
