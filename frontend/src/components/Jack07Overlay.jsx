@@ -563,13 +563,44 @@ function Jack07Player({ manifestUrl, apiUrl, loading, error, channelName, onFata
 function Jack07Iframe({ siteUrl, onBackToNative }) {
   const iframeRef = useRef(null);
   const wrapRef = useRef(null);
+  const buildSrcRef = useRef(null);
   const [fs, setFs] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+
+  const buildSrc = useCallback(() => {
+    if (!siteUrl) return "about:blank";
+    const base = siteUrl.split("#")[0];
+    const sep = base.includes("?") ? "&" : "?";
+    return `${base}${sep}autoplay=1&muted=1&_t=${Date.now()}`;
+  }, [siteUrl]);
+
+  // Stable initial src — only compute once when siteUrl is available.
+  if (buildSrcRef.current == null && siteUrl) {
+    buildSrcRef.current = buildSrc();
+  }
 
   useEffect(() => {
     const onFs = () => setFs(!!document.fullscreenElement);
     document.addEventListener("fullscreenchange", onFs);
     return () => document.removeEventListener("fullscreenchange", onFs);
   }, []);
+
+  // Responsive: rescale the 1280-px-wide iframe to match wrapper width.
+  // Lives in an effect so we don't violate react-hooks/refs purity.
+  useEffect(() => {
+    const wrap = wrapRef.current;
+    const ifr = iframeRef.current;
+    if (!wrap || !ifr) return;
+    const apply = () => {
+      const w = wrap.clientWidth || 1280;
+      ifr.style.setProperty("--ifrScale", String(w / 1280));
+    };
+    apply();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(apply);
+    ro.observe(wrap);
+    return () => ro.disconnect();
+  }, [loaded]);
 
   if (!siteUrl) {
     return (
@@ -582,8 +613,8 @@ function Jack07Iframe({ siteUrl, onBackToNative }) {
   const reload = () => {
     const ifr = iframeRef.current;
     if (!ifr) return;
-    const u = siteUrl.split("#")[0];
-    ifr.src = u + (u.includes("?") ? "&" : "?") + "_t=" + Date.now();
+    setLoaded(false);
+    ifr.src = buildSrc();
   };
   const toggleFs = () => {
     const el = wrapRef.current; if (!el) return;
@@ -599,48 +630,66 @@ function Jack07Iframe({ siteUrl, onBackToNative }) {
       data-testid="jack07-iframe-wrap"
     >
       {/*
-        The iframe loads the entire Jack07 site page (header + score + player +
-        ads + footer). We CROP visually by sizing the iframe much larger than
-        the wrapper and translating it so only the player area fits in view.
+        We can't inject CSS into a cross-origin iframe to hide chrome, so we
+        crop visually: the iframe is sized MUCH larger than its wrapper and
+        translated so only the player rectangle on the Jack07 page lands in
+        the visible area. The numbers below were tuned against the current
+        Jack07 layout (header ~110 CSS-px + match info ~210 CSS-px + player
+        ~9:16 box ~720 CSS-px wide on 1280-wide viewport).
 
-        The Jack07 player sits roughly at vertical centre of the page on
-        desktop. We zoom 1.45× with `transform-origin: top center` so the
-        player fills the wrapper, then translate up by 16% of the iframe
-        height to skip the page header + score block. Tuned visually.
+        Strategy:
+        • Iframe internal viewport width = 1280 CSS-px (forced by `style.width`)
+          so the page renders identically regardless of our wrapper width →
+          fully responsive.
+        • Translate UP by 320 CSS-px (header+match-info) → top of player aligns
+          with top of wrapper.
+        • Iframe internal height = 1280 * 9 / 16 = 720 px after translate.
+        • The wrapper itself is 16/9, so the inner SVG-like surface matches.
+        • Side / bottom black masks soften any residual chrome bleed.
       */}
       <iframe
-        ref={iframeRef}
-        src={siteUrl}
+        src={buildSrcRef.current || siteUrl}
         title="Jack07 player"
-        className="absolute"
+        className="absolute left-0 top-0"
         style={{
-          top: 0,
-          left: "50%",
-          width: "100%",
-          height: "100%",
-          transform: "translate(-50%, -16%) scale(1.45)",
-          transformOrigin: "top center",
+          width: "1280px",
+          height: "1320px",
+          // Force a desktop render at exactly 1280 CSS-px wide, then scale
+          // the whole iframe down to the wrapper width — guarantees identical
+          // layout on every screen. translateY(-160px) skips the page header
+          // + match-info block so the player ends up at the wrapper's top.
+          // Visible vertical band = 720 CSS-px = 1280 × 9/16, matching our
+          // 16:9 wrapper exactly.
+          transform: "translateY(-160px) scale(var(--ifrScale, 1))",
+          transformOrigin: "top left",
           border: "none",
           background: "#000",
         }}
-        allow="autoplay; encrypted-media; fullscreen; picture-in-picture"
+        ref={iframeRef}
+        allow="autoplay; encrypted-media; fullscreen; picture-in-picture; clipboard-write; web-share"
         allowFullScreen
         referrerPolicy="no-referrer-when-downgrade"
         scrolling="no"
+        onLoad={() => setLoaded(true)}
         data-testid="jack07-iframe"
       />
-      {/* Bottom + side gradient masks so any leaking site chrome is darkened
-          out, giving the impression of a clean player surface. */}
+      {/* Bottom black mask hides any footer / ad strip that leaks below the player */}
       <div
         className="absolute inset-x-0 bottom-0 pointer-events-none"
         style={{
-          height: "30%",
-          background: "linear-gradient(to top, rgba(0,0,0,1) 35%, rgba(0,0,0,0))",
+          height: "20%",
+          background: "linear-gradient(to top, rgba(0,0,0,0.95) 0%, rgba(0,0,0,0))",
         }}
       />
+      {!loaded && (
+        <div className="absolute inset-0 flex items-center justify-center bg-black/70 pointer-events-none">
+          <Loader2 className="animate-spin text-amber-400" size={28} />
+          <span className="ml-3 text-white/80 text-sm">Chargement du lecteur…</span>
+        </div>
+      )}
       <div className="absolute top-2 right-2 flex gap-1 z-10">
-        <button onClick={onBackToNative} className="iframe-player-btn" title="Réessayer le lecteur natif" data-testid="jack07-try-native">
-          <RotateCcw size={14} />
+        <button onClick={onBackToNative} className="iframe-player-btn" title="Essayer le lecteur natif" data-testid="jack07-try-native">
+          <Play size={14} />
         </button>
         <button onClick={reload} className="iframe-player-btn" title="Recharger">
           <RotateCcw size={14} />
