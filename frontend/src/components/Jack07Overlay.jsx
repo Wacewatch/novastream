@@ -277,9 +277,17 @@ export default function Jack07Overlay({ match, detail: initialDetail, onClose })
               <Jack07Iframe siteUrl={siteUrl} onBackToNative={() => setMode("native")} />
             )}
 
-            {/* Native player retiré — le CDN segment Jack07 bloque toutes
-                les IPs datacenter, aucun proxy ne fonctionne. L'iframe est
-                la seule méthode fiable. */}
+            {siteUrl && (
+              <div className="flex justify-center">
+                <button
+                  onClick={() => setMode((m) => (m === "native" ? "iframe" : "native"))}
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white/5 border border-white/15 text-white/75 text-[11px] font-semibold hover:bg-white/10 transition"
+                  data-testid="jack07-toggle-mode"
+                >
+                  {mode === "iframe" ? "Essayer la lecture directe" : "Revenir au lecteur Jack07"}
+                </button>
+              </div>
+            )}
 
             {mode === "native" && streams && streams.length > 0 && (
               <div className="glass rounded-2xl p-3" data-testid="jack07-servers">
@@ -575,16 +583,15 @@ function Jack07Iframe({ siteUrl, onBackToNative }) {
     return () => document.removeEventListener("fullscreenchange", onFs);
   }, []);
 
-  // Responsive: scale the 1280-px-wide iframe so its 720-px-tall band
-  // (= up to the Copier URL bar) fills the wrapper. The wrapper itself is
-  // 16:9, and 1280×720 IS 16:9, so the visible area matches perfectly.
+  // Responsive: scale so the player rectangle (765-px-wide on Jack07's
+  // 1280-px desktop layout) fills the wrapper width.
   useEffect(() => {
     const wrap = wrapRef.current;
     const ifr = iframeRef.current;
     if (!wrap || !ifr) return;
     const apply = () => {
-      const w = wrap.clientWidth || 1280;
-      ifr.style.setProperty("--ifrScale", String(w / 1280));
+      const w = wrap.clientWidth || 765;
+      ifr.style.setProperty("--ifrScale", String(w / 765));
     };
     apply();
     if (typeof ResizeObserver === "undefined") return;
@@ -617,7 +624,9 @@ function Jack07Iframe({ siteUrl, onBackToNative }) {
     <div
       ref={wrapRef}
       className="relative w-full rounded-2xl overflow-hidden bg-black border border-white/10"
-      style={{ aspectRatio: "16 / 9" }}
+      // Aspect-ratio matches the Jack07 player rectangle (765×655) so the
+      // crop fills the wrapper exactly with no black bars.
+      style={{ aspectRatio: "765 / 655" }}
       data-testid="jack07-iframe-wrap"
     >
       {/*
@@ -643,15 +652,22 @@ function Jack07Iframe({ siteUrl, onBackToNative }) {
         title="Jack07 player"
         className="absolute left-0 top-0"
         style={{
-          // Render the Jack07 page at exactly 1280-px-wide. Once the user
-          // hits play the page's `<video>` expands to fill the viewport
-          // width (16:9) — so the *player rectangle* is 1280 × 720 at the
-          // very top of the page, immediately followed by the "Copier URL"
-          // bar. We just clamp the iframe to 720-px tall (= ~ before the
-          // Copier bar) and scale proportionally to the wrapper width.
+          // From an actual user screenshot of the Jack07 page rendered at
+          // 1280-px viewport, the <video> player occupies a FIXED rectangle:
+          //   x: 205 → 970   (width 765)
+          //   y: 113 → 768   (height 655)
+          // The size doesn't change between idle / playing — it's anchored
+          // to the page layout. So we render the iframe at 1280×800,
+          // clip-path the surface to ONLY that rectangle, translate the
+          // rectangle's top-left to (0,0) of the wrapper, and scale so the
+          // 765-px-wide player exactly fills the wrapper width.
+          //
+          // Wrapper aspect-ratio is set to 765:655 (= 1.168) to match the
+          // player so nothing else of Jack07's site leaks in.
           width: "1280px",
-          height: "720px",
-          transform: "scale(var(--ifrScale, 1))",
+          height: "800px",
+          clipPath: "inset(113px 310px 32px 205px)",
+          transform: "translate(-205px, -113px) scale(var(--ifrScale, 1))",
           transformOrigin: "top left",
           border: "none",
           background: "#000",
