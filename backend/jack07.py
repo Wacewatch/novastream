@@ -342,6 +342,22 @@ def _project_match(m: Dict[int, Any], sport_type: int = SPORT_FOOTBALL) -> Optio
     home_score = _score(_g(scores_obj, 1)) if home else None
     away_score = _score(_g(scores_obj, 2)) if away else None
 
+    # Individual sports (tennis, motorsport, fighting) often leave the team
+    # entries empty and only populate the title 'Player A vs Player B'.
+    # Synthesise lightweight competitor objects from the title so the SPA
+    # card / overlay still renders two names.
+    if (home is None or away is None) and isinstance(title, str) and " vs " in title.lower():
+        # Case-insensitive split on " vs " or " VS " (preserves original case)
+        idx = title.lower().find(" vs ")
+        if idx > 0:
+            a = title[:idx].strip()
+            b = title[idx + 4:].strip()
+            if a and b:
+                if home is None:
+                    home = {"id": 0, "name": a, "logo": ""}
+                if away is None:
+                    away = {"id": 0, "name": b, "logo": ""}
+
     extras = _g(m, 150) or {}
     match_slug = _s(_g(extras, 20, default=""))
     league_slug = _s(_g(extras, 21, default=""))

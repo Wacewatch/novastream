@@ -21,6 +21,12 @@ French live-TV streaming app (Vavoo-backed). User reported flaky UX (no loader, 
 - `/app/frontend/src/components/{ChannelCard, VideoPlayer, AdUnlockModal}.jsx`
 
 ## What's Been Implemented (latest first)
+### 2026-02-13 (Jack07 TV multi-sport fix)
+- **Logos cassés** : protobuf upstream renvoyait des URLs sur l'hôte CDN mort `logos1.tcrbg61levl.cfd`. Ajout de `_LOGO_HOST_REWRITES` + helper `_fix_logo` dans `jack07.py` qui réécrit centralement vers l'hôte actif `logos1.tcore131ybdf.ru` (équipes, ligues, drapeaux pays).
+- **Sport indication** : ajout du dict `SPORTS = {1:Football, 2:Basketball, 3:Tennis, 4:Baseball, 6:Cricket, 7:Motorsport, 8:Rugby}` + nouvel endpoint `/api/jack07/sports`. `sport_type` est désormais propagé dans `fetch_matches/fetch_detail/fetch_events/fetch_stats/resolve_stream` et stampé sur chaque match (`sport`, `sport_slug`, `sport_type`). Frontend `Jack07TvTab` affiche des onglets de sport et un badge sport sur chaque carte (data-testid `jack07-card-sport-{id}`). Synthèse home/away depuis le titre "A vs B" pour les sports individuels (tennis, motorsport, fighting).
+- **Lecture directe** : la chaîne AES/ROT47 côté navigateur dans `Jack07Overlay.jsx` était buggée (caractère "W" parasite ajouté à l'URL m3u8 → 404 segments). Refactor complet: `/api/jack07/streams/{id}` résout côté serveur et renvoie un `proxy_url = /api/hls?t={signed_token}` avec `no_deltawatch=True`. Le frontend passe simplement ce proxy_url à hls.js — plus aucun crypto côté navigateur. Fallback iframe préservé via `jack07-toggle-mode`.
+- Tests pytest 9/9 verts (`/app/backend/tests/test_jack07_multisport.py`). Parcours frontend Sports → Jack07 TV → onglets sport → carte → AdUnlock → overlay validé via Playwright.
+
 ### 2026-02-12 (Jack07 TV + Deltawatch proxy)
 - **Deltawatch upstream-hop for Vavoo TV**: `/api/backend/server.py` now routes Vavoo resolution AND HLS playback (manifest + segments) through `https://apis.wavewatch.top/deltawatch.php` (env `DELTAWATCH_URL`). Token format extended with optional `nodw` flag so the legacy direct path is preserved when bypassed (Jack07 streams use the flag). Auto-fallback if Deltawatch fails 3× consecutively. Stream tokens now embed flags as `<exp>|<flags>|<url>||<hmac>` (legacy `<exp>|<url>||<hmac>` still accepted).
 - **Jack07 TV** — new Sports subtab (next to BossTV). Backend (`/app/backend/jack07.py` + 8 routes in `server.py`):
