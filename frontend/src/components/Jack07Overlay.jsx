@@ -560,26 +560,41 @@ function Jack07Player({ manifestUrl, apiUrl, loading, error, channelName, onFata
 
 function Jack07Iframe({ siteUrl, onBackToNative }) {
   const iframeRef = useRef(null);
-  const wrapRef = useRef(null);
+  const wrapRef   = useRef(null);
+  const maskRef   = useRef(null);
   const buildSrcRef = useRef(null);
-  const [fs, setFs] = useState(false);
+  const [fs, setFs]         = useState(false);
   const [loaded, setLoaded] = useState(false);
 
   const buildSrc = useCallback(() => {
     if (!siteUrl) return "about:blank";
-    // ORIGINAL Jack07 URL — proxying through our backend broke playback
-    // (Jack07 SPA shows "Something went wrong" because cookies/storage
-    // don't carry across origins). We just iframe the upstream URL and
-    // hide the chrome with a parent-level CSS overlay (see below).
     const base = siteUrl.split("#")[0];
-    const sep = base.includes("?") ? "&" : "?";
+    const sep  = base.includes("?") ? "&" : "?";
     return `${base}${sep}autoplay=1&muted=1&_t=${Date.now()}`;
   }, [siteUrl]);
 
-  // Stable initial src — only compute once when siteUrl is available.
   if (buildSrcRef.current == null && siteUrl) {
     buildSrcRef.current = buildSrc();
   }
+
+  // Même logique que mad.php : header=71px, ratio=0.21
+  const adjustMask = useCallback(() => {
+    const wrap = wrapRef.current;
+    const mask = maskRef.current;
+    if (!wrap || !mask) return;
+    const vw      = wrap.offsetWidth;
+    const vh      = wrap.offsetHeight;
+    const headerH = 71;
+    const playerH = Math.round(vw * 0.21);
+    const maskH   = Math.max(0, vh - headerH - playerH);
+    mask.style.height = maskH + "px";
+  }, []);
+
+  useEffect(() => {
+    adjustMask();
+    window.addEventListener("resize", adjustMask);
+    return () => window.removeEventListener("resize", adjustMask);
+  }, [adjustMask]);
 
   useEffect(() => {
     const onFs = () => setFs(!!document.fullscreenElement);
@@ -587,13 +602,12 @@ function Jack07Iframe({ siteUrl, onBackToNative }) {
     return () => document.removeEventListener("fullscreenchange", onFs);
   }, []);
 
-  // Wrapper aspect tuned to the player. Jack07 .iframe-wropper observed
-  // via DevTools: 750 × 422 → aspect ratio ≈ 16/9 (it IS 16:9 ish).
-  useEffect(() => {}, [loaded]);
-
   if (!siteUrl) {
     return (
-      <div className="relative w-full rounded-2xl overflow-hidden bg-black border border-white/10 flex items-center justify-center text-white/60" style={{ aspectRatio: "16 / 9" }}>
+      <div
+        className="relative w-full rounded-2xl overflow-hidden bg-black border border-white/10 flex items-center justify-center text-white/60"
+        style={{ aspectRatio: "16 / 9" }}
+      >
         Aucune source disponible.
       </div>
     );
@@ -605,8 +619,10 @@ function Jack07Iframe({ siteUrl, onBackToNative }) {
     setLoaded(false);
     ifr.src = buildSrc();
   };
+
   const toggleFs = () => {
-    const el = wrapRef.current; if (!el) return;
+    const el = wrapRef.current;
+    if (!el) return;
     if (document.fullscreenElement) document.exitFullscreen?.();
     else el.requestFullscreen?.();
   };
@@ -615,66 +631,39 @@ function Jack07Iframe({ siteUrl, onBackToNative }) {
     <div
       ref={wrapRef}
       className="relative w-full rounded-2xl overflow-hidden bg-black border border-white/10"
-      // Player-only embed served from /api/jack07/embed → 16:9 video
       style={{ aspectRatio: "16 / 9" }}
       data-testid="jack07-iframe-wrap"
     >
-      {/*
-        We can't inject CSS into a cross-origin iframe to hide chrome, so we
-        crop visually: the iframe is sized MUCH larger than its wrapper and
-        translated so only the player rectangle on the Jack07 page lands in
-        the visible area. The numbers below were tuned against the current
-        Jack07 layout (header ~110 CSS-px + match info ~210 CSS-px + player
-        ~9:16 box ~720 CSS-px wide on 1280-wide viewport).
-
-        Strategy:
-        • Iframe internal viewport width = 1280 CSS-px (forced by `style.width`)
-          so the page renders identically regardless of our wrapper width →
-          fully responsive.
-        • Translate UP by 320 CSS-px (header+match-info) → top of player aligns
-          with top of wrapper.
-        • Iframe internal height = 1280 * 9 / 16 = 720 px after translate.
-        • The wrapper itself is 16/9, so the inner SVG-like surface matches.
-        • Side / bottom black masks soften any residual chrome bleed.
-      */}
+      {/* iframe pleine taille, pas de scale */}
       <iframe
+        ref={iframeRef}
         src={buildSrcRef.current || siteUrl}
         title="Jack07 player"
-        className="absolute left-0 top-0"
-        style={{
-          // From DevTools on the actual Jack07 site at 750-px viewport,
-          // the `.iframe-wropper` (the player) measures EXACTLY 750 × 422
-          // (= 16/9). Everything below it inside `.livestream-page` (URL
-          // copier bar, .middle-wrapper sponsor, .detail-tabs-place,
-          // .pstics stats, .data-wrapper, .KEjcHh × 3, .C9WQdz) is at
-          // y > 422 in the page's coordinate system. So we render the
-          // iframe at 1500 × 845 (= 750 × 422 doubled for sharpness) and
-          // scale it down to the wrapper — only the player area is in view.
-          width: "1500px",
-          height: "845px",
-          transform: "scale(var(--ifrScale, 1))",
-          transformOrigin: "top left",
-          border: "none",
-          background: "#000",
-        }}
-        ref={iframeRef}
+        className="absolute inset-0 w-full h-full"
+        style={{ border: "none", background: "#000" }}
         allow="autoplay; encrypted-media; fullscreen; picture-in-picture; clipboard-write; web-share"
         allowFullScreen
         referrerPolicy="no-referrer-when-downgrade"
         scrolling="no"
-        onLoad={() => setLoaded(true)}
+        onLoad={() => { setLoaded(true); adjustMask(); }}
         data-testid="jack07-iframe"
       />
-      {/* No bottom mask — the iframe is forced 1920×1080 so the Jack07
-          page renders at big-desktop layout where the player IS 16:9 full
-          width; everything below the player is outside the iframe height. */}
+
+      {/* Masque noir en bas — cache barre Copier + APK/TV/TG + stats */}
+      <div
+        ref={maskRef}
+        className="absolute bottom-0 left-0 right-0 pointer-events-none"
+        style={{ background: "#00141E", zIndex: 10 }}
+      />
+
       {!loaded && (
-        <div className="absolute inset-0 flex items-center justify-center bg-black/70 pointer-events-none">
+        <div className="absolute inset-0 flex items-center justify-center bg-black/70 pointer-events-none" style={{ zIndex: 20 }}>
           <Loader2 className="animate-spin text-amber-400" size={28} />
           <span className="ml-3 text-white/80 text-sm">Chargement du lecteur…</span>
         </div>
       )}
-      <div className="absolute top-2 right-2 flex gap-1 z-10">
+
+      <div className="absolute top-2 right-2 flex gap-1" style={{ zIndex: 20 }}>
         <button onClick={onBackToNative} className="iframe-player-btn" title="Essayer le lecteur natif" data-testid="jack07-try-native">
           <Play size={14} />
         </button>
