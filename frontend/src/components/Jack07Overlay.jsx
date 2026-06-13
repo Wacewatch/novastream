@@ -129,7 +129,10 @@ export default function Jack07Overlay({ match, detail: initialDetail, onClose })
   const [stats, setStats] = useState([]);
   const [loadingStreams, setLoadingStreams] = useState(true);
   const [streamError, setStreamError] = useState(null);
-  const [mode, setMode] = useState("native");
+  // Default to iframe — the Jack07 segment CDN enforces a Referer check
+  // that's impossible to satisfy from our origin. The iframe loads from
+  // jack07eo.* (correct referrer) so segments authenticate properly.
+  const [mode, setMode] = useState("iframe");
 
   const matchId = match?.id || detail?.id;
 
@@ -198,7 +201,8 @@ export default function Jack07Overlay({ match, detail: initialDetail, onClose })
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  // ---- Auto-fallback to iframe if no source resolves in 3 s ----
+  // 3-second auto-fallback to iframe if native mode is selected and no
+  // source resolves — defensive even though iframe is default now.
   useEffect(() => {
     if (mode !== "native" || loadingStreams) return;
     if (streamError && (detail?.site_url || match?.site_url)) {
@@ -280,7 +284,9 @@ export default function Jack07Overlay({ match, detail: initialDetail, onClose })
                   className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white/5 border border-white/15 text-white/85 text-xs font-semibold hover:bg-white/10 transition"
                   data-testid="jack07-toggle-mode"
                 >
-                  {mode === "native" ? "Basculer sur le lecteur Jack07 (iframe)" : "Revenir au lecteur direct (natif)"}
+                  {mode === "iframe"
+                    ? "Essayer le lecteur natif (peut ne pas fonctionner)"
+                    : "Revenir au lecteur Jack07 (recommandé)"}
                 </button>
               </div>
             )}
@@ -592,17 +598,47 @@ function Jack07Iframe({ siteUrl, onBackToNative }) {
       style={{ aspectRatio: "16 / 9" }}
       data-testid="jack07-iframe-wrap"
     >
+      {/*
+        The iframe loads the entire Jack07 site page (header + score + player +
+        ads + footer). We CROP visually by sizing the iframe much larger than
+        the wrapper and translating it so only the player area fits in view.
+
+        The Jack07 player sits roughly at vertical centre of the page on
+        desktop. We zoom 1.45× with `transform-origin: top center` so the
+        player fills the wrapper, then translate up by 16% of the iframe
+        height to skip the page header + score block. Tuned visually.
+      */}
       <iframe
         ref={iframeRef}
         src={siteUrl}
         title="Jack07 player"
-        className="absolute inset-0 w-full h-full"
+        className="absolute"
+        style={{
+          top: 0,
+          left: "50%",
+          width: "100%",
+          height: "100%",
+          transform: "translate(-50%, -16%) scale(1.45)",
+          transformOrigin: "top center",
+          border: "none",
+          background: "#000",
+        }}
         allow="autoplay; encrypted-media; fullscreen; picture-in-picture"
         allowFullScreen
-        referrerPolicy="no-referrer"
+        referrerPolicy="no-referrer-when-downgrade"
+        scrolling="no"
         data-testid="jack07-iframe"
       />
-      <div className="absolute top-2 right-2 flex gap-1">
+      {/* Bottom + side gradient masks so any leaking site chrome is darkened
+          out, giving the impression of a clean player surface. */}
+      <div
+        className="absolute inset-x-0 bottom-0 pointer-events-none"
+        style={{
+          height: "30%",
+          background: "linear-gradient(to top, rgba(0,0,0,1) 35%, rgba(0,0,0,0))",
+        }}
+      />
+      <div className="absolute top-2 right-2 flex gap-1 z-10">
         <button onClick={onBackToNative} className="iframe-player-btn" title="Réessayer le lecteur natif" data-testid="jack07-try-native">
           <RotateCcw size={14} />
         </button>

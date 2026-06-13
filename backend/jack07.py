@@ -58,13 +58,13 @@ SPORTS: Dict[int, Dict[str, str]] = {
     6: {"slug": "cricket",      "label": "Cricket"},
     7: {"slug": "motorsport",   "label": "Motorsport"},
     8: {"slug": "rugby",        "label": "Rugby"},
-    10: {"slug": "hockey",      "label": "Hockey"},
-    11: {"slug": "volleyball",  "label": "Volleyball"},
-    12: {"slug": "handball",    "label": "Handball"},
-    13: {"slug": "boxing",      "label": "Boxe"},
-    14: {"slug": "mma",         "label": "MMA"},
-    15: {"slug": "snooker",     "label": "Snooker"},
-    16: {"slug": "darts",       "label": "Fléchettes"},
+    10: {"slug": "aussie-rules","label": "Aussie Rules"},
+    11: {"slug": "hockey",      "label": "Hockey"},
+    12: {"slug": "badminton",   "label": "Badminton"},
+    13: {"slug": "volleyball",  "label": "Volleyball"},
+    14: {"slug": "fighting",    "label": "Combat (MMA / Boxe)"},
+    15: {"slug": "cycling",     "label": "Cyclisme"},
+    16: {"slug": "handball",    "label": "Handball"},
 }
 
 # CDN host rotation — the upstream protobuf occasionally embeds logo URLs on

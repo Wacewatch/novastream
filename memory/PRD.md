@@ -21,6 +21,12 @@ French live-TV streaming app (Vavoo-backed). User reported flaky UX (no loader, 
 - `/app/frontend/src/components/{ChannelCard, VideoPlayer, AdUnlockModal}.jsx`
 
 ## What's Been Implemented (latest first)
+### 2026-02-13 (iter 10 — Jack07 iframe-by-default + correct sport mapping)
+- **Sport mapping rectifié** : empirique re-vérification du mapping `sportType` → labels d'après les ligues réelles renvoyées par l'API upstream. Sport 14 = "Combat (MMA / Boxe)" (regroupe MMA, UFC, Muay Thai, Kickboxing, Boxing — ce que voit l'utilisateur sur `/fr/fighting.html`). 10 = Aussie Rules (AFL/VFL). 11 = Hockey. 12 = Badminton. 13 = Volleyball. 15 = Cyclisme. 16 = Handball.
+- **Lecture Jack07 — iframe par défaut** : l'edge CDN segment renforce une règle Referer (`deny by referer access rule` même avec User's IP). Aucun script JS ne peut forger un `Referer` (header bloqué par les navigateurs), et notre backend ne peut pas non plus (IP geo-bloquée). Solution : afficher par défaut l'iframe Jack07 (origin `jack07eo.*` → bon referer → segments authentifiés). Le lecteur natif reste accessible manuellement via le bouton `jack07-toggle-mode` pour les utilisateurs déterminés.
+- **Iframe Jack07 croppée** : le wrapper de l'iframe applique `overflow:hidden` + `transform: translate(-50%, -16%) scale(1.45)` + un masque dégradé en bas, ce qui cache le header MadPlay77/nav/ads et ne laisse visible que la zone joueur.
+- **Onglet "Tous les sports"** : sélectionné par défaut, fetche `/api/jack07/all-matches` qui appelle en parallèle les 14 sports et renvoie jusqu'à 200 matches triés live → upcoming → finished, avec leur badge sport.
+
 ### 2026-02-13 (iter 9 — Jack07 polish + TV channels restored)
 - **Score fantôme sur match à venir** : `_project_match` met désormais `home_score`/`away_score` à `None` quand `status_kind ∉ {live, finished}` (le protobuf upstream porte la résultat du précédent face-à-face). Vérifié : 0 carte programmée n'expose de score.
 - **Lecture directe Jack07** : la chaîne complète résolution côté backend était bloquée parce que le CDN segment (streamas16.pha5102cdga.xyz / fhlsport*.tm3ubp4r5mk1strange.ru) géo-bloque notre IP backend (403 sur les segments même quand le manifest passe). Retour à une résolution **côté navigateur** : `/api/jack07/streams/{id}` renvoie un `api_url` direct vers `apis-data10.tcore131ybdf.ru/api/stream/detail`. Le browser fait ROT47 + AES-CBC (PKCS7 via SubtleCrypto auto) + walk protobuf length-delimited pour construire l'URL `/token-XXX/...m3u8`. Plus de bug de "W parasite".
