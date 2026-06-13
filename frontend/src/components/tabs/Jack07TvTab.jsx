@@ -13,7 +13,7 @@ const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
  */
 export default function Jack07TvTab({ onPickMatch }) {
   const [sports, setSports] = useState([]);
-  const [sportType, setSportType] = useState(1);
+  const [sportType, setSportType] = useState(0); // 0 = "Tous les sports" (default)
   const [data, setData] = useState({ matches: [], leagues: [] });
   const [streamCounts, setStreamCounts] = useState({}); // { [matchId]: count }
   const [loading, setLoading] = useState(true);
@@ -21,21 +21,27 @@ export default function Jack07TvTab({ onPickMatch }) {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
 
-  // Load the list of sports once
+  // Load the list of sports + prepend "Tous les sports"
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
         const r = await axios.get(`${API}/jack07/sports`);
-        if (!cancelled) setSports(r.data?.sports || []);
+        if (!cancelled) {
+          const upstream = r.data?.sports || [];
+          setSports([{ id: 0, label: "Tous", slug: "all" }, ...upstream]);
+        }
       } catch {
-        if (!cancelled) setSports([{ id: 1, label: "Football", slug: "football" }]);
+        if (!cancelled) setSports([
+          { id: 0, label: "Tous", slug: "all" },
+          { id: 1, label: "Football", slug: "football" },
+        ]);
       }
     })();
     return () => { cancelled = true; };
   }, []);
 
-  // Load matches whenever the sport changes
+  // Load matches whenever the sport changes (0 = all sports combined)
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
@@ -43,7 +49,9 @@ export default function Jack07TvTab({ onPickMatch }) {
     setStreamCounts({});
     const load = async () => {
       try {
-        const r = await axios.get(`${API}/jack07/matches`, { params: { sport: sportType } });
+        const r = sportType === 0
+          ? await axios.get(`${API}/jack07/all-matches`)
+          : await axios.get(`${API}/jack07/matches`, { params: { sport: sportType } });
         if (!cancelled) setData(r.data);
       } catch (e) {
         console.error(e);
@@ -64,10 +72,23 @@ export default function Jack07TvTab({ onPickMatch }) {
     let cancelled = false;
     (async () => {
       try {
-        const r = await axios.get(`${API}/jack07/stream-counts`, {
-          params: { sport: sportType, ids: liveIds.join(",") },
-        });
-        if (!cancelled) setStreamCounts((prev) => ({ ...prev, ...(r.data?.counts || {}) }));
+        // When viewing "all sports", group ids by their sport_type so each
+        // backend call hits the right detail cache.
+        const bySport = {};
+        for (const m of (data.matches || []).filter((x) => x.is_live).slice(0, 30)) {
+          const st = m.sport_type || 1;
+          if (!bySport[st]) bySport[st] = [];
+          bySport[st].push(m.id);
+        }
+        const results = await Promise.all(
+          Object.entries(bySport).map(([st, ids]) =>
+            axios.get(`${API}/jack07/stream-counts`, { params: { sport: Number(st), ids: ids.join(",") } })
+          )
+        );
+        if (cancelled) return;
+        const merged = {};
+        for (const r of results) Object.assign(merged, r.data?.counts || {});
+        setStreamCounts((prev) => ({ ...prev, ...merged }));
       } catch { /* silent */ }
     })();
     return () => { cancelled = true; };

@@ -156,7 +156,7 @@ export default function Jack07Overlay({ match, detail: initialDetail, onClose })
       try {
         const r = await axios.get(`${API}/jack07/streams/${matchId}`, { params: { sport: sportType } });
         if (cancelled) return;
-        const list = (r.data?.streams || []).filter((s) => s.api_url);
+        const list = (r.data?.streams || []).filter((s) => s.manifest_url || s.api_url);
         if (!list.length) {
           setStreamError("Aucune source disponible pour ce match");
           setStreams([]);
@@ -262,6 +262,7 @@ export default function Jack07Overlay({ match, detail: initialDetail, onClose })
           <div className="mx-auto max-w-6xl space-y-4">
             {mode === "native" ? (
               <Jack07Player
+                manifestUrl={activeStream?.manifest_url}
                 apiUrl={activeStream?.api_url}
                 loading={loadingStreams}
                 error={streamError}
@@ -368,11 +369,13 @@ export default function Jack07Overlay({ match, detail: initialDetail, onClose })
 }
 
 /**
- * hls.js-backed player. Calls `resolveJack07Stream(apiUrl)` to obtain an
- * IP-bound tokenised m3u8 URL, then plays it. If resolution or playback
- * fails (network / hls fatal), bubbles up via `onFatalError`.
+ * hls.js-backed player. Tries the SERVER-PROXIED manifest first
+ * (`manifestUrl` — m3u8 served from our origin so ad-blockers don't drop
+ * the foreign upstream host), then falls back to CLIENT-SIDE resolution
+ * (`apiUrl` → ROT47 + AES). Bubbles up via `onFatalError` on persistent
+ * failures so the parent flips to the iframe player.
  */
-function Jack07Player({ apiUrl, loading, error, channelName, onFatalError }) {
+function Jack07Player({ manifestUrl, apiUrl, loading, error, channelName, onFatalError }) {
   const videoRef = useRef(null);
   const wrapRef = useRef(null);
   const hlsRef = useRef(null);
@@ -383,7 +386,7 @@ function Jack07Player({ apiUrl, loading, error, channelName, onFatalError }) {
   const [buffering, setBuffering] = useState(false);
 
   useEffect(() => {
-    if (!apiUrl || !videoRef.current) return;
+    if ((!manifestUrl && !apiUrl) || !videoRef.current) return;
     let cancelled = false;
     const video = videoRef.current;
     setPlayerErr(null);
@@ -394,29 +397,50 @@ function Jack07Player({ apiUrl, loading, error, channelName, onFatalError }) {
       hlsRef.current = null;
     }
 
+    // Hard 8-second fallback in case the manifest fetch silently hangs
+    // (uBlock / CSP / network) — without this, hls.js timeouts can take
+    // up to 12 s × retries before fataling.
+    const fatalTimer = setTimeout(() => {
+      if (cancelled) return;
+      setPlayerErr("Délai dépassé — bascule vers le lecteur Jack07…");
+      setBuffering(false);
+      if (typeof onFatalError === "function") onFatalError();
+    }, 8000);
+
     const fail = (msg) => {
       if (cancelled) return;
+      clearTimeout(fatalTimer);
       setPlayerErr(msg);
       setBuffering(false);
-      if (typeof onFatalError === "function") setTimeout(() => onFatalError(), 800);
+      if (typeof onFatalError === "function") setTimeout(() => onFatalError(), 600);
     };
 
     (async () => {
-      let m3u8Url;
-      try {
-        m3u8Url = await resolveJack07Stream(apiUrl);
-      } catch (e) {
-        fail("Source indisponible — bascule vers le lecteur Jack07…");
-        return;
+      let m3u8Url = null;
+      // Strategy 1: server-proxied manifest (our origin, no adblock issue)
+      if (manifestUrl) {
+        m3u8Url = manifestUrl.startsWith("http")
+          ? manifestUrl
+          : `${process.env.REACT_APP_BACKEND_URL}${manifestUrl}`;
       }
-      if (cancelled) return;
+      // Strategy 2: client-side AES + ROT47 resolve (legacy)
+      if (!m3u8Url && apiUrl) {
+        try {
+          m3u8Url = await resolveJack07Stream(apiUrl);
+        } catch {
+          fail("Source indisponible — bascule vers le lecteur Jack07…");
+          return;
+        }
+      }
+      if (cancelled || !m3u8Url) return;
 
-      const playPromise = () => video.play().then(() => setPlaying(true)).catch(() => setPlaying(false));
+      const playPromise = () =>
+        video.play().then(() => setPlaying(true)).catch(() => setPlaying(false));
+      const onReady = () => { if (!cancelled) { clearTimeout(fatalTimer); setBuffering(false); playPromise(); } };
 
       if (video.canPlayType("application/vnd.apple.mpegurl")) {
         video.src = m3u8Url;
-        const onLoaded = () => { if (!cancelled) { setBuffering(false); playPromise(); } };
-        video.addEventListener("loadeddata", onLoaded, { once: true });
+        video.addEventListener("loadeddata", onReady, { once: true });
         return;
       }
 
@@ -430,15 +454,15 @@ function Jack07Player({ apiUrl, loading, error, channelName, onFatalError }) {
         lowLatencyMode: true,
         liveSyncDurationCount: 3,
         liveMaxLatencyDurationCount: 8,
-        manifestLoadingTimeOut: 12000,
-        manifestLoadingMaxRetry: 2,
-        fragLoadingTimeOut: 20000,
-        fragLoadingMaxRetry: 4,
+        manifestLoadingTimeOut: 6000,
+        manifestLoadingMaxRetry: 1,
+        fragLoadingTimeOut: 12000,
+        fragLoadingMaxRetry: 3,
       });
       hlsRef.current = hls;
       hls.attachMedia(video);
       hls.on(Hls.Events.MEDIA_ATTACHED, () => hls.loadSource(m3u8Url));
-      hls.on(Hls.Events.MANIFEST_PARSED, () => { if (!cancelled) { setBuffering(false); playPromise(); } });
+      hls.on(Hls.Events.MANIFEST_PARSED, onReady);
       hls.on(Hls.Events.ERROR, (_evt, data) => {
         if (!data.fatal || cancelled) return;
         if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
@@ -451,9 +475,10 @@ function Jack07Player({ apiUrl, loading, error, channelName, onFatalError }) {
 
     return () => {
       cancelled = true;
+      clearTimeout(fatalTimer);
       if (hlsRef.current) { try { hlsRef.current.destroy(); } catch { /* noop */ } hlsRef.current = null; }
     };
-  }, [apiUrl, onFatalError]);
+  }, [manifestUrl, apiUrl, onFatalError]);
 
   useEffect(() => {
     const onFs = () => setFs(!!document.fullscreenElement);

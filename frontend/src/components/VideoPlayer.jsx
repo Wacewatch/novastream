@@ -86,11 +86,18 @@ export default function VideoPlayer({
 
     if (Hls.isSupported()) {
       hls = new Hls({
-        enableWorker: false,
+        // Worker offloads m3u8 parsing + demuxing → smoother playback
+        enableWorker: true,
         lowLatencyMode: true,
         backBufferLength: 30,
         maxBufferLength: 30,
         maxMaxBufferLength: 60,
+        // ABR — start auto, prefer mid-tier and switch up only if bandwidth
+        // sustained > current bitrate for ~3 s.
+        startLevel: -1,
+        abrEwmaDefaultEstimate: 1_500_000, // 1.5 Mbps initial estimate
+        abrBandWidthFactor: 0.9,
+        abrBandWidthUpFactor: 0.7,
         liveSyncDurationCount: 3,
         liveMaxLatencyDurationCount: 8,
         manifestLoadingTimeOut: 12000,

@@ -51,13 +51,20 @@ SPORT_FOOTBALL = 1
 # probing /api/match/live with various sportType values and inspecting the
 # leagues returned). Display labels are in French (matches the rest of UI).
 SPORTS: Dict[int, Dict[str, str]] = {
-    1: {"slug": "football",   "label": "Football"},
-    2: {"slug": "basketball", "label": "Basketball"},
-    3: {"slug": "tennis",     "label": "Tennis"},
-    4: {"slug": "baseball",   "label": "Baseball"},
-    6: {"slug": "cricket",    "label": "Cricket"},
-    7: {"slug": "motorsport", "label": "Motorsport"},
-    8: {"slug": "rugby",      "label": "Rugby"},
+    1: {"slug": "football",     "label": "Football"},
+    2: {"slug": "basketball",   "label": "Basketball"},
+    3: {"slug": "tennis",       "label": "Tennis"},
+    4: {"slug": "baseball",     "label": "Baseball"},
+    6: {"slug": "cricket",      "label": "Cricket"},
+    7: {"slug": "motorsport",   "label": "Motorsport"},
+    8: {"slug": "rugby",        "label": "Rugby"},
+    10: {"slug": "hockey",      "label": "Hockey"},
+    11: {"slug": "volleyball",  "label": "Volleyball"},
+    12: {"slug": "handball",    "label": "Handball"},
+    13: {"slug": "boxing",      "label": "Boxe"},
+    14: {"slug": "mma",         "label": "MMA"},
+    15: {"slug": "snooker",     "label": "Snooker"},
+    16: {"slug": "darts",       "label": "Fléchettes"},
 }
 
 # CDN host rotation — the upstream protobuf occasionally embeds logo URLs on

@@ -1194,13 +1194,27 @@ async def hls_proxy(t: Optional[str] = None, u: Optional[str] = None):
                     nl = blob.index(b"\n")
                     media_b = blob[:nl].decode("utf-8")
                     body_b = blob[nl + 1:]
-                    return Response(content=body_b, media_type=media_b)
+                    return Response(
+                        content=body_b,
+                        media_type=media_b,
+                        headers={
+                            "Cache-Control": "public, max-age=1",
+                            "Access-Control-Allow-Origin": "*",
+                        },
+                    )
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"redis get hls failed: {e}")
         else:
             cached = _hls_cache.get(u)
             if cached and cached[2] > now:
-                return Response(content=cached[0], media_type=cached[1])
+                return Response(
+                    content=cached[0],
+                    media_type=cached[1],
+                    headers={
+                        "Cache-Control": "public, max-age=1",
+                        "Access-Control-Allow-Origin": "*",
+                    },
+                )
 
         # Single-flight pattern: 1 upstream fetch shared by ALL waiting viewers.
         # Cache key includes the bypass flag so Vavoo (DW-on) and Jack07 (DW-off)
@@ -1213,7 +1227,14 @@ async def hls_proxy(t: Optional[str] = None, u: Optional[str] = None):
 
         try:
             entry = await asyncio.shield(task)
-            return Response(content=entry[0], media_type=entry[1])
+            return Response(
+                content=entry[0],
+                media_type=entry[1],
+                headers={
+                    "Cache-Control": "public, max-age=1",
+                    "Access-Control-Allow-Origin": "*",
+                },
+            )
         except httpx.HTTPError as e:
             raise HTTPException(status_code=502, detail=f"Erreur de flux: {e}")
         except HTTPException:
@@ -1261,7 +1282,15 @@ async def hls_proxy(t: Optional[str] = None, u: Optional[str] = None):
             finally:
                 await r.aclose()
 
-        return StreamingResponse(_passthrough(), media_type=media)
+        # Segments are short-lived but immutable once produced. Caching for
+        # ~30 s lets browsers and intermediate caches replay segments during
+        # re-buffering / seek without re-hitting the upstream — major
+        # smoothness win on flaky upstreams.
+        seg_headers = {
+            "Cache-Control": "public, max-age=30, immutable",
+            "Access-Control-Allow-Origin": "*",
+        }
+        return StreamingResponse(_passthrough(), media_type=media, headers=seg_headers)
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"Erreur de flux: {e}")
 
@@ -2172,7 +2201,6 @@ from jack07 import fetch_matches as _jack07_matches, fetch_detail as _jack07_det
 from jack07 import fetch_events as _jack07_events, fetch_stats as _jack07_stats  # noqa: E402
 from jack07 import resolve_stream as _jack07_resolve_stream  # noqa: E402
 from jack07 import SPORTS as _JACK07_SPORTS  # noqa: E402
-import base64 as _b64  # noqa: E402
 
 
 def _b64url_encode(s: str) -> str:
@@ -2199,6 +2227,47 @@ async def jack07_sports_list():
             {"id": sid, "label": info["label"], "slug": info["slug"]}
             for sid, info in _JACK07_SPORTS.items()
         ]
+    }
+
+
+@api_router.get("/jack07/all-matches")
+async def jack07_all_sports_matches(language: int = 6):
+    """Combined view: live + upcoming matches across ALL supported sports.
+
+    Fetches every sport in parallel (one upstream call per sport, cached 60 s
+    each). Returns matches sorted by status (live first, then upcoming by
+    kick-off, finished last) and capped to 200 items to keep the payload
+    light.
+    """
+    async def _one(sid: int):
+        try:
+            return await _jack07_matches(sport_type=sid, language=language)
+        except Exception:  # noqa: BLE001
+            return []
+    sport_ids = list(_JACK07_SPORTS.keys())
+    results = await asyncio.gather(*[_one(sid) for sid in sport_ids])
+    all_matches: List[Dict[str, Any]] = []
+    for ms in results:
+        all_matches.extend(ms)
+    # Sort: live → scheduled (by kick-off) → finished
+    all_matches.sort(key=lambda x: (
+        0 if x["is_live"] else (1 if x["status_kind"] == "scheduled" else 2),
+        x.get("kick_off_ts") or 0,
+    ))
+    capped = all_matches[:200]
+    live = [m for m in capped if m.get("is_live")]
+    upcoming = [m for m in capped if m.get("status_kind") == "scheduled"]
+    finished = [m for m in capped if m.get("is_finished")]
+    return {
+        "sport": "Tous les sports",
+        "sport_slug": "all",
+        "sport_type": 0,
+        "matches": capped,
+        "total": len(capped),
+        "live_count": len(live),
+        "upcoming_count": len(upcoming),
+        "finished_count": len(finished),
+        "leagues": sorted({(m.get("league") or {}).get("name") for m in capped if (m.get("league") or {}).get("name")}),
     }
 
 
@@ -2284,22 +2353,66 @@ async def jack07_match_stats(match_id: str, sport: int = 1):
     return {"stats": await _jack07_stats(match_id, sport_type=sport)}
 
 
+@api_router.get("/jack07/manifest/{match_id}/{stream_id}")
+async def jack07_manifest_proxy(match_id: str, stream_id: str, site_type: int = 2001, sport: int = 1):
+    """Server-side resolved Jack07 m3u8 manifest, served from our origin so
+    ad-blockers / uBlock / strict CSP don't block the foreign upstream host.
+
+    Segments inside the manifest stay as ABSOLUTE upstream URLs — the
+    browser fetches them DIRECTLY (from the user's IP, which is the only IP
+    the segment CDN accepts; our backend IP is geo-blocked at the segment
+    edge but works for the manifest).
+    """
+    url = await _jack07_resolve_stream(
+        match_id=match_id, stream_id=stream_id,
+        site_type=site_type, sport_type=sport,
+    )
+    if not url:
+        raise HTTPException(status_code=404, detail="Source indisponible")
+    cx = await get_http_client()
+    try:
+        r = await cx.get(url, headers={"User-Agent": USER_AGENT_STREAM}, timeout=httpx.Timeout(15.0))
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"Manifest fetch failed: {e}")
+    if r.status_code != 200 or not r.content.startswith(b"#EXT"):
+        raise HTTPException(status_code=502, detail=f"Manifest upstream HTTP {r.status_code}")
+    # Re-base relative segment URLs to absolute upstream URLs so the browser
+    # fetches them direct (skips our proxy → no geo-block on segment edge).
+    from urllib.parse import urljoin as _uj
+    out_lines: List[str] = []
+    for raw in r.content.decode("utf-8", errors="ignore").splitlines():
+        line = raw.strip()
+        if line and not line.startswith("#"):
+            out_lines.append(_uj(url, line))
+        else:
+            out_lines.append(line)
+    body = ("\n".join(out_lines) + "\n").encode("utf-8")
+    return Response(
+        content=body,
+        media_type="application/vnd.apple.mpegurl",
+        headers={
+            "Cache-Control": "public, max-age=1",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "*",
+        },
+    )
+
+
 @api_router.get("/jack07/streams/{match_id}")
 async def jack07_match_streams(match_id: str, request: Request, sport: int = 1):
-    """Stream sources for a match.
+    """Stream sources for a match. Returns multiple playback strategies per
+    source so the browser can fall through:
 
-    Returns BOTH a client-side `api_url` (call /api/stream/detail directly
-    from the browser to get a per-user-IP rb-session — required because the
-    Jack07 segment CDN is geo-restricted and refuses traffic from our
-    backend IP) AND a server-resolved `proxy_url` kept as fallback for
-    backend-friendly hosts. The browser tries `api_url` first; if it fails
-    (CORS or geo-block) it falls back to the iframe player.
+    1. `manifest_url` — m3u8 served from OUR origin (avoids ad-blocker /
+        CSP blocks on the upstream host). Segments inside are absolute
+        upstream URLs that the browser fetches directly from the user's IP.
+    2. `api_url` — direct upstream `/api/stream/detail` for client-side
+        AES resolution (legacy / fallback).
     """
     detail = await _jack07_detail(match_id, sport_type=sport)
     if not detail:
         raise HTTPException(status_code=404, detail="Match introuvable")
     raw_streams = detail.get("streams") or []
-    # Pick the first responsive API host (mirror of JACK07_API_HOSTS).
     api_base = "https://apis-data10.tcore131ybdf.ru"
     pub: List[Dict[str, Any]] = []
     from urllib.parse import urlencode as _qs
@@ -2309,26 +2422,23 @@ async def jack07_match_streams(match_id: str, request: Request, sport: int = 1):
         if not sid:
             continue
         params = {
-            "streamId": str(sid),
-            "siteType": str(site_type),
-            "continent": "NA",
-            "country": "US",
-            "digit": "seth",
-            "matchId": str(match_id),
-            "sportType": str(sport),
+            "streamId": str(sid), "siteType": str(site_type),
+            "continent": "NA", "country": "US", "digit": "seth",
+            "matchId": str(match_id), "sportType": str(sport),
         }
         pub.append({
             "id": sid,
             "name": s.get("name"),
             "quality": s.get("quality"),
-            # Direct upstream API the browser hits — bypasses our backend
-            # which is sometimes geo-blocked on segment edges.
+            # Primary: served from our origin to dodge ad-blockers
+            "manifest_url": f"/api/jack07/manifest/{match_id}/{sid}?site_type={site_type}&sport={sport}",
+            # Legacy / fallback
             "api_url": f"{api_base}/api/stream/detail?{_qs(params)}",
         })
     return {
         "match_id": match_id,
         "title": detail.get("title"),
-        "site_url": detail.get("site_url"),  # iframe fallback
+        "site_url": detail.get("site_url"),
         "streams": pub,
     }
 
