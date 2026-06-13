@@ -21,6 +21,10 @@ French live-TV streaming app (Vavoo-backed). User reported flaky UX (no loader, 
 - `/app/frontend/src/components/{ChannelCard, VideoPlayer, AdUnlockModal}.jsx`
 
 ## What's Been Implemented (latest first)
+### 2026-02-13 (iter 12 — iframe crop simplifié et précis)
+- **Iframe : 1280 × 720 forcé, scale à la largeur du wrapper** : le player Jack07 quand la vidéo joue occupe 1280×720 (= exactement 16:9) au tout début de la page, suivi immédiatement de la barre "Copier URL". On force donc `iframe.width=1280` + `iframe.height=720`, on `scale(wrapper.width / 1280)` via ResizeObserver, et le wrapper aspect-ratio 16:9 colle parfaitement. Résultat : on voit du **tout en haut** jusqu'à juste avant le lien Copier — exactement ce que demande l'utilisateur. Tout le reste du site Jack07 (Copier, APK/TV/TG, sélecteur de serveurs, charts, stats) est clippé hors vue par la limite verticale de l'iframe.
+- Suppression du clip-path et du translate complexes (étaient bons en théorie mais avec des coords mal calibrées).
+
 ### 2026-02-13 (iter 11 — iframe crop précis + clarification natif)
 - **Iframe responsive avec crop pixel-précis** : `clip-path: inset(355px 283px 50px 282px)` isole UNIQUEMENT le rectangle joueur (≈ 282,355 → 997,750) sur la page Jack07 rendue à 1280-px, puis `translate(-282px,-355px) scale(W/715)` positionne et redimensionne pour remplir le wrapper 16:9. Plus de bandeau header / boutons APK-TV-TG / sélecteur de serveurs / charts visibles.
 - **Autoplay activé** : `allow="autoplay; encrypted-media; fullscreen; …"` + `?autoplay=1&muted=1` injectés sur le src de l'iframe.

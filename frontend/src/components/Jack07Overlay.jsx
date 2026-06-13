@@ -586,16 +586,16 @@ function Jack07Iframe({ siteUrl, onBackToNative }) {
     return () => document.removeEventListener("fullscreenchange", onFs);
   }, []);
 
-  // Responsive: scale the 1280-px-wide iframe so the player rectangle
-  // (715 CSS-px wide on Jack07's layout) fills the wrapper width. Lives in
-  // an effect to respect react-hooks/refs purity.
+  // Responsive: scale the 1280-px-wide iframe so its 720-px-tall band
+  // (= up to the Copier URL bar) fills the wrapper. The wrapper itself is
+  // 16:9, and 1280×720 IS 16:9, so the visible area matches perfectly.
   useEffect(() => {
     const wrap = wrapRef.current;
     const ifr = iframeRef.current;
     if (!wrap || !ifr) return;
     const apply = () => {
-      const w = wrap.clientWidth || 715;
-      ifr.style.setProperty("--ifrScale", String(w / 715));
+      const w = wrap.clientWidth || 1280;
+      ifr.style.setProperty("--ifrScale", String(w / 1280));
     };
     apply();
     if (typeof ResizeObserver === "undefined") return;
@@ -654,18 +654,15 @@ function Jack07Iframe({ siteUrl, onBackToNative }) {
         title="Jack07 player"
         className="absolute left-0 top-0"
         style={{
+          // Render the Jack07 page at exactly 1280-px-wide. Once the user
+          // hits play the page's `<video>` expands to fill the viewport
+          // width (16:9) — so the *player rectangle* is 1280 × 720 at the
+          // very top of the page, immediately followed by the "Copier URL"
+          // bar. We just clamp the iframe to 720-px tall (= ~ before the
+          // Copier bar) and scale proportionally to the wrapper width.
           width: "1280px",
-          height: "800px",
-          // Player rectangle on Jack07's SPA at 1280-px viewport ≈
-          //   (282, 355)–(997, 750)  i.e. 715 × 395 (16:9).
-          // 1. clip-path crops the iframe surface to *only* that rectangle.
-          // 2. translate brings the rectangle's top-left to the wrapper's (0,0).
-          // 3. scale (driven by ResizeObserver) makes the 715-px-wide rect
-          //    exactly fill the wrapper's width.
-          clipPath:
-            "inset(355px 283px 50px 282px)",
-          transform:
-            "translate(-282px, -355px) scale(var(--ifrScale, 1))",
+          height: "720px",
+          transform: "scale(var(--ifrScale, 1))",
           transformOrigin: "top left",
           border: "none",
           background: "#000",
@@ -678,14 +675,8 @@ function Jack07Iframe({ siteUrl, onBackToNative }) {
         onLoad={() => setLoaded(true)}
         data-testid="jack07-iframe"
       />
-      {/* Bottom black mask hides any footer / ad strip that leaks below the player */}
-      <div
-        className="absolute inset-x-0 bottom-0 pointer-events-none"
-        style={{
-          height: "20%",
-          background: "linear-gradient(to top, rgba(0,0,0,0.95) 0%, rgba(0,0,0,0))",
-        }}
-      />
+      {/* No bottom mask needed — the iframe is sized to stop precisely
+          before the Copier URL bar, so nothing of the site chrome leaks. */}
       {!loaded && (
         <div className="absolute inset-0 flex items-center justify-center bg-black/70 pointer-events-none">
           <Loader2 className="animate-spin text-amber-400" size={28} />
