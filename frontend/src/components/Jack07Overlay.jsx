@@ -583,15 +583,14 @@ function Jack07Iframe({ siteUrl, onBackToNative }) {
     return () => document.removeEventListener("fullscreenchange", onFs);
   }, []);
 
-  // Responsive: scale so the player rectangle (765-px-wide on Jack07's
-  // 1280-px desktop layout) fills the wrapper width.
+  // Responsive: scale so the 1280-px-wide internal layout fills the wrapper.
   useEffect(() => {
     const wrap = wrapRef.current;
     const ifr = iframeRef.current;
     if (!wrap || !ifr) return;
     const apply = () => {
-      const w = wrap.clientWidth || 765;
-      ifr.style.setProperty("--ifrScale", String(w / 765));
+      const w = wrap.clientWidth || 1280;
+      ifr.style.setProperty("--ifrScale", String(w / 1280));
     };
     apply();
     if (typeof ResizeObserver === "undefined") return;
@@ -624,9 +623,9 @@ function Jack07Iframe({ siteUrl, onBackToNative }) {
     <div
       ref={wrapRef}
       className="relative w-full rounded-2xl overflow-hidden bg-black border border-white/10"
-      // Aspect-ratio matches the Jack07 player rectangle (765×655) so the
-      // crop fills the wrapper exactly with no black bars.
-      style={{ aspectRatio: "765 / 655" }}
+      // Aspect-ratio matches the visible band we keep from the Jack07 page
+      // (1280 × 985 = top edge → just before the "Copier URL" bar).
+      style={{ aspectRatio: "1280 / 985" }}
       data-testid="jack07-iframe-wrap"
     >
       {/*
@@ -652,22 +651,14 @@ function Jack07Iframe({ siteUrl, onBackToNative }) {
         title="Jack07 player"
         className="absolute left-0 top-0"
         style={{
-          // From an actual user screenshot of the Jack07 page rendered at
-          // 1280-px viewport, the <video> player occupies a FIXED rectangle:
-          //   x: 205 → 970   (width 765)
-          //   y: 113 → 768   (height 655)
-          // The size doesn't change between idle / playing — it's anchored
-          // to the page layout. So we render the iframe at 1280×800,
-          // clip-path the surface to ONLY that rectangle, translate the
-          // rectangle's top-left to (0,0) of the wrapper, and scale so the
-          // 765-px-wide player exactly fills the wrapper width.
-          //
-          // Wrapper aspect-ratio is set to 765:655 (= 1.168) to match the
-          // player so nothing else of Jack07's site leaks in.
+          // Force a 1280-px-wide desktop render of Jack07. The player on
+          // that layout occupies y = 0 → 985 (vertical band including header,
+          // match-info, and the player itself, stopping JUST before the
+          // "Copier URL" bar). We size the iframe to exactly that band and
+          // scale it proportionally to the wrapper width.
           width: "1280px",
-          height: "800px",
-          clipPath: "inset(113px 310px 32px 205px)",
-          transform: "translate(-205px, -113px) scale(var(--ifrScale, 1))",
+          height: "985px",
+          transform: "scale(var(--ifrScale, 1))",
           transformOrigin: "top left",
           border: "none",
           background: "#000",
