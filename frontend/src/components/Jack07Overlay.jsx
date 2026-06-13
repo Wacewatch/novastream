@@ -7,52 +7,42 @@ import {
 } from "lucide-react";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
+const BACKEND_BASE = process.env.REACT_APP_BACKEND_URL || "";
 
 /**
  * Jack07 TV playback overlay.
  *
- * Tries to play directly via hls.js using the m3u8 URL returned by
- * /api/jack07/streams. If hls.js can't reach the segments (the upstream
- * CDN binds them to the rb-session/IP that resolved /api/stream/detail —
- * which is our backend, not the user's browser — and rejects mismatches
- * with HTTP 487), we transparently fall back to iframing Jack07's own
- * player page, which carries the right session in JS state.
- *
- * Layout:
- *   - Sticky top bar (match title + close + native/iframe toggle)
- *   - 16:9 player area (native OR iframe)
- *   - Server picker row (only in native mode)
- *   - Score banner
- *   - Two-column info panel: events (live), stats
+ * The BACKEND resolves each Jack07 stream and returns a signed `proxy_url`
+ * pointing at our `/api/hls` HLS proxy. The proxy handles the ROT47 +
+ * rb-session IP binding entirely server-side, so the browser just needs to
+ * feed `proxy_url` to hls.js. If playback fails for any reason we fall
+ * back to iframing the Jack07 site player (which carries its own session).
  */
 export default function Jack07Overlay({ match, detail: initialDetail, onClose }) {
+  const sportType = match?.sport_type || initialDetail?.sport_type || 1;
   const [detail, setDetail] = useState(initialDetail || null);
-  const [streams, setStreams] = useState(null); // [{ id, name, stream_url, available }]
+  const [streams, setStreams] = useState(null);
   const [activeId, setActiveId] = useState(null);
   const [events, setEvents] = useState([]);
   const [stats, setStats] = useState([]);
   const [loadingStreams, setLoadingStreams] = useState(true);
   const [streamError, setStreamError] = useState(null);
-  // Playback mode: 'native' (hls.js) or 'iframe' (fallback). Auto-switches
-  // to iframe when hls.js reports a fatal NETWORK_ERROR (segment 487).
   const [mode, setMode] = useState("native");
 
   const matchId = match?.id || detail?.id;
 
-  // 1) Always fetch detail (refresh from server) for fresh score/status
   useEffect(() => {
     if (!matchId) return;
     let cancelled = false;
     (async () => {
       try {
-        const r = await axios.get(`${API}/jack07/detail/${matchId}`);
+        const r = await axios.get(`${API}/jack07/detail/${matchId}`, { params: { sport: sportType } });
         if (!cancelled) setDetail(r.data);
       } catch { /* keep initial */ }
     })();
     return () => { cancelled = true; };
-  }, [matchId]);
+  }, [matchId, sportType]);
 
-  // 2) Load streams metadata (browser does the actual resolution)
   useEffect(() => {
     if (!matchId) return;
     let cancelled = false;
@@ -60,35 +50,33 @@ export default function Jack07Overlay({ match, detail: initialDetail, onClose })
       setLoadingStreams(true);
       setStreamError(null);
       try {
-        const r = await axios.get(`${API}/jack07/streams/${matchId}`);
+        const r = await axios.get(`${API}/jack07/streams/${matchId}`, { params: { sport: sportType } });
         if (cancelled) return;
-        const list = (r.data?.streams || []).filter((s) => s.api_url);
+        const list = (r.data?.streams || []).filter((s) => s.proxy_url);
         if (!list.length) {
           setStreamError("Aucune source disponible pour ce match");
           setStreams([]);
-          setLoadingStreams(false);
-          return;
+        } else {
+          setStreams(list);
+          setActiveId(list[0].id);
         }
-        setStreams(list);
-        setActiveId(list[0].id);
-      } catch (e) {
+      } catch {
         if (!cancelled) setStreamError("Impossible de charger les sources");
       } finally {
         if (!cancelled) setLoadingStreams(false);
       }
     })();
     return () => { cancelled = true; };
-  }, [matchId]);
+  }, [matchId, sportType]);
 
-  // 3) Poll events + stats every 15 s
   useEffect(() => {
     if (!matchId) return;
     let cancelled = false;
     const load = async () => {
       try {
         const [e, s] = await Promise.all([
-          axios.get(`${API}/jack07/events/${matchId}`),
-          axios.get(`${API}/jack07/stats/${matchId}`),
+          axios.get(`${API}/jack07/events/${matchId}`, { params: { sport: sportType } }),
+          axios.get(`${API}/jack07/stats/${matchId}`, { params: { sport: sportType } }),
         ]);
         if (cancelled) return;
         setEvents(e.data?.events || []);
@@ -98,9 +86,8 @@ export default function Jack07Overlay({ match, detail: initialDetail, onClose })
     load();
     const id = setInterval(load, 15_000);
     return () => { cancelled = true; clearInterval(id); };
-  }, [matchId]);
+  }, [matchId, sportType]);
 
-  // 4) ESC to close
   useEffect(() => {
     const onKey = (e) => { if (e.key === "Escape") onClose?.(); };
     window.addEventListener("keydown", onKey);
@@ -118,17 +105,22 @@ export default function Jack07Overlay({ match, detail: initialDetail, onClose })
   const as = detail?.away_score ?? match?.away_score;
   const statusLabel = detail?.status_label || match?.status_label || "";
   const leagueName = detail?.league?.name || match?.league?.name || "";
+  const sportLabel = detail?.sport || match?.sport || "";
 
   return (
     <div className="fixed inset-0 z-[80] bg-black/95 backdrop-blur-md overflow-y-auto" data-testid="jack07-overlay">
       <div className="min-h-full flex flex-col">
-        {/* ===== Top bar ===== */}
         <div className="sticky top-0 z-20 flex items-center gap-3 px-4 py-3 bg-black/80 backdrop-blur border-b border-white/10">
           <div className="min-w-0 flex-1">
             <div className="text-white font-extrabold text-sm truncate" data-testid="jack07-title">
               {match?.title || `${homeName} vs ${awayName}`}
             </div>
             <div className="text-white/55 text-[11px] truncate flex items-center gap-2">
+              {sportLabel && (
+                <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[10px] font-bold uppercase tracking-wide" data-testid="jack07-sport-badge">
+                  {sportLabel}
+                </span>
+              )}
               {leagueName ? <span>{leagueName}</span> : null}
               {statusLabel && (
                 <span className="inline-flex items-center gap-1 text-red-400 font-semibold">
@@ -143,13 +135,11 @@ export default function Jack07Overlay({ match, detail: initialDetail, onClose })
           </button>
         </div>
 
-        {/* ===== Player + info column ===== */}
         <div className="px-4 pt-4 pb-10">
           <div className="mx-auto max-w-6xl space-y-4">
-            {/* ===== Player ===== */}
             {mode === "native" ? (
               <Jack07Player
-                apiUrl={activeStream?.api_url}
+                proxyUrl={activeStream?.proxy_url}
                 loading={loadingStreams}
                 error={streamError}
                 channelName={activeStream?.name || ""}
@@ -159,7 +149,6 @@ export default function Jack07Overlay({ match, detail: initialDetail, onClose })
               <Jack07Iframe siteUrl={siteUrl} onBackToNative={() => setMode("native")} />
             )}
 
-            {/* ===== Mode toggle — VISIBLE button per user request ===== */}
             {siteUrl && (
               <div className="flex justify-center">
                 <button
@@ -167,16 +156,11 @@ export default function Jack07Overlay({ match, detail: initialDetail, onClose })
                   className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white/5 border border-white/15 text-white/85 text-xs font-semibold hover:bg-white/10 transition"
                   data-testid="jack07-toggle-mode"
                 >
-                  {mode === "native" ? (
-                    <>Basculer sur le lecteur Jack07 (iframe)</>
-                  ) : (
-                    <>Revenir au lecteur direct (natif)</>
-                  )}
+                  {mode === "native" ? "Basculer sur le lecteur Jack07 (iframe)" : "Revenir au lecteur direct (natif)"}
                 </button>
               </div>
             )}
 
-            {/* ===== Server picker (native mode only — iframe has its own picker) ===== */}
             {mode === "native" && streams && streams.length > 0 && (
               <div className="glass rounded-2xl p-3" data-testid="jack07-servers">
                 <div className="text-white/60 text-[11px] font-semibold tracking-wide mb-2 px-1">
@@ -202,7 +186,6 @@ export default function Jack07Overlay({ match, detail: initialDetail, onClose })
               </div>
             )}
 
-            {/* ===== Score banner ===== */}
             {(homeName || awayName) && (
               <div className="glass rounded-2xl p-4 flex items-center justify-around gap-4">
                 <div className="flex flex-col items-center gap-2 min-w-0 flex-1">
@@ -228,7 +211,6 @@ export default function Jack07Overlay({ match, detail: initialDetail, onClose })
               </div>
             )}
 
-            {/* ===== Info: events + stats ===== */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
               <section className="glass rounded-2xl p-4" data-testid="jack07-events-panel">
                 <h3 className="text-white font-extrabold mb-3 flex items-center gap-2">
@@ -262,92 +244,12 @@ export default function Jack07Overlay({ match, detail: initialDetail, onClose })
   );
 }
 
-// =====================================================================
-// Jack07 cipher helpers — reversed from /statics/*.js bundles
-// =====================================================================
-
-/** ROT47: each printable ASCII char shifted by 47 (range 33-126). */
-function rot47(s) {
-  let out = "";
-  for (const c of s) {
-    const n = c.charCodeAt(0);
-    out += (n >= 33 && n <= 126) ? String.fromCharCode(33 + ((n - 33 + 47) % 94)) : c;
-  }
-  return out;
-}
-
 /**
- * Extract the m3u8 URL from the /api/stream/detail protobuf body.
- * The URL lives at path (10, 2, 4) as a ROT47-encrypted string with an
- * 8-byte garbage prefix. We don't need a full PB decoder — we just locate
- * the ROT47 signature of "https://" inside the body and walk forward.
+ * Minimal hls.js-backed player. Feeds `proxyUrl` (an /api/hls?t=… URL on
+ * our own backend) straight to hls.js. The backend handles all upstream
+ * authentication so this component stays simple.
  */
-function extractM3u8FromPb(bytes) {
-  let txt = "";
-  for (let i = 0; i < bytes.length; i++) txt += String.fromCharCode(bytes[i]);
-  // ROT47 of 'https://' = '9EEADi^^'
-  const idx = txt.indexOf("9EEADi^^");
-  if (idx < 0) return null;
-  const start = Math.max(0, idx - 8);
-  let end = idx;
-  while (end < txt.length) {
-    const code = txt.charCodeAt(end);
-    if (code < 33 || code > 126) break;
-    end++;
-  }
-  const enc = txt.slice(start, end);
-  const dec = rot47(enc);
-  if (dec.length < 8) return null;
-  const url = dec.slice(8);
-  return url.toLowerCase().startsWith("http") ? url : null;
-}
-
-/**
- * Encrypt rb-session header → AES-128-CBC token. Key & IV are baked into
- * the Jack07 SPA bundle (`/statics/c6e43a94890.js` and friends).
- * Returns the URI-encoded base64 ciphertext + 'a' suffix.
- */
-async function encryptRbSession(rbSession) {
-  const enc = new TextEncoder().encode(rbSession);
-  // PKCS7 padding
-  const pad = 16 - (enc.length % 16);
-  const padded = new Uint8Array(enc.length + pad);
-  padded.set(enc);
-  padded.fill(pad, enc.length);
-  const keyBytes = new Uint8Array([
-    0xa7, 0x98, 0x1c, 0xc9, 0xeb, 0x2f, 0x4d, 0x19,
-    0xdc, 0xfe, 0xa5, 0x7b, 0x10, 0x1e, 0xcd, 0x89,
-  ]);
-  const iv = new Uint8Array([
-    0x80, 0x17, 0xd3, 0xa8, 0xf1, 0x40, 0x0d, 0x2f,
-    0, 0, 0, 0, 0, 0, 0, 0,
-  ]);
-  const key = await crypto.subtle.importKey("raw", keyBytes, { name: "AES-CBC" }, false, ["encrypt"]);
-  // SubtleCrypto AES-CBC auto-applies PKCS7 padding. We MUST NOT pad twice
-  // → encrypt the raw plaintext (NOT the padded buffer).
-  const ctBuf = await crypto.subtle.encrypt({ name: "AES-CBC", iv }, key, enc);
-  const ctArr = new Uint8Array(ctBuf);
-  let bin = "";
-  for (let i = 0; i < ctArr.length; i++) bin += String.fromCharCode(ctArr[i]);
-  const b64 = btoa(bin);
-  return encodeURIComponent(b64) + "a";
-}
-
-/**
- * Minimal hls.js-backed player with our own controls. Performs the FULL
- * Jack07 stream resolution client-side so the rb-session is bound to the
- * user's browser/edge IP (segments authenticated with that IP serve fine).
- *
- *   apiUrl (server-built): /api/stream/detail?streamId=…&matchId=… &…
- *
- * The flow:
- *   1. fetch(apiUrl) → grab `rb-session` header + protobuf body
- *   2. parse field (10,2,4) ROT47-encoded URL → slice(8) → m3u8 URL
- *   3. AES-CBC encrypt rb-session with the embedded key/iv → base64url + 'a'
- *   4. Insert /token-XXX/ after host → final tokenized URL
- *   5. Feed to hls.js
- */
-function Jack07Player({ apiUrl, loading, error, channelName, onFatalError }) {
+function Jack07Player({ proxyUrl, loading, error, channelName, onFatalError }) {
   const videoRef = useRef(null);
   const wrapRef = useRef(null);
   const hlsRef = useRef(null);
@@ -355,47 +257,15 @@ function Jack07Player({ apiUrl, loading, error, channelName, onFatalError }) {
   const [muted, setMuted] = useState(true);
   const [fs, setFs] = useState(false);
   const [playerErr, setPlayerErr] = useState(null);
-  const [bufferingMsg, setBufferingMsg] = useState(null);
-  const [resolvedUrl, setResolvedUrl] = useState(null);
+  const [buffering, setBuffering] = useState(false);
 
-  // Resolve stream URL whenever apiUrl changes
   useEffect(() => {
-    if (!apiUrl) return;
-    let cancelled = false;
-    setResolvedUrl(null);
-    setPlayerErr(null);
-    setBufferingMsg("Récupération du flux…");
-    (async () => {
-      try {
-        const r = await fetch(apiUrl, { credentials: "omit" });
-        const rbSession = r.headers.get("rb-session");
-        if (!rbSession) throw new Error("rb-session manquante");
-        const buf = await r.arrayBuffer();
-        // Decode protobuf body to find ROT47-encoded URL (field 10.2.4)
-        const m3u8Url = extractM3u8FromPb(new Uint8Array(buf));
-        if (!m3u8Url) throw new Error("Flux introuvable dans la réponse");
-        // Encrypt rb-session → AES-CBC token
-        const token = await encryptRbSession(rbSession);
-        const u = new URL(m3u8Url);
-        const tokenedUrl = `${u.origin}/token-${token}${u.pathname}${u.search}`;
-        if (!cancelled) {
-          setResolvedUrl(tokenedUrl);
-          setBufferingMsg("Connexion au flux…");
-        }
-      } catch (e) {
-        if (!cancelled) {
-          setPlayerErr(`Résolution échouée: ${e.message}`);
-          setBufferingMsg(null);
-        }
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [apiUrl]);
-
-  // Attach hls.js when resolved URL changes
-  useEffect(() => {
-    if (!resolvedUrl || !videoRef.current) return;
+    if (!proxyUrl || !videoRef.current) return;
     const video = videoRef.current;
+    const absUrl = proxyUrl.startsWith("http") ? proxyUrl : `${BACKEND_BASE}${proxyUrl}`;
+
+    setPlayerErr(null);
+    setBuffering(true);
 
     if (hlsRef.current) {
       try { hlsRef.current.destroy(); } catch { /* noop */ }
@@ -405,44 +275,46 @@ function Jack07Player({ apiUrl, loading, error, channelName, onFatalError }) {
     const playPromise = () => video.play().then(() => setPlaying(true)).catch(() => setPlaying(false));
 
     if (video.canPlayType("application/vnd.apple.mpegurl")) {
-      video.src = resolvedUrl;
-      video.addEventListener("loadeddata", () => { setBufferingMsg(null); playPromise(); }, { once: true });
-    } else if (Hls.isSupported()) {
-      const hls = new Hls({
-        enableWorker: true,
-        lowLatencyMode: true,
-        liveSyncDurationCount: 3,
-        liveMaxLatencyDurationCount: 8,
-        manifestLoadingTimeOut: 10000,
-        manifestLoadingMaxRetry: 3,
-        fragLoadingTimeOut: 15000,
-        fragLoadingMaxRetry: 3,
-      });
-      hlsRef.current = hls;
-      hls.attachMedia(video);
-      hls.on(Hls.Events.MEDIA_ATTACHED, () => hls.loadSource(resolvedUrl));
-      hls.on(Hls.Events.MANIFEST_PARSED, () => { setBufferingMsg(null); playPromise(); });
-      hls.on(Hls.Events.ERROR, (_evt, data) => {
-        if (data.fatal) {
-          if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-            setPlayerErr("Flux protégé — bascule vers le lecteur Jack07…");
-            if (typeof onFatalError === "function") setTimeout(() => onFatalError(), 800);
-          } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-            try { hls.recoverMediaError(); } catch { setPlayerErr("Erreur média"); }
-          } else {
-            setPlayerErr("Erreur lecture");
-            if (typeof onFatalError === "function") setTimeout(() => onFatalError(), 800);
-          }
-        }
-      });
-    } else {
-      setPlayerErr("HLS non supporté par ce navigateur");
+      video.src = absUrl;
+      const onLoaded = () => { setBuffering(false); playPromise(); };
+      video.addEventListener("loadeddata", onLoaded, { once: true });
+      return () => { video.removeEventListener("loadeddata", onLoaded); };
     }
+
+    if (!Hls.isSupported()) {
+      setPlayerErr("HLS non supporté par ce navigateur");
+      setBuffering(false);
+      return;
+    }
+
+    const hls = new Hls({
+      enableWorker: true,
+      lowLatencyMode: true,
+      liveSyncDurationCount: 3,
+      liveMaxLatencyDurationCount: 8,
+      manifestLoadingTimeOut: 12000,
+      manifestLoadingMaxRetry: 3,
+      fragLoadingTimeOut: 20000,
+      fragLoadingMaxRetry: 4,
+    });
+    hlsRef.current = hls;
+    hls.attachMedia(video);
+    hls.on(Hls.Events.MEDIA_ATTACHED, () => hls.loadSource(absUrl));
+    hls.on(Hls.Events.MANIFEST_PARSED, () => { setBuffering(false); playPromise(); });
+    hls.on(Hls.Events.ERROR, (_evt, data) => {
+      if (!data.fatal) return;
+      if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+        try { hls.recoverMediaError(); } catch { setPlayerErr("Erreur média"); }
+      } else {
+        setPlayerErr("Flux indisponible — bascule vers le lecteur Jack07…");
+        if (typeof onFatalError === "function") setTimeout(() => onFatalError(), 800);
+      }
+    });
 
     return () => {
       if (hlsRef.current) { try { hlsRef.current.destroy(); } catch { /* noop */ } hlsRef.current = null; }
     };
-  }, [resolvedUrl, onFatalError]);
+  }, [proxyUrl, onFatalError]);
 
   useEffect(() => {
     const onFs = () => setFs(!!document.fullscreenElement);
@@ -469,9 +341,8 @@ function Jack07Player({ apiUrl, loading, error, channelName, onFatalError }) {
   };
 
   const reload = () => {
-    const v = videoRef.current; if (!v || !resolvedUrl) return;
+    const v = videoRef.current; if (!v) return;
     if (hlsRef.current) hlsRef.current.startLoad();
-    v.currentTime = v.duration || 0;
     v.play().catch(() => {});
   };
 
@@ -488,26 +359,24 @@ function Jack07Player({ apiUrl, loading, error, channelName, onFatalError }) {
         className="absolute inset-0 w-full h-full"
         data-testid="jack07-video"
       />
-      {(loading || bufferingMsg) && !playerErr && !error && (
+      {(loading || buffering) && !playerErr && !error && (
         <div className="absolute inset-0 flex items-center justify-center bg-black/60 pointer-events-none">
           <Loader2 className="animate-spin text-amber-400" size={28} />
-          <span className="ml-3 text-white/80 text-sm">{loading ? "Recherche des sources…" : bufferingMsg}</span>
+          <span className="ml-3 text-white/80 text-sm">{loading ? "Recherche des sources…" : "Connexion au flux…"}</span>
         </div>
       )}
       {(error || playerErr) && (
         <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 p-6 text-center">
           <AlertTriangle className="text-amber-400 mb-2" size={28} />
           <div className="text-white font-semibold text-sm">{error || playerErr}</div>
-          <div className="text-white/50 text-[11px] mt-1">Essayez de basculer sur une autre source ci-dessous.</div>
+          <div className="text-white/50 text-[11px] mt-1">Essayez une autre source ou le lecteur Jack07.</div>
         </div>
       )}
-      {/* Channel tag */}
       {channelName && !loading && !error && (
         <div className="absolute top-2 left-2 px-2 py-0.5 rounded-md bg-black/60 backdrop-blur text-white text-[11px] font-semibold border border-white/15">
           {channelName}
         </div>
       )}
-      {/* Controls */}
       <div className="absolute bottom-0 left-0 right-0 flex items-center gap-2 px-3 py-2 bg-gradient-to-t from-black/80 to-transparent">
         <button onClick={togglePlay} className="iframe-player-btn" title={playing ? "Pause" : "Lecture"} data-testid="jack07-play">
           {playing ? <Pause size={14} /> : <Play size={14} />}
@@ -577,12 +446,7 @@ function Jack07Iframe({ siteUrl, onBackToNative }) {
         data-testid="jack07-iframe"
       />
       <div className="absolute top-2 right-2 flex gap-1">
-        <button
-          onClick={onBackToNative}
-          className="iframe-player-btn"
-          title="Réessayer le lecteur natif"
-          data-testid="jack07-try-native"
-        >
+        <button onClick={onBackToNative} className="iframe-player-btn" title="Réessayer le lecteur natif" data-testid="jack07-try-native">
           <RotateCcw size={14} />
         </button>
         <button onClick={reload} className="iframe-player-btn" title="Recharger">

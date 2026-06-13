@@ -47,6 +47,40 @@ JACK07_API = JACK07_API_HOSTS[0]  # kept for backwards compat with imports
 LANG = 6   # French
 SPORT_FOOTBALL = 1
 
+# Sport types supported by the Jack07 API (mapping verified empirically by
+# probing /api/match/live with various sportType values and inspecting the
+# leagues returned). Display labels are in French (matches the rest of UI).
+SPORTS: Dict[int, Dict[str, str]] = {
+    1: {"slug": "football",   "label": "Football"},
+    2: {"slug": "basketball", "label": "Basketball"},
+    3: {"slug": "tennis",     "label": "Tennis"},
+    4: {"slug": "baseball",   "label": "Baseball"},
+    6: {"slug": "cricket",    "label": "Cricket"},
+    7: {"slug": "motorsport", "label": "Motorsport"},
+    8: {"slug": "rugby",      "label": "Rugby"},
+}
+
+# CDN host rotation — the upstream protobuf occasionally embeds logo URLs on
+# a *previous* CDN hostname (e.g. logos1.tcrbg61levl.cfd) that no longer
+# resolves. We rewrite known stale hosts to the current active CDN so logos
+# render in the SPA. Verified active 2026-02: logos1.tcore131ybdf.ru.
+_LOGO_HOST_REWRITES = {
+    "logos1.tcrbg61levl.cfd": "logos1.tcore131ybdf.ru",
+    "logos2.tcrbg61levl.cfd": "logos1.tcore131ybdf.ru",
+    "logos3.tcrbg61levl.cfd": "logos1.tcore131ybdf.ru",
+}
+
+
+def _fix_logo(url: str) -> str:
+    """Rewrite stale CDN hosts in a logo URL to the active one. Returns the
+    string unchanged when it's not a recognized stale host."""
+    if not url or not isinstance(url, str):
+        return url
+    for stale, live in _LOGO_HOST_REWRITES.items():
+        if stale in url:
+            return url.replace(stale, live)
+    return url
+
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36"
@@ -245,13 +279,13 @@ def _team(t: Optional[Dict[int, Any]]) -> Optional[Dict[str, Any]]:
         return None
     tid = _g(t, 1, default=0)
     name = _s(_g(t, 3, 2, default=""))
-    logo = _s(_g(t, 4, default=""))
+    logo = _fix_logo(_s(_g(t, 4, default="")))
     if not (tid or name):
         return None
     return {"id": int(tid) if tid else 0, "name": name, "logo": logo}
 
 
-def _project_match(m: Dict[int, Any]) -> Optional[Dict[str, Any]]:
+def _project_match(m: Dict[int, Any], sport_type: int = SPORT_FOOTBALL) -> Optional[Dict[str, Any]]:
     """Map a raw match protobuf dict to a clean JSON-friendly object."""
     if not isinstance(m, dict):
         return None
@@ -316,10 +350,13 @@ def _project_match(m: Dict[int, Any]) -> Optional[Dict[str, Any]]:
     # Build the jack07 site URL we will iframe
     site_url = ""
     if match_id and league_slug and match_slug:
+        sport_slug = (SPORTS.get(sport_type) or {}).get("slug") or "football"
         site_url = (
-            f"{JACK07_SITE}/fr/football/{league_slug}-{match_id}/"
+            f"{JACK07_SITE}/fr/{sport_slug}/{league_slug}-{match_id}/"
             f"{match_slug}.html"
         )
+
+    sport_info = SPORTS.get(sport_type) or SPORTS[SPORT_FOOTBALL]
 
     return {
         "id": str(match_id),
@@ -334,12 +371,15 @@ def _project_match(m: Dict[int, Any]) -> Optional[Dict[str, Any]]:
         "status_kind": _status_kind(status),
         "is_live": _status_kind(status) == "live",
         "is_finished": _status_kind(status) == "finished",
+        "sport_type": sport_type,
+        "sport": sport_info["label"],
+        "sport_slug": sport_info["slug"],
         "league": {
             "id": int(_g(league, 1, default=0) or 0),
             "name": _s(_g(league, 3, 2, default="")),
-            "logo": _s(_g(league, 4, default="")),
+            "logo": _fix_logo(_s(_g(league, 4, default=""))),
             "country": _s(_g(league, 80, 3, 2, default="")),
-            "country_logo": _s(_g(league, 80, 4, default="")),
+            "country_logo": _fix_logo(_s(_g(league, 80, 4, default=""))),
         },
         "season": {
             "id": int(_g(season, 1, default=0) or 0),
@@ -518,7 +558,7 @@ async def fetch_matches(sport_type: int = SPORT_FOOTBALL, language: int = LANG) 
         if not root:
             return []
         items = _as_list(_g(root, 10, 1))
-        out = [m for m in (_project_match(x) for x in items) if m]
+        out = [m for m in (_project_match(x, sport_type) for x in items) if m]
         # Sort: live first (by status), then upcoming by kick-off
         out.sort(key=lambda x: (
             0 if x["is_live"] else (1 if x["status_kind"] == "scheduled" else 2),
@@ -529,41 +569,41 @@ async def fetch_matches(sport_type: int = SPORT_FOOTBALL, language: int = LANG) 
     return await _cached(f"matches:{sport_type}:{language}", ttl=60.0, loader=_load) or []
 
 
-async def fetch_detail(match_id: str) -> Optional[Dict[str, Any]]:
+async def fetch_detail(match_id: str, sport_type: int = SPORT_FOOTBALL) -> Optional[Dict[str, Any]]:
     """Match details + stream sources list (streamId, name)."""
     async def _load() -> Optional[Dict[str, Any]]:
         root = await _fetch_pb("/api/match/detail", {
-            "matchId": match_id, "sportType": SPORT_FOOTBALL, "language": LANG, "stream": "true",
+            "matchId": match_id, "sportType": sport_type, "language": LANG, "stream": "true",
         })
         if not root:
             return None
-        match = _project_match(_g(root, 10, 1) or {})
+        match = _project_match(_g(root, 10, 1) or {}, sport_type)
         if not match:
             return None
         match["streams"] = _project_streams(root)
         return match
 
-    return await _cached(f"detail:{match_id}", ttl=30.0, loader=_load)
+    return await _cached(f"detail:{match_id}:{sport_type}", ttl=30.0, loader=_load)
 
 
-async def fetch_events(match_id: str) -> List[Dict[str, Any]]:
+async def fetch_events(match_id: str, sport_type: int = SPORT_FOOTBALL) -> List[Dict[str, Any]]:
     async def _load() -> List[Dict[str, Any]]:
         root = await _fetch_pb("/api/match/event", {
-            "matchId": match_id, "sportType": SPORT_FOOTBALL, "language": LANG,
+            "matchId": match_id, "sportType": sport_type, "language": LANG,
         })
         return _project_events(root) if root else []
 
-    return await _cached(f"events:{match_id}", ttl=15.0, loader=_load) or []
+    return await _cached(f"events:{match_id}:{sport_type}", ttl=15.0, loader=_load) or []
 
 
-async def fetch_stats(match_id: str) -> List[Dict[str, Any]]:
+async def fetch_stats(match_id: str, sport_type: int = SPORT_FOOTBALL) -> List[Dict[str, Any]]:
     async def _load() -> List[Dict[str, Any]]:
         root = await _fetch_pb("/api/match/statistic", {
-            "matchId": match_id, "sportType": SPORT_FOOTBALL, "language": LANG,
+            "matchId": match_id, "sportType": sport_type, "language": LANG,
         })
         return _project_stats(root) if root else []
 
-    return await _cached(f"stats:{match_id}", ttl=15.0, loader=_load) or []
+    return await _cached(f"stats:{match_id}:{sport_type}", ttl=15.0, loader=_load) or []
 
 
 
@@ -584,7 +624,7 @@ def _rot47(s: str) -> str:
     return "".join(out)
 
 
-async def resolve_stream(match_id: str, stream_id: str, site_type: int = 2001) -> Optional[str]:
+async def resolve_stream(match_id: str, stream_id: str, site_type: int = 2001, sport_type: int = SPORT_FOOTBALL) -> Optional[str]:
     """Resolve a Jack07 (matchId, streamId, siteType) tuple to a playable m3u8.
 
     The /api/stream/detail endpoint accepts plain query params (no signature).
@@ -599,7 +639,7 @@ async def resolve_stream(match_id: str, stream_id: str, site_type: int = 2001) -
             "country": "US",
             "digit": "seth",
             "matchId": str(match_id),
-            "sportType": str(SPORT_FOOTBALL),
+            "sportType": str(sport_type),
         }
         root = await _fetch_pb("/api/stream/detail", params)
         if not root:
@@ -619,7 +659,7 @@ async def resolve_stream(match_id: str, stream_id: str, site_type: int = 2001) -
             return None
 
     return await _cached(
-        f"stream:{match_id}:{stream_id}:{site_type}",
+        f"stream:{match_id}:{stream_id}:{site_type}:{sport_type}",
         ttl=60.0,
         loader=_load,
     )

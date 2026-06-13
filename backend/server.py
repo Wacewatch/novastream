@@ -2171,6 +2171,7 @@ async def admin_global_stats(authorization: Optional[str] = Header(None)):
 from jack07 import fetch_matches as _jack07_matches, fetch_detail as _jack07_detail  # noqa: E402
 from jack07 import fetch_events as _jack07_events, fetch_stats as _jack07_stats  # noqa: E402
 from jack07 import resolve_stream as _jack07_resolve_stream  # noqa: E402
+from jack07 import SPORTS as _JACK07_SPORTS  # noqa: E402
 import base64 as _b64  # noqa: E402
 
 
@@ -2190,14 +2191,28 @@ def _jack07_public_base(request: Request) -> str:
     return f"{proto}://{host}".rstrip("/")
 
 
+@api_router.get("/jack07/sports")
+async def jack07_sports_list():
+    """List the sports the Jack07 SPA currently exposes (verified empirically)."""
+    return {
+        "sports": [
+            {"id": sid, "label": info["label"], "slug": info["slug"]}
+            for sid, info in _JACK07_SPORTS.items()
+        ]
+    }
+
+
 @api_router.get("/jack07/matches")
 async def jack07_matches_list(sport: int = 1, language: int = 6):
     """List Jack07 matches (live + upcoming + finished).
 
     Query params:
-      - sport: sport type (1 = Football, default)
+      - sport: sport type (1 = Football, 2 = Basketball, 3 = Tennis,
+        4 = Baseball, 6 = Cricket, 7 = Motorsport, 8 = Rugby)
       - language: language code (6 = French, default)
     """
+    if sport not in _JACK07_SPORTS:
+        raise HTTPException(status_code=400, detail="Sport non supporté")
     try:
         matches = await _jack07_matches(sport_type=sport, language=language)
     except Exception as e:  # noqa: BLE001
@@ -2212,7 +2227,11 @@ async def jack07_matches_list(sport: int = 1, language: int = 6):
         for m in matches
         if isinstance((m.get("league") or {}).get("name"), str) and (m.get("league") or {}).get("name")
     })
+    sport_info = _JACK07_SPORTS[sport]
     return {
+        "sport": sport_info["label"],
+        "sport_slug": sport_info["slug"],
+        "sport_type": sport,
         "matches": matches,
         "total": len(matches),
         "live_count": len(live),
@@ -2223,86 +2242,83 @@ async def jack07_matches_list(sport: int = 1, language: int = 6):
 
 
 @api_router.get("/jack07/detail/{match_id}")
-async def jack07_match_detail(match_id: str, request: Request):
+async def jack07_match_detail(match_id: str, request: Request, sport: int = 1):
     """Match detail with stream sources and the iframable site URL."""
-    detail = await _jack07_detail(match_id)
+    detail = await _jack07_detail(match_id, sport_type=sport)
     if not detail:
         raise HTTPException(status_code=404, detail="Match introuvable")
-    # Build a proxied embed URL that points to the jack07 site page.
-    # We expose the raw site_url because the site does not enforce CSP
-    # frame-ancestors — but the public route below masks it via a token.
     return detail
 
 
 @api_router.get("/jack07/events/{match_id}")
-async def jack07_match_events(match_id: str):
+async def jack07_match_events(match_id: str, sport: int = 1):
     """Live match events (goals, cards, substitutions, fouls)."""
-    return {"events": await _jack07_events(match_id)}
+    return {"events": await _jack07_events(match_id, sport_type=sport)}
 
 
 @api_router.get("/jack07/stats/{match_id}")
-async def jack07_match_stats(match_id: str):
+async def jack07_match_stats(match_id: str, sport: int = 1):
     """Match statistics (possession, shots, attacks, etc.)."""
-    return {"stats": await _jack07_stats(match_id)}
+    return {"stats": await _jack07_stats(match_id, sport_type=sport)}
 
 
 @api_router.get("/jack07/streams/{match_id}")
-async def jack07_match_streams(match_id: str, request: Request):
-    """Stream sources for a match. Returns the raw {streamId, name, siteType,
-    api_url} per source so the BROWSER can resolve each one itself — this is
-    required because the upstream CDN binds segment authentication to the IP
-    that called /api/stream/detail. If the backend resolves, segments fail
-    with HTTP 487 'Not Acceptable' on the browser side.
-
-    The browser then calls api_url directly (CORS `*`), reads the rb-session
-    response header, decodes the ROT47-protected URL, encrypts the session
-    with AES-CBC and prefixes the path with /token-…/ — see Jack07Player.jsx.
+async def jack07_match_streams(match_id: str, request: Request, sport: int = 1):
+    """Stream sources for a match. Resolves each source server-side and
+    returns a **signed `proxy_url`** that funnels playback through our
+    `/api/hls` proxy (with the `nodw` flag so Deltawatch is bypassed for
+    Jack07 hosts). The browser never sees the upstream URL and segments
+    don't need any client-side AES dance — the proxy fetches from our
+    backend IP which matches the rb-session binding.
     """
-    detail = await _jack07_detail(match_id)
+    detail = await _jack07_detail(match_id, sport_type=sport)
     if not detail:
         raise HTTPException(status_code=404, detail="Match introuvable")
     raw_streams = detail.get("streams") or []
-    # Pick the first responsive API host (mirror of JACK07_API_HOSTS).
-    api_base = "https://apis-data10.tcore131ybdf.ru"
-    pub = []
-    for s in raw_streams:
+    pub: List[Dict[str, Any]] = []
+    # Resolve all sources in parallel to keep response time low.
+    async def _resolve_one(s: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         sid = s.get("id")
         site_type = int(s.get("type") or 2001)
         if not sid:
-            continue
-        # The client will call this with credentials omitted (CORS `*`).
-        from urllib.parse import urlencode as _qs
-        params = {
-            "streamId": str(sid),
-            "siteType": str(site_type),
-            "continent": "NA",
-            "country": "US",
-            "digit": "seth",
-            "matchId": str(match_id),
-            "sportType": "1",
-        }
-        pub.append({
+            return None
+        url = await _jack07_resolve_stream(
+            match_id=match_id, stream_id=str(sid),
+            site_type=site_type, sport_type=sport,
+        )
+        if not url:
+            return None
+        token = _sign_stream_url(url, no_deltawatch=True)
+        return {
             "id": sid,
             "name": s.get("name"),
             "quality": s.get("quality"),
-            "api_url": f"{api_base}/api/stream/detail?{_qs(params)}",
-        })
+            "proxy_url": f"/api/hls?t={token}",
+        }
+
+    resolved = await asyncio.gather(
+        *[_resolve_one(s) for s in raw_streams],
+        return_exceptions=True,
+    )
+    for item in resolved:
+        if isinstance(item, dict) and item.get("proxy_url"):
+            pub.append(item)
     return {
         "match_id": match_id,
         "title": detail.get("title"),
-        "site_url": detail.get("site_url"),  # for iframe fallback
+        "site_url": detail.get("site_url"),  # for iframe fallback only
         "streams": pub,
     }
 
 
 @api_router.get("/jack07/stream/{match_id}/{stream_id}")
-async def jack07_stream_resolve(match_id: str, stream_id: str, site_type: int = 2001):
-    """Server-side resolve (legacy / for non-browser callers). Returns the
-    raw m3u8 URL but segments may not play from a browser due to the IP
-    binding described above. Prefer /api/jack07/streams/{mid} for the SPA.
+async def jack07_stream_resolve(match_id: str, stream_id: str, site_type: int = 2001, sport: int = 1):
+    """Server-side resolve (legacy). Returns the raw m3u8 URL. Prefer
+    /api/jack07/streams/{mid} which returns a proxied/signed URL.
     """
     url = await _jack07_resolve_stream(
-        match_id=match_id, stream_id=stream_id, site_type=site_type,
+        match_id=match_id, stream_id=stream_id,
+        site_type=site_type, sport_type=sport,
     )
     if not url:
         raise HTTPException(status_code=404, detail="Source indisponible")
@@ -2322,12 +2338,15 @@ def _jack07_public_match(m: Dict[str, Any], base: str) -> Dict[str, Any]:
 
 
 @api_router.get("/v1/public/jack07/matches")
-async def public_jack07_matches(request: Request):
+async def public_jack07_matches(request: Request, sport: int = 1):
     """Public listing — no upstream URLs exposed, only opaque embed tokens."""
     base = _jack07_public_base(request)
-    data = await jack07_matches_list()
+    data = await jack07_matches_list(sport=sport)
     matches_pub = [_jack07_public_match(m, base) for m in (data.get("matches") or [])]
     return {
+        "sport": data.get("sport"),
+        "sport_slug": data.get("sport_slug"),
+        "sport_type": data.get("sport_type"),
         "total": data.get("total", 0),
         "live_count": data.get("live_count", 0),
         "upcoming_count": data.get("upcoming_count", 0),
@@ -2338,14 +2357,14 @@ async def public_jack07_matches(request: Request):
 
 
 @api_router.get("/v1/public/jack07/detail/{match_id}")
-async def public_jack07_detail(match_id: str, request: Request):
-    detail = await _jack07_detail(match_id)
+async def public_jack07_detail(match_id: str, request: Request, sport: int = 1):
+    detail = await _jack07_detail(match_id, sport_type=sport)
     if not detail:
         raise HTTPException(status_code=404, detail="Match introuvable")
     base = _jack07_public_base(request)
     pub = _jack07_public_match(detail, base)
-    pub["events"] = await _jack07_events(match_id)
-    pub["stats"] = await _jack07_stats(match_id)
+    pub["events"] = await _jack07_events(match_id, sport_type=sport)
+    pub["stats"] = await _jack07_stats(match_id, sport_type=sport)
     return pub
 
 

@@ -241,7 +241,9 @@ export default function NovaStream() {
     // Prefetch detail so the overlay opens with site_url ready right after the ad.
     setPending({ kind: "jack07", payload: { match, loading: true } });
     try {
-      const r = await axios.get(`${API}/jack07/detail/${match.id}`);
+      const r = await axios.get(`${API}/jack07/detail/${match.id}`, {
+        params: { sport: match.sport_type || 1 },
+      });
       setPending({ kind: "jack07", payload: { match, detail: r.data, loading: false } });
     } catch (e) {
       console.error(e);

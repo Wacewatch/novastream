@@ -1,0 +1,44 @@
+{
+  "summary": "Iteration 8 validates the Jack07 multi-sport refactor (logo-host rewrite, sport_type metadata, /api/jack07/sports, signed /api/hls proxy_url, frontend sport tabs + sport badge + native HLS player). 9/9 backend pytest cases pass; Playwright confirms the Sports → Jack07 TV journey end-to-end: 7 sport tabs render with the right data-testids, switching to Basketball reloads 174 matches each tagged 'Basketball' badge (Football showed 368 cards with 'Football' badge), AdUnlockModal step1+step2 lead into Jack07Overlay with sport-badge='Football', title='Mighty Avengers vs Portsmouth Bombers', jack07-video + jack07-toggle-mode rendered, no 'Flux indisponible' error. Direct curl of one live match's proxy_url returns HTTP 200 application/vnd.apple.mpegurl with #EXTM3U body and segment URLs rewritten through /api/hls?t= (no raw upstream host leak).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/jack07/matches?sport=3", "issue": "Tennis matches return home=null & away=null (only title carries player matchup). Frontend Jack07Card may show empty team blocks for tennis — consider parsing title 'A vs B' as fallback for individual sports."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_jack07_multisport.py",
+    "/app/test_reports/pytest/iter8_jack07_results.xml"
+  ],
+  "action_items": [
+    "OPTIONAL: For Tennis (sport=3) the upstream protobuf does not populate home/away — the title 'Player A vs Player B' should be split client-side (or in jack07._project_match) so Jack07Card / Jack07Overlay still show two competitor names. Not blocking — sport badge and league name are visible.",
+    "CARRY-FORWARD from iter 7: DaddyCard nested <button data-testid='fav-btn-…'> inside outer <button data-testid='daddy-card-…'> still triggers React hydration warning. Not retested this iteration."
+  ],
+  "critical_code_review_comments": [
+    "GOOD: jack07.py _LOGO_HOST_REWRITES (line 67) correctly maps logos1/2/3.tcrbg61levl.cfd → logos1.tcore131ybdf.ru and _fix_logo is applied to home/away/league/country logos in _project_match. Curl scan of /api/jack07/matches?sport=1 confirms zero occurrences of the dead host, and a live logo URL on the new host returned HTTP 200 + image/*. Verified by the test_logos_not_on_dead_host_and_reachable pytest case.",
+    "GOOD: SPORTS dict at jack07.py:53 is the single source of truth; server.py /api/jack07/sports iterates it, /api/jack07/matches validates against it and returns 400 'Sport non supporté' for unknown ids (e.g. 99). sport/sport_slug/sport_type are stamped on every projected match and bubble up through detail/streams/events/stats endpoints.",
+    "GOOD: /api/jack07/streams now returns proxy_url = '/api/hls?t={signed_token}' with no_deltawatch=True flag. Curl on a live match's proxy_url returns application/vnd.apple.mpegurl with body starting #EXTM3U and ALL #EXTINF segment URIs rewritten to /api/hls?t=… — no raw upstream host (fhlsport723.tm3ubp4r5mk1strange.ru) leaks into the manifest body the browser receives.",
+    "GOOD: Frontend Jack07TvTab fetches /api/jack07/sports first, renders [data-testid=jack07-sport-{slug}] tabs in the right order. Clicking Basketball/Tennis reissues /api/jack07/matches?sport=N and the badge per card (jack07-card-sport-{id}) shows the matching label.",
+    "GOOD: Jack07Overlay carries data-testid='jack07-sport-badge' that displays the sport label inside the overlay, alongside league name (sub-header). Native player wraps jack07-video; iframe fallback is exposed via jack07-toggle-mode.",
+    "MINOR: For matches without resolvable streams the player shows 'Aucune source disponible pour ce match' — copy is correct French but consider auto-flipping to the iframe lecteur after a 3s no-source timeout for better UX (currently user has to click 'Basculer sur le lecteur Jack07 (iframe)').",
+    "MINOR: Tennis projection — _project_match should detect sport_type==3 and synthesise home/away from the title when the protobuf leaves them null, otherwise the SPA shows an empty competitor area for tennis cards."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_jack07_multisport.py (NEW — 9 pytest cases: sports list, per-sport matches with sport/sport_slug/sport_type, invalid sport→400, dead-host scrub + logo image fetch, signed proxy_url contract, manifest fetch via /api/hls with segment rewrites)"
+  ],
+  "success_rate": {
+    "backend": "100% (9/9 jack07 multi-sport tests pass)",
+    "frontend": "100% on critical journey (sports card → Jack07 sub-tab → 7 sport tabs visible → 368 football cards with sport badge → switch to Basketball reloads 174 cards with Basketball badge → first card click → AdUnlockModal step1+2 → Jack07Overlay with sport-badge='Football', title, native video element + toggle-mode → no Flux indisponible error)"
+  },
+  "test_credentials": "Not required.",
+  "seed_data_creation": "None.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Jack07 multi-sport stack is healthy. Pytest suite at /app/backend/tests/test_jack07_multisport.py — re-run with REACT_APP_BACKEND_URL exported as the public preview URL. The Tennis home/away null is upstream-protobuf shape (sport_type=3 uses a different schema); document or wire title-split fallback in jack07._project_match before exposing Tennis to end users without caveat. Stream resolution is best validated against a live football match that actually has resolvable sources — match 4330229 worked, match 4409841 had 0 streams at test time (this is expected: only some live matches have a server registered). The frontend AdUnlockModal needs two real-button clicks (data-testid='ad-btn-1' then 'ad-btn-2') with window.open patched out in tests to avoid new-tab interruption.",
+  "rca of the issue": "Original bugs and the verified fixes: (a) Broken logos — caused by upstream protobuf embedding a stale CDN host 'logos1.tcrbg61levl.cfd' that no longer resolves; fixed by _LOGO_HOST_REWRITES table rewriting to the active host logos1.tcore131ybdf.ru, applied centrally in _fix_logo. (b) Sport info missing — the original code hardcoded SPORT_FOOTBALL=1 in fetch_matches/projection so every match said 'football'; fixed by adding the SPORTS dict, threading sport_type through fetch_matches/fetch_detail/_project_match, and stamping sport/sport_slug/sport_type onto each match dict, plus a /api/jack07/sports endpoint. (c) Direct playback failed — the buggy client-side AES + ROT47 URL extractor appended a stray 'W' char to the upstream m3u8 URL; replaced with a server-signed /api/hls?t={token} proxy with no_deltawatch flag so the browser only receives sanitised manifest + segment URLs that all route back through /api/hls."
+}
