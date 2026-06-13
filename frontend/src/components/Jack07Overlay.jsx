@@ -277,20 +277,9 @@ export default function Jack07Overlay({ match, detail: initialDetail, onClose })
               <Jack07Iframe siteUrl={siteUrl} onBackToNative={() => setMode("native")} />
             )}
 
-            {siteUrl && (
-              <div className="flex justify-center">
-                <button
-                  onClick={() => setMode((m) => (m === "native" ? "iframe" : "native"))}
-                  className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white/5 border border-white/15 text-white/65 text-[11px] font-semibold hover:bg-white/10 transition"
-                  title="Le lecteur natif est bloqué par le CDN de Jack07 depuis les IPs datacenter — l'iframe est la méthode fiable."
-                  data-testid="jack07-toggle-mode"
-                >
-                  {mode === "iframe"
-                    ? "Mode développeur : essayer le lecteur natif (échoue presque toujours)"
-                    : "Revenir au lecteur Jack07 (recommandé)"}
-                </button>
-              </div>
-            )}
+            {/* Native player retiré — le CDN segment Jack07 bloque toutes
+                les IPs datacenter, aucun proxy ne fonctionne. L'iframe est
+                la seule méthode fiable. */}
 
             {mode === "native" && streams && streams.length > 0 && (
               <div className="glass rounded-2xl p-3" data-testid="jack07-servers">
