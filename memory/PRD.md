@@ -21,6 +21,11 @@ French live-TV streaming app (Vavoo-backed). User reported flaky UX (no loader, 
 - `/app/frontend/src/components/{ChannelCard, VideoPlayer, AdUnlockModal}.jsx`
 
 ## What's Been Implemented (latest first)
+### 2026-02-13 (iter 11 — iframe crop précis + clarification natif)
+- **Iframe responsive avec crop pixel-précis** : `clip-path: inset(355px 283px 50px 282px)` isole UNIQUEMENT le rectangle joueur (≈ 282,355 → 997,750) sur la page Jack07 rendue à 1280-px, puis `translate(-282px,-355px) scale(W/715)` positionne et redimensionne pour remplir le wrapper 16:9. Plus de bandeau header / boutons APK-TV-TG / sélecteur de serveurs / charts visibles.
+- **Autoplay activé** : `allow="autoplay; encrypted-media; fullscreen; …"` + `?autoplay=1&muted=1` injectés sur le src de l'iframe.
+- **Native player désactivé par défaut** : le CDN segment Jack07 (`streamas16.pha5102cdga.xyz`) bloque toutes les IPs datacenter (vérifié : GCP, Deltawatch — toutes 403). Aucune solution proxy/worker/spoof-Referer ne fonctionne car le bloc est IP-réseau. Le bouton toggle est conservé en libellé "Mode développeur — échoue presque toujours" pour transparence.
+
 ### 2026-02-13 (iter 10 — Jack07 iframe-by-default + correct sport mapping)
 - **Sport mapping rectifié** : empirique re-vérification du mapping `sportType` → labels d'après les ligues réelles renvoyées par l'API upstream. Sport 14 = "Combat (MMA / Boxe)" (regroupe MMA, UFC, Muay Thai, Kickboxing, Boxing — ce que voit l'utilisateur sur `/fr/fighting.html`). 10 = Aussie Rules (AFL/VFL). 11 = Hockey. 12 = Badminton. 13 = Volleyball. 15 = Cyclisme. 16 = Handball.
 - **Lecture Jack07 — iframe par défaut** : l'edge CDN segment renforce une règle Referer (`deny by referer access rule` même avec User's IP). Aucun script JS ne peut forger un `Referer` (header bloqué par les navigateurs), et notre backend ne peut pas non plus (IP geo-bloquée). Solution : afficher par défaut l'iframe Jack07 (origin `jack07eo.*` → bon referer → segments authentifiés). Le lecteur natif reste accessible manuellement via le bouton `jack07-toggle-mode` pour les utilisateurs déterminés.

@@ -281,11 +281,12 @@ export default function Jack07Overlay({ match, detail: initialDetail, onClose })
               <div className="flex justify-center">
                 <button
                   onClick={() => setMode((m) => (m === "native" ? "iframe" : "native"))}
-                  className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white/5 border border-white/15 text-white/85 text-xs font-semibold hover:bg-white/10 transition"
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white/5 border border-white/15 text-white/65 text-[11px] font-semibold hover:bg-white/10 transition"
+                  title="Le lecteur natif est bloqué par le CDN de Jack07 depuis les IPs datacenter — l'iframe est la méthode fiable."
                   data-testid="jack07-toggle-mode"
                 >
                   {mode === "iframe"
-                    ? "Essayer le lecteur natif (peut ne pas fonctionner)"
+                    ? "Mode développeur : essayer le lecteur natif (échoue presque toujours)"
                     : "Revenir au lecteur Jack07 (recommandé)"}
                 </button>
               </div>
@@ -585,15 +586,16 @@ function Jack07Iframe({ siteUrl, onBackToNative }) {
     return () => document.removeEventListener("fullscreenchange", onFs);
   }, []);
 
-  // Responsive: rescale the 1280-px-wide iframe to match wrapper width.
-  // Lives in an effect so we don't violate react-hooks/refs purity.
+  // Responsive: scale the 1280-px-wide iframe so the player rectangle
+  // (715 CSS-px wide on Jack07's layout) fills the wrapper width. Lives in
+  // an effect to respect react-hooks/refs purity.
   useEffect(() => {
     const wrap = wrapRef.current;
     const ifr = iframeRef.current;
     if (!wrap || !ifr) return;
     const apply = () => {
-      const w = wrap.clientWidth || 1280;
-      ifr.style.setProperty("--ifrScale", String(w / 1280));
+      const w = wrap.clientWidth || 715;
+      ifr.style.setProperty("--ifrScale", String(w / 715));
     };
     apply();
     if (typeof ResizeObserver === "undefined") return;
@@ -653,14 +655,17 @@ function Jack07Iframe({ siteUrl, onBackToNative }) {
         className="absolute left-0 top-0"
         style={{
           width: "1280px",
-          height: "1320px",
-          // Force a desktop render at exactly 1280 CSS-px wide, then scale
-          // the whole iframe down to the wrapper width — guarantees identical
-          // layout on every screen. translateY(-160px) skips the page header
-          // + match-info block so the player ends up at the wrapper's top.
-          // Visible vertical band = 720 CSS-px = 1280 × 9/16, matching our
-          // 16:9 wrapper exactly.
-          transform: "translateY(-160px) scale(var(--ifrScale, 1))",
+          height: "800px",
+          // Player rectangle on Jack07's SPA at 1280-px viewport ≈
+          //   (282, 355)–(997, 750)  i.e. 715 × 395 (16:9).
+          // 1. clip-path crops the iframe surface to *only* that rectangle.
+          // 2. translate brings the rectangle's top-left to the wrapper's (0,0).
+          // 3. scale (driven by ResizeObserver) makes the 715-px-wide rect
+          //    exactly fill the wrapper's width.
+          clipPath:
+            "inset(355px 283px 50px 282px)",
+          transform:
+            "translate(-282px, -355px) scale(var(--ifrScale, 1))",
           transformOrigin: "top left",
           border: "none",
           background: "#000",
