@@ -2438,60 +2438,58 @@ async def jack07_clean_embed(match_id: str, sport: int = 1, slug: Optional[str] 
     p = _urlparse(site_url)
     base_href = f"{p.scheme}://{p.netloc}/"
 
-    # Build the surgical CSS overlay.
-    #   1. Hide every direct child of #__layout EXCEPT the one that contains
-    #      the player (Jack07's player lives inside a `.video-detail-page`
-    #      or `.livestream-page` container — both seen in the SPA).
-    #   2. Inside the player container, hide:
-    #      - the URL-copier bar (`.copy-link`)
-    #      - the APK/TV/TG chiclets (`.app-list`, `.btn-row`)
-    #      - the channel/server picker (`.live-source-list`, `.other-source`)
-    #      - the tabs (Aperçu/Alignements/H2H — `.tab-list`)
-    #      - the score panel and team info (`.team-info`, `.score-panel`)
-    #      - any ads (`[class*="ad-"]`, `iframe[src*="ads"]`)
-    #   3. Tight padding/margins so the surviving player fills the viewport.
+    # CSS overlay surgically targeted with the REAL Jack07 class names
+    # observed via DevTools on jack07eo.mpstickv5m73jgravity.my :
+    #   .livestream-page
+    #     .nav-header-wrap          (already display:none upstream)
+    #     .pstics > .van-sticky > .iframe-wropper   ← THE PLAYER, keep
+    #     .middle-wrapper           ← Rexona/sponsor banner
+    #     .detail-tabs-place        ← Aperçu/Alignements/H2H tabs
+    #     .pstics                   ← stats panels (2nd .pstics, lower)
+    #     .data-wrapper             ← team stats wrapper
+    #     .KEjcHh                   ← misc Jack07 chunks (×3)
+    #     .C9WQdz, ._78AmlI         ← misc chrome
+    #   Above the iframe-wropper there's also a "Copier URL" bar inside
+    #   .van-sticky (sibling of .iframe-wropper).
     overlay_css = """
     <style id="livewatch-clean">
-      html, body, #__layout, #__nuxt { background:#000 !important; margin:0 !important; padding:0 !important; overflow:hidden !important; height:100% !important; }
-      /* Hide every section except the player area */
-      header, footer, nav, aside,
-      .head-nav, .header-wrap, .top-bar, .topbar, .header,
-      .copy-link, .copy-url, .url-copier, .copy-wrap,
-      .app-list, .btn-row, .download-btn-list, .btn-app, .app-btn,
-      .live-source-list, .other-source, .source-list, .stream-source,
-      .tab-list, .tab-nav, .tab-bar, .match-tab,
-      .team-info, .score-panel, .team-vs, .vs-block, .score-block,
-      .stats-chart, .stats-wrap, .stats-block, .chart-block,
-      .matchInfo, .match-info, .match-header,
-      .footer, .copyright, .links-list,
-      [class*="ad-banner"], [class*="ads-"], [id*="banner"],
-      iframe[src*="ads"], iframe[src*="ad."],
-      .gtag, .gtm, script {
-        display: none !important;
-        visibility: hidden !important;
-        height: 0 !important;
+      html, body, #__main, #_main, #__layout, #_layout,
+      .__layout--inside, .__layout-page, .livestream-page {
+        background: #000 !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        overflow: hidden !important;
       }
-      /* The remaining player container fills the viewport */
-      .video-detail-page, .livestream-page, .video-wrap, .player-wrap,
-      .player-box, .video-box, .player-container, [class*="player-frame"] {
+      /* Hide every block below / around the player */
+      .nav-header-wrap, .middle-wrapper, .detail-tabs-place,
+      .data-wrapper, .KEjcHh, .C9WQdz, ._78AmlI,
+      .livestream-page > .pstics:nth-of-type(2),
+      .livestream-page > .pstics:nth-of-type(3),
+      header, footer, nav {
+        display: none !important;
+      }
+      /* The "Copier URL" bar sits inside .van-sticky next to .iframe-wropper.
+         Hide siblings of the player. */
+      .van-sticky > *:not(.iframe-wropper) {
+        display: none !important;
+      }
+      /* Let the player fill the iframe viewport fully */
+      .van-sticky, .iframe-wropper {
         position: fixed !important;
         inset: 0 !important;
         width: 100vw !important;
         height: 100vh !important;
         margin: 0 !important;
         padding: 0 !important;
+        max-width: none !important;
+        max-height: none !important;
         background: #000 !important;
       }
-      .video-detail-page > *, .livestream-page > * { display: none !important; }
-      .video-detail-page .video-wrap, .video-detail-page .player-wrap,
-      .livestream-page  .video-wrap, .livestream-page  .player-wrap,
-      .video-detail-page video, .livestream-page video,
-      .video-detail-page iframe, .livestream-page iframe {
-        display: block !important;
-        position: absolute !important;
-        inset: 0 !important;
+      .iframe-wropper > iframe,
+      .iframe-wropper > video {
         width: 100% !important;
         height: 100% !important;
+        border: 0 !important;
       }
     </style>
     """.strip()
