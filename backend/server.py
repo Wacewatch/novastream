@@ -2716,6 +2716,12 @@ async def startup_warmup():
             await _refresh_logo_index()
             await _ensure_views_index()
             await _ensure_referrers_index()
+            # Push saved JackTV site_url into the jack07 module before first calls
+            try:
+                from extensions import _init_jacktv_runtime  # noqa: WPS433
+                await _init_jacktv_runtime()
+            except Exception as e:
+                logger.warning(f"jacktv runtime init failed: {e}")
             await get_signature()
             channels = await get_channels()
             logger.info(f"warmup done: {len(channels)} channels cached")

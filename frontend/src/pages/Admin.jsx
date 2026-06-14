@@ -89,6 +89,12 @@ export default function Admin() {
   const [daddyTestResult, setDaddyTestResult] = useState(null);
   const [daddySaving, setDaddySaving] = useState(false);
 
+  // JackTV config module
+  const [jackCfg, setJackCfg] = useState(null);
+  const [jackCfgLoading, setJackCfgLoading] = useState(true);
+  const [jackForm, setJackForm] = useState(null);
+  const [jackSaving, setJackSaving] = useState(false);
+
   const reloadUsers = useCallback(async () => {
     setUsersLoading(true);
     try {
@@ -310,6 +316,51 @@ export default function Admin() {
     toast.message("Valeurs par défaut restaurées (non encore sauvegardées)");
   };
 
+  // ========== JackTV config ==========
+  const reloadJackCfg = useCallback(async () => {
+    setJackCfgLoading(true);
+    try {
+      const headers = await authHeader();
+      const r = await axios.get(`${API}/admin/jacktv/config`, { headers });
+      setJackCfg(r.data);
+      // Strip "defaults" from form
+      const { defaults, ...formFields } = r.data || {};
+      setJackForm(formFields);
+    } catch (e) {
+      toast.error(`JackTV config: ${e.response?.data?.detail || e.message}`);
+    } finally {
+      setJackCfgLoading(false);
+    }
+  }, []);
+
+  const saveJackCfg = async () => {
+    if (!jackForm) return;
+    setJackSaving(true);
+    try {
+      const headers = await authHeader();
+      const r = await axios.patch(`${API}/admin/jacktv/config`, jackForm, { headers });
+      toast.success("Configuration JackTV enregistrée");
+      const { defaults, ...formFields } = { defaults: jackCfg?.defaults, ...r.data };
+      setJackCfg({ ...formFields, defaults: jackCfg?.defaults });
+      setJackForm(formFields);
+    } catch (e) {
+      toast.error(`Échec: ${e.response?.data?.detail || e.message}`);
+    } finally {
+      setJackSaving(false);
+    }
+  };
+
+  const resetJackDefaults = () => {
+    const def = jackCfg?.defaults;
+    if (!def) return;
+    setJackForm({ ...def });
+    toast.message("Valeurs JackTV par défaut restaurées (non encore sauvegardées)");
+  };
+
+  const updateJackField = (key, value) => {
+    setJackForm((f) => (f ? { ...f, [key]: value } : f));
+  };
+
 
   useEffect(() => {
     if (!isAdmin) return;
@@ -317,6 +368,7 @@ export default function Admin() {
     reloadKeys();
     reloadFbKeys();
     reloadDaddyCfg();
+    reloadJackCfg();
     fetchAdminStats();
     fetchGlobalStats();
     // Real-time (cheap) stats every 5s; heavier counts every 60s.
@@ -326,7 +378,7 @@ export default function Admin() {
       clearInterval(tFast);
       clearInterval(tSlow);
     };
-  }, [isAdmin, reloadUsers, reloadKeys, reloadFbKeys, reloadDaddyCfg, fetchAdminStats, fetchGlobalStats]);
+  }, [isAdmin, reloadUsers, reloadKeys, reloadFbKeys, reloadDaddyCfg, reloadJackCfg, fetchAdminStats, fetchGlobalStats]);
 
   // Referrers: refetch on sort/page change + light 30s auto-refresh.
   useEffect(() => {
@@ -1073,6 +1125,200 @@ export default function Admin() {
                   )}
                 </div>
               )}
+            </div>
+          )}
+        </section>
+
+        {/* JackTV configuration */}
+        <section className="glass-heavy rounded-2xl p-5 border border-white/10" data-testid="admin-jacktv-section">
+          <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
+            <h3 className="text-lg font-bold flex items-center gap-2">
+              <Tv2 size={18} className="text-amber-400" /> Configuration JackTV
+            </h3>
+            {jackForm?.site_url && (
+              <a
+                href={jackForm.site_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-xs text-white/50 hover:text-amber-400 truncate max-w-[280px]"
+                title={jackForm.site_url}
+              >
+                {jackForm.site_url}
+              </a>
+            )}
+          </div>
+
+          {jackCfgLoading || !jackForm ? (
+            <div className="py-8 flex items-center justify-center">
+              <Loader2 className="animate-spin text-amber-400" size={20} />
+            </div>
+          ) : (
+            <div className="space-y-5">
+              {/* Domaine */}
+              <div>
+                <label className="text-xs uppercase tracking-wider text-white/50 mb-1 block">
+                  URL du site JackTV
+                </label>
+                <input
+                  value={jackForm.site_url || ""}
+                  onChange={(e) => updateJackField("site_url", e.target.value)}
+                  placeholder="https://jack09eo.mpstickv5m73jgravity.my"
+                  className="w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-amber-400/40 font-mono"
+                  data-testid="jacktv-site-url"
+                />
+                <div className="text-[11px] text-white/40 mt-1">
+                  À mettre à jour quand le domaine change. Défaut : <code>{jackCfg?.defaults?.site_url}</code>
+                </div>
+              </div>
+
+              {/* Proportions overlay */}
+              <div>
+                <div className="text-xs uppercase tracking-wider text-white/50 mb-2 font-semibold">
+                  Proportions de l'overlay (lecteur iframe)
+                </div>
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                  <div>
+                    <label className="text-[11px] text-white/60 mb-1 block">Largeur max (px)</label>
+                    <input
+                      type="number"
+                      min={320}
+                      max={4096}
+                      value={jackForm.wrapper_max_width}
+                      onChange={(e) => updateJackField("wrapper_max_width", parseInt(e.target.value, 10) || 0)}
+                      className="w-full px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 text-sm text-white focus:outline-none focus:border-amber-400/40"
+                      data-testid="jacktv-wrapper-max-width"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[11px] text-white/60 mb-1 block">Ratio (CSS aspect-ratio)</label>
+                    <input
+                      value={jackForm.wrapper_aspect_ratio || ""}
+                      onChange={(e) => updateJackField("wrapper_aspect_ratio", e.target.value)}
+                      placeholder="16 / 9"
+                      className="w-full px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 text-sm text-white focus:outline-none focus:border-amber-400/40 font-mono"
+                      data-testid="jacktv-aspect-ratio"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[11px] text-white/60 mb-1 block">Hauteur header masquée (px)</label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={2000}
+                      value={jackForm.iframe_header_height}
+                      onChange={(e) => updateJackField("iframe_header_height", parseInt(e.target.value, 10) || 0)}
+                      className="w-full px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 text-sm text-white focus:outline-none focus:border-amber-400/40"
+                      data-testid="jacktv-header-height"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[11px] text-white/60 mb-1 block">Ratio masque bas (0.0 - 2.0)</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min={0}
+                      max={2}
+                      value={jackForm.iframe_bottom_ratio}
+                      onChange={(e) => updateJackField("iframe_bottom_ratio", parseFloat(e.target.value) || 0)}
+                      className="w-full px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 text-sm text-white focus:outline-none focus:border-amber-400/40"
+                      data-testid="jacktv-bottom-ratio"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[11px] text-white/60 mb-1 block">Couleur masque (CSS)</label>
+                    <input
+                      value={jackForm.iframe_mask_color || ""}
+                      onChange={(e) => updateJackField("iframe_mask_color", e.target.value)}
+                      placeholder="#00141E"
+                      className="w-full px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 text-sm text-white focus:outline-none focus:border-amber-400/40 font-mono"
+                      data-testid="jacktv-mask-color"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[11px] text-white/60 mb-1 block">Scale iframe (0.1 - 5.0)</label>
+                    <input
+                      type="number"
+                      step="0.05"
+                      min={0.1}
+                      max={5}
+                      value={jackForm.iframe_scale}
+                      onChange={(e) => updateJackField("iframe_scale", parseFloat(e.target.value) || 1)}
+                      className="w-full px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 text-sm text-white focus:outline-none focus:border-amber-400/40"
+                      data-testid="jacktv-scale"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[11px] text-white/60 mb-1 block">Translate X</label>
+                    <input
+                      value={jackForm.iframe_translate_x || ""}
+                      onChange={(e) => updateJackField("iframe_translate_x", e.target.value)}
+                      placeholder="0%"
+                      className="w-full px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 text-sm text-white focus:outline-none focus:border-amber-400/40 font-mono"
+                      data-testid="jacktv-translate-x"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[11px] text-white/60 mb-1 block">Translate Y</label>
+                    <input
+                      value={jackForm.iframe_translate_y || ""}
+                      onChange={(e) => updateJackField("iframe_translate_y", e.target.value)}
+                      placeholder="0%"
+                      className="w-full px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 text-sm text-white focus:outline-none focus:border-amber-400/40 font-mono"
+                      data-testid="jacktv-translate-y"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Sections visibles */}
+              <div>
+                <div className="text-xs uppercase tracking-wider text-white/50 mb-2 font-semibold">
+                  Sections affichées dans l'overlay
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {[
+                    { k: "show_score_banner", label: "Bandeau score" },
+                    { k: "show_servers", label: "Sources/serveurs" },
+                    { k: "show_events", label: "Événements" },
+                    { k: "show_stats", label: "Statistiques" },
+                    { k: "show_toggle_mode", label: "Bouton bascule lecteur" },
+                  ].map(({ k, label }) => (
+                    <button
+                      key={k}
+                      type="button"
+                      onClick={() => updateJackField(k, !jackForm[k])}
+                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition ${
+                        jackForm[k]
+                          ? "bg-amber-400/15 border-amber-400/40 text-amber-300"
+                          : "bg-white/5 border-white/10 text-white/50 hover:border-white/20"
+                      }`}
+                      data-testid={`jacktv-toggle-${k}`}
+                    >
+                      {jackForm[k] ? <ToggleRight size={14} /> : <ToggleLeft size={14} />}
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 pt-1">
+                <button
+                  onClick={resetJackDefaults}
+                  className="px-3 py-2 rounded-lg bg-white/5 border border-white/10 hover:border-white/20 text-sm flex items-center gap-1.5"
+                  data-testid="jacktv-reset-btn"
+                >
+                  Restaurer défauts
+                </button>
+                <button
+                  onClick={saveJackCfg}
+                  disabled={jackSaving}
+                  className="ml-auto px-3 py-2 rounded-lg bg-amber-400 hover:bg-amber-300 text-black font-semibold flex items-center gap-1.5 text-sm disabled:opacity-60"
+                  data-testid="jacktv-save-btn"
+                >
+                  {jackSaving ? <Loader2 className="animate-spin" size={14} /> : <Check size={14} />}
+                  Enregistrer
+                </button>
+              </div>
             </div>
           )}
         </section>

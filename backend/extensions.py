@@ -899,6 +899,113 @@ async def admin_daddy_test(body: DaddyConfigPatch, authorization: Optional[str] 
 
 
 # =====================================================================
+# JackTV — dynamic admin config (URL du site + paramètres overlay)
+# Stored in Mongo: app_config doc _id="jacktv"
+# =====================================================================
+JACKTV_DEFAULTS: Dict[str, Any] = {
+    "site_url": "https://jack09eo.mpstickv5m73jgravity.my",
+    # Overlay iframe layout
+    "wrapper_max_width": 1152,        # px — max width of player container
+    "wrapper_aspect_ratio": "16 / 9", # CSS aspect-ratio value
+    "iframe_header_height": 71,       # px — bandeau du haut à masquer (header)
+    "iframe_bottom_ratio": 0.21,      # bottom mask = wrapper_width * ratio
+    "iframe_mask_color": "#00141E",   # couleur du masque bas
+    "iframe_translate_x": "0%",       # translate horizontal
+    "iframe_translate_y": "0%",       # translate vertical
+    "iframe_scale": 1.0,              # facteur d'échelle
+    # Section visibility (afficher/masquer les blocs sous le player)
+    "show_servers": True,
+    "show_score_banner": True,
+    "show_events": True,
+    "show_stats": True,
+    "show_toggle_mode": True,
+}
+
+
+async def _get_jacktv_config() -> Dict[str, Any]:
+    if _db is None:
+        return dict(JACKTV_DEFAULTS)
+    doc = await _db.app_config.find_one({"_id": "jacktv"})
+    if not doc:
+        return dict(JACKTV_DEFAULTS)
+    cfg = dict(JACKTV_DEFAULTS)
+    for k in JACKTV_DEFAULTS.keys():
+        if k in doc and doc[k] is not None:
+            cfg[k] = doc[k]
+    return cfg
+
+
+async def _save_jacktv_config(patch: Dict[str, Any]) -> Dict[str, Any]:
+    cfg = await _get_jacktv_config()
+    cfg.update({k: v for k, v in patch.items() if k in JACKTV_DEFAULTS})
+    if _db is not None:
+        await _db.app_config.update_one(
+            {"_id": "jacktv"},
+            {"$set": cfg, "$currentDate": {"updated_at": True}},
+            upsert=True,
+        )
+    # Apply the new site URL to the jack07 module (resets httpx client too)
+    try:
+        import jack07  # noqa: WPS433
+        jack07.set_site_url(cfg.get("site_url") or JACKTV_DEFAULTS["site_url"])
+        await jack07.reset_client()
+    except Exception as e:
+        logger.warning(f"jacktv set_site_url failed: {e}")
+    return cfg
+
+
+async def _init_jacktv_runtime():
+    """Load saved site_url at startup and push it into jack07 module."""
+    try:
+        cfg = await _get_jacktv_config()
+        import jack07  # noqa: WPS433
+        jack07.set_site_url(cfg.get("site_url") or JACKTV_DEFAULTS["site_url"])
+    except Exception as e:
+        logger.warning(f"jacktv init failed: {e}")
+
+
+class JackTvConfigPatch(BaseModel):
+    site_url: Optional[str] = Field(None, max_length=500)
+    wrapper_max_width: Optional[int] = Field(None, ge=320, le=4096)
+    wrapper_aspect_ratio: Optional[str] = Field(None, max_length=32)
+    iframe_header_height: Optional[int] = Field(None, ge=0, le=2000)
+    iframe_bottom_ratio: Optional[float] = Field(None, ge=0.0, le=2.0)
+    iframe_mask_color: Optional[str] = Field(None, max_length=32)
+    iframe_translate_x: Optional[str] = Field(None, max_length=16)
+    iframe_translate_y: Optional[str] = Field(None, max_length=16)
+    iframe_scale: Optional[float] = Field(None, ge=0.1, le=5.0)
+    show_servers: Optional[bool] = None
+    show_score_banner: Optional[bool] = None
+    show_events: Optional[bool] = None
+    show_stats: Optional[bool] = None
+    show_toggle_mode: Optional[bool] = None
+
+
+@ext_router.get("/jacktv/overlay-config")
+async def jacktv_overlay_config_public():
+    """Public read-only overlay config consumed by the frontend overlay."""
+    cfg = await _get_jacktv_config()
+    return cfg
+
+
+@ext_router.get("/admin/jacktv/config")
+async def admin_jacktv_get(authorization: Optional[str] = Header(None)):
+    jwt = _extract_bearer(authorization)
+    await _require_admin(jwt)
+    cfg = await _get_jacktv_config()
+    return {**cfg, "defaults": JACKTV_DEFAULTS}
+
+
+@ext_router.patch("/admin/jacktv/config")
+async def admin_jacktv_patch(body: JackTvConfigPatch, authorization: Optional[str] = Header(None)):
+    jwt = _extract_bearer(authorization)
+    await _require_admin(jwt)
+    patch = {k: v for k, v in body.model_dump(exclude_none=True).items()}
+    cfg = await _save_jacktv_config(patch)
+    return {"success": True, **cfg}
+
+
+# =====================================================================
 # Sports (streamed.pk)
 # =====================================================================
 SPORTS_BASE = "https://streamed.pk/api"

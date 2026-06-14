@@ -35,7 +35,26 @@ logger = logging.getLogger("livewatch.jack07")
 # --------------------------------------------------------------------- #
 # Endpoints (discovered by parsing the SPA JS bundle)
 # --------------------------------------------------------------------- #
-JACK07_SITE = "https://jack09eo.mpstickv5m73jgravity.my"
+JACK07_SITE_DEFAULT = "https://jack09eo.mpstickv5m73jgravity.my"
+# Mutable site URL — overridable at runtime via set_site_url() (admin module).
+JACK07_SITE = JACK07_SITE_DEFAULT
+
+
+def get_site_url() -> str:
+    """Return current Jack07 / JackTV site URL (admin-mutable)."""
+    return JACK07_SITE
+
+
+def set_site_url(url: str) -> str:
+    """Set the runtime Jack07 site URL. Falls back to default on empty."""
+    global JACK07_SITE
+    url = (url or "").strip().rstrip("/")
+    if not url:
+        url = JACK07_SITE_DEFAULT
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    JACK07_SITE = url
+    return JACK07_SITE
 # Upstream API hosts (rotated regularly; the SPA bundle hot-swaps them).
 # Try each in order — the first responsive one wins. defra10 is currently
 # blocked from some clouds, apis-data10 is the public mirror.
@@ -217,6 +236,17 @@ async def _get_client() -> httpx.AsyncClient:
             limits=httpx.Limits(max_keepalive_connections=20, max_connections=50),
         )
     return _client
+
+
+async def reset_client():
+    """Close cached httpx client so the next call rebuilds it with fresh headers (after set_site_url)."""
+    global _client
+    if _client is not None and not _client.is_closed:
+        try:
+            await _client.aclose()
+        except Exception:
+            pass
+    _client = None
 
 
 async def _fetch_pb(path: str, params: Dict[str, Any]) -> Optional[Dict[int, Any]]:
@@ -410,7 +440,7 @@ def _project_match(m: Dict[int, Any], sport_type: int = SPORT_FOOTBALL) -> Optio
     if match_id and league_slug and match_slug:
         sport_slug = (SPORTS.get(sport_type) or {}).get("slug") or "football"
         site_url = (
-            f"{JACK07_SITE}/fr/{sport_slug}/{league_slug}-{match_id}/"
+            f"{get_site_url()}/fr/{sport_slug}/{league_slug}-{match_id}/"
             f"{match_slug}.html"
         )
 

@@ -120,6 +120,23 @@ async function resolveJack07Stream(apiUrl) {
  * above) and feeds the IP-bound m3u8 URL to hls.js. Falls back to the
  * Jack07 iframe player if resolution or playback fails.
  */
+const _DEFAULT_OVERLAY_CFG = {
+  site_url: "https://jack09eo.mpstickv5m73jgravity.my",
+  wrapper_max_width: 1152,
+  wrapper_aspect_ratio: "16 / 9",
+  iframe_header_height: 71,
+  iframe_bottom_ratio: 0.21,
+  iframe_mask_color: "#00141E",
+  iframe_translate_x: "0%",
+  iframe_translate_y: "0%",
+  iframe_scale: 1.0,
+  show_servers: true,
+  show_score_banner: true,
+  show_events: true,
+  show_stats: true,
+  show_toggle_mode: true,
+};
+
 export default function Jack07Overlay({ match, detail: initialDetail, onClose }) {
   const sportType = match?.sport_type || initialDetail?.sport_type || 1;
   const [detail, setDetail] = useState(initialDetail || null);
@@ -129,12 +146,25 @@ export default function Jack07Overlay({ match, detail: initialDetail, onClose })
   const [stats, setStats] = useState([]);
   const [loadingStreams, setLoadingStreams] = useState(true);
   const [streamError, setStreamError] = useState(null);
+  const [overlayCfg, setOverlayCfg] = useState(_DEFAULT_OVERLAY_CFG);
   // Default to iframe — the Jack07 segment CDN enforces a Referer check
   // that's impossible to satisfy from our origin. The iframe loads from
   // jack07eo.* (correct referrer) so segments authenticate properly.
   const [mode, setMode] = useState("iframe");
 
   const matchId = match?.id || detail?.id;
+
+  // Fetch admin overlay config (dynamic proportions + section visibility)
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await axios.get(`${API}/jacktv/overlay-config`);
+        if (!cancelled && r.data) setOverlayCfg({ ..._DEFAULT_OVERLAY_CFG, ...r.data });
+      } catch { /* keep defaults */ }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   // Fetch full detail (kept fresh in case prefetch was stale)
   useEffect(() => {
@@ -263,7 +293,10 @@ export default function Jack07Overlay({ match, detail: initialDetail, onClose })
         </div>
 
         <div className="px-4 pt-4 pb-10">
-          <div className="mx-auto max-w-6xl space-y-4">
+          <div
+            className="mx-auto space-y-4"
+            style={{ maxWidth: `${overlayCfg.wrapper_max_width}px` }}
+          >
             {mode === "native" ? (
               <Jack07Player
                 manifestUrl={activeStream?.manifest_url}
@@ -272,12 +305,17 @@ export default function Jack07Overlay({ match, detail: initialDetail, onClose })
                 error={streamError}
                 channelName={activeStream?.name || ""}
                 onFatalError={handleFatal}
+                aspectRatio={overlayCfg.wrapper_aspect_ratio}
               />
             ) : (
-              <Jack07Iframe siteUrl={siteUrl} onBackToNative={() => setMode("native")} />
+              <Jack07Iframe
+                siteUrl={siteUrl}
+                onBackToNative={() => setMode("native")}
+                cfg={overlayCfg}
+              />
             )}
 
-            {siteUrl && (
+            {siteUrl && overlayCfg.show_toggle_mode && (
               <div className="flex justify-center">
                 <button
                   onClick={() => setMode((m) => (m === "native" ? "iframe" : "native"))}
@@ -289,7 +327,7 @@ export default function Jack07Overlay({ match, detail: initialDetail, onClose })
               </div>
             )}
 
-            {mode === "native" && streams && streams.length > 0 && (
+            {overlayCfg.show_servers && mode === "native" && streams && streams.length > 0 && (
               <div className="glass rounded-2xl p-3" data-testid="jack07-servers">
                 <div className="text-white/60 text-[11px] font-semibold tracking-wide mb-2 px-1">
                   AUTRES SOURCES ({streams.length})
@@ -314,7 +352,7 @@ export default function Jack07Overlay({ match, detail: initialDetail, onClose })
               </div>
             )}
 
-            {(homeName || awayName) && (
+            {overlayCfg.show_score_banner && (homeName || awayName) && (
               <div className="glass rounded-2xl p-4 flex items-center justify-around gap-4">
                 <div className="flex flex-col items-center gap-2 min-w-0 flex-1">
                   {homeLogo ? (
@@ -339,32 +377,38 @@ export default function Jack07Overlay({ match, detail: initialDetail, onClose })
               </div>
             )}
 
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              <section className="glass rounded-2xl p-4" data-testid="jack07-events-panel">
-                <h3 className="text-white font-extrabold mb-3 flex items-center gap-2">
-                  <Activity size={16} className="text-red-400" /> Événements ({events.length})
-                </h3>
-                {events.length === 0 ? (
-                  <div className="text-white/50 text-sm">Aucun événement pour le moment.</div>
-                ) : (
-                  <ul className="space-y-2 max-h-[420px] overflow-y-auto pr-1">
-                    {events.map((ev, i) => <EventRow key={i} ev={ev} />)}
-                  </ul>
+            {(overlayCfg.show_events || overlayCfg.show_stats) && (
+              <div className={`grid grid-cols-1 gap-4 ${overlayCfg.show_events && overlayCfg.show_stats ? "lg:grid-cols-2" : ""}`}>
+                {overlayCfg.show_events && (
+                  <section className="glass rounded-2xl p-4" data-testid="jack07-events-panel">
+                    <h3 className="text-white font-extrabold mb-3 flex items-center gap-2">
+                      <Activity size={16} className="text-red-400" /> Événements ({events.length})
+                    </h3>
+                    {events.length === 0 ? (
+                      <div className="text-white/50 text-sm">Aucun événement pour le moment.</div>
+                    ) : (
+                      <ul className="space-y-2 max-h-[420px] overflow-y-auto pr-1">
+                        {events.map((ev, i) => <EventRow key={i} ev={ev} />)}
+                      </ul>
+                    )}
+                  </section>
                 )}
-              </section>
-              <section className="glass rounded-2xl p-4" data-testid="jack07-stats-panel">
-                <h3 className="text-white font-extrabold mb-3 flex items-center gap-2">
-                  <BarChart3 size={16} className="text-amber-400" /> Statistiques
-                </h3>
-                {stats.length === 0 ? (
-                  <div className="text-white/50 text-sm">Statistiques indisponibles.</div>
-                ) : (
-                  <ul className="space-y-3">
-                    {stats.map((s, i) => <StatRow key={i} s={s} />)}
-                  </ul>
+                {overlayCfg.show_stats && (
+                  <section className="glass rounded-2xl p-4" data-testid="jack07-stats-panel">
+                    <h3 className="text-white font-extrabold mb-3 flex items-center gap-2">
+                      <BarChart3 size={16} className="text-amber-400" /> Statistiques
+                    </h3>
+                    {stats.length === 0 ? (
+                      <div className="text-white/50 text-sm">Statistiques indisponibles.</div>
+                    ) : (
+                      <ul className="space-y-3">
+                        {stats.map((s, i) => <StatRow key={i} s={s} />)}
+                      </ul>
+                    )}
+                  </section>
                 )}
-              </section>
-            </div>
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -379,7 +423,7 @@ export default function Jack07Overlay({ match, detail: initialDetail, onClose })
  * (`apiUrl` → ROT47 + AES). Bubbles up via `onFatalError` on persistent
  * failures so the parent flips to the iframe player.
  */
-function Jack07Player({ manifestUrl, apiUrl, loading, error, channelName, onFatalError }) {
+function Jack07Player({ manifestUrl, apiUrl, loading, error, channelName, onFatalError, aspectRatio = "16 / 9" }) {
   const videoRef = useRef(null);
   const wrapRef = useRef(null);
   const hlsRef = useRef(null);
@@ -512,7 +556,7 @@ function Jack07Player({ manifestUrl, apiUrl, loading, error, channelName, onFata
     <div
       ref={wrapRef}
       className="relative w-full rounded-2xl overflow-hidden bg-black border border-white/10"
-      style={{ aspectRatio: "16 / 9" }}
+      style={{ aspectRatio }}
     >
       <video
         ref={videoRef}
@@ -558,7 +602,7 @@ function Jack07Player({ manifestUrl, apiUrl, loading, error, channelName, onFata
   );
 }
 
-function Jack07Iframe({ siteUrl, onBackToNative }) {
+function Jack07Iframe({ siteUrl, onBackToNative, cfg = _DEFAULT_OVERLAY_CFG }) {
   const iframeRef = useRef(null);
   const wrapRef   = useRef(null);
   const maskRef   = useRef(null);
@@ -577,18 +621,18 @@ function Jack07Iframe({ siteUrl, onBackToNative }) {
     buildSrcRef.current = buildSrc();
   }
 
-  // Même logique que mad.php : header=71px, ratio=0.21
+  // Same logic as mad.php: header=headerH, bottom mask = vw * bottomRatio
   const adjustMask = useCallback(() => {
     const wrap = wrapRef.current;
     const mask = maskRef.current;
     if (!wrap || !mask) return;
     const vw      = wrap.offsetWidth;
     const vh      = wrap.offsetHeight;
-    const headerH = 71;
-    const playerH = Math.round(vw * 0.21);
+    const headerH = Number(cfg.iframe_header_height) || 0;
+    const playerH = Math.round(vw * (Number(cfg.iframe_bottom_ratio) || 0));
     const maskH   = Math.max(0, vh - headerH - playerH);
     mask.style.height = maskH + "px";
-  }, []);
+  }, [cfg.iframe_header_height, cfg.iframe_bottom_ratio]);
 
   useEffect(() => {
     adjustMask();
@@ -606,7 +650,7 @@ function Jack07Iframe({ siteUrl, onBackToNative }) {
     return (
       <div
         className="relative w-full rounded-2xl overflow-hidden bg-black border border-white/10 flex items-center justify-center text-white/60"
-        style={{ aspectRatio: "16 / 9" }}
+        style={{ aspectRatio: cfg.wrapper_aspect_ratio || "16 / 9" }}
       >
         Aucune source disponible.
       </div>
@@ -627,20 +671,27 @@ function Jack07Iframe({ siteUrl, onBackToNative }) {
     else el.requestFullscreen?.();
   };
 
+  const iframeStyle = {
+    border: "none",
+    background: "#000",
+    transform: `translate(${cfg.iframe_translate_x || "0%"}, ${cfg.iframe_translate_y || "0%"}) scale(${Number(cfg.iframe_scale) || 1})`,
+    transformOrigin: "center center",
+  };
+
   return (
     <div
       ref={wrapRef}
       className="relative w-full rounded-2xl overflow-hidden bg-black border border-white/10"
-      style={{ aspectRatio: "16 / 9" }}
+      style={{ aspectRatio: cfg.wrapper_aspect_ratio || "16 / 9" }}
       data-testid="jack07-iframe-wrap"
     >
-      {/* iframe pleine taille, pas de scale */}
+      {/* iframe pleine taille, transform paramétrable */}
       <iframe
         ref={iframeRef}
         src={buildSrcRef.current || siteUrl}
-        title="Jack07 player"
+        title="JackTV player"
         className="absolute inset-0 w-full h-full"
-        style={{ border: "none", background: "#000" }}
+        style={iframeStyle}
         allow="autoplay; encrypted-media; fullscreen; picture-in-picture; clipboard-write; web-share"
         allowFullScreen
         referrerPolicy="no-referrer-when-downgrade"
@@ -653,7 +704,7 @@ function Jack07Iframe({ siteUrl, onBackToNative }) {
       <div
         ref={maskRef}
         className="absolute bottom-0 left-0 right-0 pointer-events-none"
-        style={{ background: "#00141E", zIndex: 10 }}
+        style={{ background: cfg.iframe_mask_color || "#00141E", zIndex: 10 }}
       />
 
       {!loaded && (

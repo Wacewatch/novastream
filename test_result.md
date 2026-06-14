@@ -297,10 +297,66 @@ metadata:
   run_ui: false
 
 test_plan:
-  current_focus: []
+  current_focus:
+    - "JackTV admin module: dynamic site_url + overlay proportions config"
+    - "JackTV overlay reads /api/jacktv/overlay-config and applies values"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
+
+agent_communication:
+    -agent: "main"
+    -message: |
+      Session 2026-02-19 (handoff continuation) — JackTV admin module added.
+
+      ▸ Backend (`/app/backend/extensions.py` + `/app/backend/jack07.py`):
+        • New collection doc: `app_config` `_id="jacktv"`. Defaults:
+          { site_url: "https://jack09eo.mpstickv5m73jgravity.my",
+            wrapper_max_width: 1152, wrapper_aspect_ratio: "16 / 9",
+            iframe_header_height: 71, iframe_bottom_ratio: 0.21,
+            iframe_mask_color: "#00141E",
+            iframe_translate_x: "0%", iframe_translate_y: "0%", iframe_scale: 1.0,
+            show_servers/score_banner/events/stats/toggle_mode: true }
+        • New endpoints:
+          - GET  /api/jacktv/overlay-config   (PUBLIC — read by overlay)
+          - GET  /api/admin/jacktv/config     (admin JWT)
+          - PATCH /api/admin/jacktv/config    (admin JWT)
+        • `jack07.py` no longer hardcodes the site URL: new `get_site_url()`
+          / `set_site_url()` helpers + `reset_client()` to flush the cached
+          httpx client (so Origin/Referer headers update on next call).
+        • Startup hook in server.py warmup loads the saved `site_url` and
+          calls `jack07.set_site_url()` before any matches are fetched.
+
+      ▸ Frontend (`Admin.jsx`, `Jack07Overlay.jsx`):
+        • New "Configuration JackTV" section in /admin: URL input, all
+          overlay proportions (max width, aspect ratio, header height,
+          bottom mask ratio, mask color, scale, translateX, translateY),
+          and 5 toggle pills for section visibility. Save button PATCHes
+          the new endpoint; Restore defaults pulls JACKTV_DEFAULTS.
+        • `Jack07Overlay.jsx` fetches /api/jacktv/overlay-config on mount
+          and applies values dynamically (wrapper max-width, aspect-ratio,
+          mask color, header height, bottom ratio, iframe transform, and
+          conditional rendering of servers / score banner / events / stats
+          / toggle-mode panels).
+
+      Testing scope (backend only — frontend will be validated manually
+      by the user since they want to control the overlay sizing
+      interactively):
+
+      1. GET /api/jacktv/overlay-config (NO auth) → 200 with all
+         JACKTV_DEFAULTS keys present.
+      2. GET /api/admin/jacktv/config without Authorization → 401.
+      3. PATCH /api/admin/jacktv/config without Authorization → 401.
+      4. PATCH with invalid body (e.g. wrapper_max_width=10) → 422.
+      5. /api/jacktv/matches and /api/jacktv/sports still work (no
+         regression on the existing JackTV pipeline now that
+         JACK07_SITE is mutable).
+
+      Do NOT test the admin happy-path (requires a real admin JWT —
+      none seeded). Just verify the 401/422 contract and the public
+      config endpoint.
+      Public preview URL:
+      https://d746d769-c68a-429d-bf08-3331a820487b.preview.emergentagent.com
 
 agent_communication:
     -agent: "main"
