@@ -247,3 +247,18 @@ French live-TV streaming app (Vavoo-backed). User reported flaky UX (no loader, 
 - **P2** Length-difference threshold on InfoTab fuzzy name match to avoid short-prefix collisions (e.g. "tf1" vs "tf1 series films").
 - **P2** LRU cap on `_fb_servers_by_mid` index to bound memory if upstream returns nullish ids.
 - **P2** Surface clearer fallback message in the player when the DaddyTV HLS proxy returns 502 (auto-switch to iframe in-place).
+
+
+## Session 2026-02-19 (part 2) — JackTV admin module + dynamic overlay
+- **Renaming**: every "Jack07 TV" UI label is now "JackTV"; API aliases `/api/jacktv/*` mounted in parallel with the legacy `/api/jack07/*`.
+- **Dynamic site URL**: `backend/jack07.py` no longer hardcodes the upstream. New `get_site_url()` / `set_site_url()` / `reset_client()` helpers; `_project_match` reads the runtime value when building iframe URLs.
+- **New admin module** (`POST /api/admin/jacktv/config`) — stored in Mongo `app_config _id="jacktv"`. Fields the admin can change without redeploy:
+  - `site_url` (e.g. `https://jack09eo.mpstickv5m73jgravity.my`)
+  - `wrapper_max_width` (px), `wrapper_aspect_ratio` (CSS string)
+  - `iframe_header_height` (px), `iframe_bottom_ratio` (0-2), `iframe_mask_color` (CSS)
+  - `iframe_translate_x` / `iframe_translate_y` (CSS lengths), `iframe_scale` (0.1-5)
+  - `show_servers` / `show_score_banner` / `show_events` / `show_stats` / `show_toggle_mode` booleans
+- **Public read endpoint**: `GET /api/jacktv/overlay-config` — consumed by `Jack07Overlay.jsx` on mount so all proportions/visibility settings reactively apply.
+- **Frontend**: new "Configuration JackTV" section in `/admin` with input field for each parameter + 5 toggle pills for sections + Save / Restore-defaults buttons.
+- **Tests**: iter_10 backend testing → 11/11 passed. Public overlay config returns correct defaults, admin endpoints enforce 401, regression on `/api/jacktv/sports`, `/api/jacktv/all-matches` and `/api/v1/public/{daddy,football,sports}` confirmed green.
+
