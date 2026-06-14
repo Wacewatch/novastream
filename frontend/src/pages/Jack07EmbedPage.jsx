@@ -24,7 +24,7 @@ export default function Jack07EmbedPage() {
     let cancelled = false;
     (async () => {
       try {
-        const r = await axios.get(`${API}/jack07/detail/${matchId}`);
+        const r = await axios.get(`${API}/jacktv/detail/${matchId}`);
         if (cancelled) return;
         if (!r.data?.site_url) {
           setError("Match introuvable ou flux indisponible");

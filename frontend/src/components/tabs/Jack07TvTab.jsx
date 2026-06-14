@@ -26,7 +26,7 @@ export default function Jack07TvTab({ onPickMatch }) {
     let cancelled = false;
     (async () => {
       try {
-        const r = await axios.get(`${API}/jack07/sports`);
+        const r = await axios.get(`${API}/jacktv/sports`);
         if (!cancelled) {
           const upstream = r.data?.sports || [];
           setSports([{ id: 0, label: "Tous", slug: "all" }, ...upstream]);
@@ -50,12 +50,12 @@ export default function Jack07TvTab({ onPickMatch }) {
     const load = async () => {
       try {
         const r = sportType === 0
-          ? await axios.get(`${API}/jack07/all-matches`)
-          : await axios.get(`${API}/jack07/matches`, { params: { sport: sportType } });
+          ? await axios.get(`${API}/jacktv/all-matches`)
+          : await axios.get(`${API}/jacktv/matches`, { params: { sport: sportType } });
         if (!cancelled) setData(r.data);
       } catch (e) {
         console.error(e);
-        if (!cancelled) toast.error("Jack07 TV indisponible");
+        if (!cancelled) toast.error("JackTV indisponible");
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -82,7 +82,7 @@ export default function Jack07TvTab({ onPickMatch }) {
         }
         const results = await Promise.all(
           Object.entries(bySport).map(([st, ids]) =>
-            axios.get(`${API}/jack07/stream-counts`, { params: { sport: Number(st), ids: ids.join(",") } })
+            axios.get(`${API}/jacktv/stream-counts`, { params: { sport: Number(st), ids: ids.join(",") } })
           )
         );
         if (cancelled) return;
@@ -135,7 +135,7 @@ export default function Jack07TvTab({ onPickMatch }) {
       {loading ? (
         <div className="flex items-center justify-center py-20" data-testid="jack07-loading">
           <Loader2 className="animate-spin text-amber-400" size={32} />
-          <span className="ml-3 text-white/60">Chargement Jack07 TV…</span>
+          <span className="ml-3 text-white/60">Chargement JackTV…</span>
         </div>
       ) : (
         <>
@@ -288,7 +288,7 @@ function Jack07Card({ m, onClick, faded, sourcesCount }) {
             </span>
           )}
           <span className="league-tag truncate">
-            {m.is_live ? (m.status_label || "LIVE") : m.is_finished ? "FIN" : (m.league?.name || "Jack07")}
+            {m.is_live ? (m.status_label || "LIVE") : m.is_finished ? "FIN" : (m.league?.name || "JackTV")}
           </span>
         </div>
         <span className="text-[11px] text-white/55 whitespace-nowrap">{m.is_live ? (m.status_label || "LIVE") : fmtTime(m.kick_off_iso)}</span>

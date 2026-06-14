@@ -2219,9 +2219,10 @@ def _jack07_public_base(request: Request) -> str:
     return f"{proto}://{host}".rstrip("/")
 
 
-@api_router.get("/jack07/sports")
+@api_router.get("/jacktv/sports")
+@api_router.get("/jack07/sports", include_in_schema=False)
 async def jack07_sports_list():
-    """List the sports the Jack07 SPA currently exposes (verified empirically)."""
+    """List the sports the JackTV SPA currently exposes (verified empirically)."""
     return {
         "sports": [
             {"id": sid, "label": info["label"], "slug": info["slug"]}
@@ -2230,7 +2231,8 @@ async def jack07_sports_list():
     }
 
 
-@api_router.get("/jack07/all-matches")
+@api_router.get("/jacktv/all-matches")
+@api_router.get("/jack07/all-matches", include_in_schema=False)
 async def jack07_all_sports_matches(language: int = 6):
     """Combined view: live + upcoming matches across ALL supported sports.
 
@@ -2271,9 +2273,10 @@ async def jack07_all_sports_matches(language: int = 6):
     }
 
 
-@api_router.get("/jack07/matches")
+@api_router.get("/jacktv/matches")
+@api_router.get("/jack07/matches", include_in_schema=False)
 async def jack07_matches_list(sport: int = 1, language: int = 6):
-    """List Jack07 matches (live + upcoming + finished).
+    """List JackTV matches (live + upcoming + finished).
 
     Query params:
       - sport: sport type (1 = Football, 2 = Basketball, 3 = Tennis,
@@ -2310,7 +2313,8 @@ async def jack07_matches_list(sport: int = 1, language: int = 6):
     }
 
 
-@api_router.get("/jack07/detail/{match_id}")
+@api_router.get("/jacktv/detail/{match_id}")
+@api_router.get("/jack07/detail/{match_id}", include_in_schema=False)
 async def jack07_match_detail(match_id: str, request: Request, sport: int = 1):
     """Match detail with stream sources and the iframable site URL."""
     detail = await _jack07_detail(match_id, sport_type=sport)
@@ -2319,11 +2323,12 @@ async def jack07_match_detail(match_id: str, request: Request, sport: int = 1):
     return detail
 
 
-@api_router.get("/jack07/stream-counts")
+@api_router.get("/jacktv/stream-counts")
+@api_router.get("/jack07/stream-counts", include_in_schema=False)
 async def jack07_stream_counts(ids: str, sport: int = 1):
     """Bulk source-count lookup. `ids` is a CSV of match IDs.
 
-    Used by the Jack07 TV tab to display "X sources" on each LIVE match
+    Used by the JackTV tab to display "X sources" on each LIVE match
     card without leaking upstream URLs. Detail responses are cached 30 s,
     so repeat calls are cheap. Capped at 30 ids per request to bound
     upstream load.
@@ -2341,21 +2346,24 @@ async def jack07_stream_counts(ids: str, sport: int = 1):
     return {"counts": {mid: n for mid, n in results}}
 
 
-@api_router.get("/jack07/events/{match_id}")
+@api_router.get("/jacktv/events/{match_id}")
+@api_router.get("/jack07/events/{match_id}", include_in_schema=False)
 async def jack07_match_events(match_id: str, sport: int = 1):
     """Live match events (goals, cards, substitutions, fouls)."""
     return {"events": await _jack07_events(match_id, sport_type=sport)}
 
 
-@api_router.get("/jack07/stats/{match_id}")
+@api_router.get("/jacktv/stats/{match_id}")
+@api_router.get("/jack07/stats/{match_id}", include_in_schema=False)
 async def jack07_match_stats(match_id: str, sport: int = 1):
     """Match statistics (possession, shots, attacks, etc.)."""
     return {"stats": await _jack07_stats(match_id, sport_type=sport)}
 
 
-@api_router.get("/jack07/manifest/{match_id}/{stream_id}")
+@api_router.get("/jacktv/manifest/{match_id}/{stream_id}")
+@api_router.get("/jack07/manifest/{match_id}/{stream_id}", include_in_schema=False)
 async def jack07_manifest_proxy(match_id: str, stream_id: str, site_type: int = 2001, sport: int = 1):
-    """Server-side resolved Jack07 m3u8 manifest, served from our origin so
+    """Server-side resolved JackTV m3u8 manifest, served from our origin so
     ad-blockers / uBlock / strict CSP don't block the foreign upstream host.
 
     Segments inside the manifest stay as ABSOLUTE upstream URLs — the
@@ -2398,9 +2406,10 @@ async def jack07_manifest_proxy(match_id: str, stream_id: str, site_type: int = 
     )
 
 
-@api_router.get("/jack07/embed/{match_id}")
+@api_router.get("/jacktv/embed/{match_id}")
+@api_router.get("/jack07/embed/{match_id}", include_in_schema=False)
 async def jack07_clean_embed(match_id: str, sport: int = 1, slug: Optional[str] = None):
-    """Serve a *sanitised* copy of the Jack07 match page that hides every
+    """Serve a *sanitised* copy of the JackTV match page that hides every
     DOM element except the player iframe / video. Solves the
     'iframe shows the whole site' problem the user keeps hitting — we
     inject a `<base href>` so relative URLs keep resolving to Jack07's
@@ -2519,7 +2528,8 @@ async def jack07_clean_embed(match_id: str, sport: int = 1, slug: Optional[str] 
     )
 
 
-@api_router.get("/jack07/streams/{match_id}")
+@api_router.get("/jacktv/streams/{match_id}")
+@api_router.get("/jack07/streams/{match_id}", include_in_schema=False)
 async def jack07_match_streams(match_id: str, request: Request, sport: int = 1):
     """Stream sources for a match. Returns multiple playback strategies per
     source so the browser can fall through:
@@ -2564,10 +2574,11 @@ async def jack07_match_streams(match_id: str, request: Request, sport: int = 1):
     }
 
 
-@api_router.get("/jack07/stream/{match_id}/{stream_id}")
+@api_router.get("/jacktv/stream/{match_id}/{stream_id}")
+@api_router.get("/jack07/stream/{match_id}/{stream_id}", include_in_schema=False)
 async def jack07_stream_resolve(match_id: str, stream_id: str, site_type: int = 2001, sport: int = 1):
     """Server-side resolve (legacy). Returns the raw m3u8 URL. Prefer
-    /api/jack07/streams/{mid} which returns a proxied/signed URL.
+    /api/jacktv/streams/{mid} which returns a proxied/signed URL.
     """
     url = await _jack07_resolve_stream(
         match_id=match_id, stream_id=stream_id,
@@ -2585,12 +2596,13 @@ def _jack07_public_match(m: Dict[str, Any], base: str) -> Dict[str, Any]:
     # Single embed per match (the iframed page itself contains the source picker).
     token = _b64url_encode(m["id"])
     out["embeds"] = [
-        {"label": "Lecture", "embed_url": f"{base}/embed/jack07/t/{token}"},
+        {"label": "Lecture", "embed_url": f"{base}/embed/jacktv/t/{token}"},
     ]
     return out
 
 
-@api_router.get("/v1/public/jack07/matches")
+@api_router.get("/v1/public/jacktv/matches")
+@api_router.get("/v1/public/jack07/matches", include_in_schema=False)
 async def public_jack07_matches(request: Request, sport: int = 1):
     """Public listing — no upstream URLs exposed, only opaque embed tokens."""
     base = _jack07_public_base(request)
@@ -2609,7 +2621,8 @@ async def public_jack07_matches(request: Request, sport: int = 1):
     }
 
 
-@api_router.get("/v1/public/jack07/detail/{match_id}")
+@api_router.get("/v1/public/jacktv/detail/{match_id}")
+@api_router.get("/v1/public/jack07/detail/{match_id}", include_in_schema=False)
 async def public_jack07_detail(match_id: str, request: Request, sport: int = 1):
     detail = await _jack07_detail(match_id, sport_type=sport)
     if not detail:
@@ -2621,15 +2634,16 @@ async def public_jack07_detail(match_id: str, request: Request, sport: int = 1):
     return pub
 
 
-@app.get("/embed/jack07/t/{token}")
+@app.get("/embed/jacktv/t/{token}")
+@app.get("/embed/jack07/t/{token}", include_in_schema=False)
 async def jack07_embed_token_redirect(token: str):
-    """Opaque-token embed: decode → 302 to /embed/jack07/{matchId} (SPA route)."""
+    """Opaque-token embed: decode → 302 to /embed/jacktv/{matchId} (SPA route)."""
     from fastapi.responses import RedirectResponse
     try:
         match_id = _b64url_decode(token)
     except Exception:
         raise HTTPException(status_code=400, detail="Token invalide")
-    return RedirectResponse(url=f"/embed/jack07/{match_id}", status_code=302)
+    return RedirectResponse(url=f"/embed/jacktv/{match_id}", status_code=302)
 
 
 # ----------------- Extensions (DaddyTV / Sports / Football / Admin keys) -----------------

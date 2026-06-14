@@ -36,6 +36,7 @@ function App() {
               <Route path="/embed/football/:matchId/:serverIdx?" element={<FootballEmbedPage />} />
               <Route path="/embed/bosstv/t/:token" element={<BossTvTokenRedirect />} />
               <Route path="/embed/bosstv/:matchId/:serverIdx?" element={<BossTvEmbedPage />} />
+              <Route path="/embed/jacktv/:matchId" element={<Jack07EmbedPage />} />
               <Route path="/embed/jack07/:matchId" element={<Jack07EmbedPage />} />
               <Route path="/docs" element={<ApiDocs />} />
               <Route path="/multiview" element={<MultiView />} />

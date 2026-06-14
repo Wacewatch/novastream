@@ -165,10 +165,10 @@ const SECTIONS = [
   {
     key: "jack07",
     accent: "#f59e0b",
-    title: "Jack07 TV",
+    title: "JackTV",
     intro:
-      "Football Jack07 : liste de matchs en direct + à venir + terminés, scores live, événements (buts, cartons, fautes, remplacements) et statistiques (possession, tirs, attaques, etc.). Chaque match propose un embed[] opaque (iframe player + panneau infos en dessous). Endpoints détaillés disponibles pour pollers temps réel : /api/jack07/events/{mid} et /api/jack07/stats/{mid} (rafraîchis ~15 s côté serveur).",
-    url: `${BACKEND_URL}/api/v1/public/jack07/matches`,
+      "Football JackTV : liste de matchs en direct + à venir + terminés, scores live, événements (buts, cartons, fautes, remplacements) et statistiques (possession, tirs, attaques, etc.). Chaque match propose un embed[] opaque (iframe player + panneau infos en dessous). Endpoints détaillés disponibles pour pollers temps réel : /api/jacktv/events/{mid} et /api/jacktv/stats/{mid} (rafraîchis ~15 s côté serveur).",
+    url: `${BACKEND_URL}/api/v1/public/jacktv/matches`,
     sample: `{
   "total":           190,
   "live_count":      7,
@@ -192,7 +192,7 @@ const SECTIONS = [
       "home_score":    4,
       "away_score":    5,
       "embeds": [
-        { "label": "Lecture", "embed_url": "${BACKEND_URL}/embed/jack07/t/…" }
+        { "label": "Lecture", "embed_url": "${BACKEND_URL}/embed/jacktv/t/…" }
       ]
     }
   ]

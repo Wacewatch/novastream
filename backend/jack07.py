@@ -35,7 +35,7 @@ logger = logging.getLogger("livewatch.jack07")
 # --------------------------------------------------------------------- #
 # Endpoints (discovered by parsing the SPA JS bundle)
 # --------------------------------------------------------------------- #
-JACK07_SITE = "https://jack07eo.mpstickv5m73jgravity.my"
+JACK07_SITE = "https://jack09eo.mpstickv5m73jgravity.my"
 # Upstream API hosts (rotated regularly; the SPA bundle hot-swaps them).
 # Try each in order — the first responsive one wins. defra10 is currently
 # blocked from some clouds, apis-data10 is the public mirror.

@@ -142,7 +142,7 @@ export default function Jack07Overlay({ match, detail: initialDetail, onClose })
     let cancelled = false;
     (async () => {
       try {
-        const r = await axios.get(`${API}/jack07/detail/${matchId}`, { params: { sport: sportType } });
+        const r = await axios.get(`${API}/jacktv/detail/${matchId}`, { params: { sport: sportType } });
         if (!cancelled) setDetail(r.data);
       } catch { /* keep prefetch */ }
     })();
@@ -157,7 +157,7 @@ export default function Jack07Overlay({ match, detail: initialDetail, onClose })
       setLoadingStreams(true);
       setStreamError(null);
       try {
-        const r = await axios.get(`${API}/jack07/streams/${matchId}`, { params: { sport: sportType } });
+        const r = await axios.get(`${API}/jacktv/streams/${matchId}`, { params: { sport: sportType } });
         if (cancelled) return;
         const list = (r.data?.streams || []).filter((s) => s.manifest_url || s.api_url);
         if (!list.length) {
@@ -182,8 +182,8 @@ export default function Jack07Overlay({ match, detail: initialDetail, onClose })
     const load = async () => {
       try {
         const [e, s] = await Promise.all([
-          axios.get(`${API}/jack07/events/${matchId}`, { params: { sport: sportType } }),
-          axios.get(`${API}/jack07/stats/${matchId}`, { params: { sport: sportType } }),
+          axios.get(`${API}/jacktv/events/${matchId}`, { params: { sport: sportType } }),
+          axios.get(`${API}/jacktv/stats/${matchId}`, { params: { sport: sportType } }),
         ]);
         if (cancelled) return;
         setEvents(e.data?.events || []);
@@ -284,7 +284,7 @@ export default function Jack07Overlay({ match, detail: initialDetail, onClose })
                   className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white/5 border border-white/15 text-white/75 text-[11px] font-semibold hover:bg-white/10 transition"
                   data-testid="jack07-toggle-mode"
                 >
-                  {mode === "iframe" ? "Essayer la lecture directe" : "Revenir au lecteur Jack07"}
+                  {mode === "iframe" ? "Essayer la lecture directe" : "Revenir au lecteur JackTV"}
                 </button>
               </div>
             )}
@@ -406,7 +406,7 @@ function Jack07Player({ manifestUrl, apiUrl, loading, error, channelName, onFata
     // up to 12 s × retries before fataling.
     const fatalTimer = setTimeout(() => {
       if (cancelled) return;
-      setPlayerErr("Délai dépassé — bascule vers le lecteur Jack07…");
+      setPlayerErr("Délai dépassé — bascule vers le lecteur JackTV…");
       setBuffering(false);
       if (typeof onFatalError === "function") onFatalError();
     }, 8000);
@@ -432,7 +432,7 @@ function Jack07Player({ manifestUrl, apiUrl, loading, error, channelName, onFata
         try {
           m3u8Url = await resolveJack07Stream(apiUrl);
         } catch {
-          fail("Source indisponible — bascule vers le lecteur Jack07…");
+          fail("Source indisponible — bascule vers le lecteur JackTV…");
           return;
         }
       }
@@ -472,7 +472,7 @@ function Jack07Player({ manifestUrl, apiUrl, loading, error, channelName, onFata
         if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
           try { hls.recoverMediaError(); } catch { fail("Erreur média"); }
         } else {
-          fail("Flux indisponible — bascule vers le lecteur Jack07…");
+          fail("Flux indisponible — bascule vers le lecteur JackTV…");
         }
       });
     })();
@@ -531,7 +531,7 @@ function Jack07Player({ manifestUrl, apiUrl, loading, error, channelName, onFata
         <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 p-6 text-center">
           <AlertTriangle className="text-amber-400 mb-2" size={28} />
           <div className="text-white font-semibold text-sm">{error || playerErr}</div>
-          <div className="text-white/50 text-[11px] mt-1">Essayez une autre source ou le lecteur Jack07.</div>
+          <div className="text-white/50 text-[11px] mt-1">Essayez une autre source ou le lecteur JackTV.</div>
         </div>
       )}
       {channelName && !loading && !error && (
