@@ -11,7 +11,7 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 
 # Backend URL from frontend/.env
-BASE_URL = "https://preview-env-40.preview.emergentagent.com"
+BASE_URL = "https://preview-live-26.preview.emergentagent.com"
 
 # Test results
 results = {

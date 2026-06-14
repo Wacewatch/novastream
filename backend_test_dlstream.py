@@ -22,7 +22,7 @@ from urllib.parse import unquote, urlparse, parse_qs
 from typing import Dict, Any
 
 # Backend URL from frontend/.env
-BASE_URL = "https://preview-env-40.preview.emergentagent.com"
+BASE_URL = "https://preview-live-26.preview.emergentagent.com"
 
 class TestResults:
     def __init__(self):
