@@ -94,6 +94,8 @@ export default function Admin() {
   const [jackCfgLoading, setJackCfgLoading] = useState(true);
   const [jackForm, setJackForm] = useState(null);
   const [jackSaving, setJackSaving] = useState(false);
+  const [jackTesting, setJackTesting] = useState(false);
+  const [jackTestResult, setJackTestResult] = useState(null);
 
   const reloadUsers = useCallback(async () => {
     setUsersLoading(true);
@@ -357,8 +359,38 @@ export default function Admin() {
     toast.message("Valeurs JackTV par défaut restaurées (non encore sauvegardées)");
   };
 
+  const testJackUrl = async () => {
+    if (!jackForm) return;
+    setJackTesting(true);
+    setJackTestResult(null);
+    try {
+      const headers = await authHeader();
+      const r = await axios.post(
+        `${API}/admin/jacktv/test`,
+        { site_url: jackForm.site_url },
+        { headers },
+      );
+      setJackTestResult(r.data);
+      if (r.data?.reachable) {
+        toast.success(`URL OK — HTTP ${r.data.http_status} (${r.data.body_len} octets)`);
+      } else {
+        toast.warning(
+          r.data?.error
+            ? `URL injoignable: ${r.data.error}`
+            : `URL injoignable — HTTP ${r.data?.http_status || "?"}`,
+        );
+      }
+    } catch (e) {
+      toast.error(`Test échoué: ${e.response?.data?.detail || e.message}`);
+    } finally {
+      setJackTesting(false);
+    }
+  };
+
   const updateJackField = (key, value) => {
     setJackForm((f) => (f ? { ...f, [key]: value } : f));
+    // Invalidate test result if URL is being edited
+    if (key === "site_url") setJackTestResult(null);
   };
 
 
@@ -1303,6 +1335,15 @@ export default function Admin() {
 
               <div className="flex flex-wrap items-center gap-2 pt-1">
                 <button
+                  onClick={testJackUrl}
+                  disabled={jackTesting}
+                  className="px-3 py-2 rounded-lg bg-white/5 border border-white/10 hover:border-amber-400/40 text-sm flex items-center gap-1.5 disabled:opacity-60"
+                  data-testid="jacktv-test-btn"
+                >
+                  {jackTesting ? <Loader2 className="animate-spin" size={14} /> : <Activity size={14} />}
+                  Tester l'URL
+                </button>
+                <button
                   onClick={resetJackDefaults}
                   className="px-3 py-2 rounded-lg bg-white/5 border border-white/10 hover:border-white/20 text-sm flex items-center gap-1.5"
                   data-testid="jacktv-reset-btn"
@@ -1319,6 +1360,42 @@ export default function Admin() {
                   Enregistrer
                 </button>
               </div>
+
+              {jackTestResult && (
+                <div
+                  className={`mt-3 glass rounded-xl p-3 text-xs space-y-1 border ${
+                    jackTestResult.reachable ? "border-green-400/30" : "border-red-400/30"
+                  }`}
+                  data-testid="jacktv-test-result"
+                >
+                  <div className="flex flex-wrap gap-x-4 gap-y-1">
+                    <span>
+                      Statut :{" "}
+                      {jackTestResult.reachable ? (
+                        <span className="text-green-400 font-semibold">Joignable</span>
+                      ) : (
+                        <span className="text-red-400 font-semibold">Injoignable</span>
+                      )}
+                    </span>
+                    <span>
+                      HTTP :{" "}
+                      <span className="font-semibold">{jackTestResult.http_status || "—"}</span>
+                    </span>
+                    <span>
+                      Octets reçus :{" "}
+                      <span className="font-semibold tabular-nums">
+                        {(jackTestResult.body_len || 0).toLocaleString("fr-FR")}
+                      </span>
+                    </span>
+                  </div>
+                  <div className="text-white/50 truncate">
+                    URL testée : <code>{jackTestResult.site_url}</code>
+                  </div>
+                  {jackTestResult.error && (
+                    <div className="text-red-400/90">Erreur : {jackTestResult.error}</div>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </section>

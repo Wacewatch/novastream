@@ -1005,6 +1005,38 @@ async def admin_jacktv_patch(body: JackTvConfigPatch, authorization: Optional[st
     return {"success": True, **cfg}
 
 
+@ext_router.post("/admin/jacktv/test")
+async def admin_jacktv_test(body: JackTvConfigPatch, authorization: Optional[str] = Header(None)):
+    """Dry-run: try fetching the JackTV site with the proposed URL (HEAD/GET ping)
+    without persisting it. Returns reachable: bool + http_status + sample length.
+    Does NOT touch the live runtime URL.
+    """
+    jwt = _extract_bearer(authorization)
+    await _require_admin(jwt)
+    url = (body.site_url or "").strip().rstrip("/")
+    if not url:
+        cfg = await _get_jacktv_config()
+        url = cfg.get("site_url") or JACKTV_DEFAULTS["site_url"]
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    out: Dict[str, Any] = {"site_url": url, "reachable": False, "http_status": 0, "body_len": 0, "error": None}
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(8.0, connect=4.0), follow_redirects=True) as cx:
+            r = await cx.get(
+                url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+                    "Accept-Language": "fr-FR,fr;q=0.9",
+                },
+            )
+            out["http_status"] = r.status_code
+            out["body_len"] = len(r.content or b"")
+            out["reachable"] = 200 <= r.status_code < 400 and out["body_len"] > 0
+    except Exception as e:
+        out["error"] = str(e)[:200]
+    return out
+
+
 # =====================================================================
 # Sports (streamed.pk)
 # =====================================================================
