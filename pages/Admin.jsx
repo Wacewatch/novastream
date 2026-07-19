@@ -1,0 +1,1534 @@
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Link, Navigate } from "react-router-dom";
+import axios from "axios";
+import {
+  ArrowLeft,
+  Crown,
+  Shield,
+  Users as UsersIcon,
+  KeyRound,
+  Plus,
+  Loader2,
+  Search,
+  Check,
+  Trash2,
+  Copy,
+  CalendarClock,
+  Cpu,
+  MemoryStick,
+  Network,
+  Server,
+  Activity,
+  Globe,
+  Eye,
+  Radio,
+  Tv2,
+  Flame,
+  AlertTriangle,
+  ToggleRight,
+  ToggleLeft,
+  LayoutDashboard,
+  ChevronLeft,
+  ChevronRight,
+  ArrowUp,
+  ArrowDown,
+  Hash,
+  Clock,
+} from "lucide-react";
+import { useAuth } from "@/context/AuthContext";
+import { supabase } from "@/lib/supabase";
+import { toast } from "sonner";
+import StatsTimeseriesPanel from "@/components/admin/StatsTimeseriesPanel";
+import TopBar from "@/components/TopBar";
+
+const BACKEND_URL = (process.env.NEXT_PUBLIC_BACKEND_URL || process.env.REACT_APP_BACKEND_URL || (typeof window !== 'undefined' ? window.location.origin : ''));
+const API = `${BACKEND_URL}/api`;
+const SITE_LOGO = "https://i.imgur.com/V8YmT4z.png";
+
+async function authHeader() {
+  const { data: { session } } = await supabase.auth.getSession();
+  return session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {};
+}
+
+export default function Admin() {
+  const { user, loading, isAdmin } = useAuth();
+  const [users, setUsers] = useState([]);
+  const [usersLoading, setUsersLoading] = useState(true);
+  const [vipKeys, setVipKeys] = useState([]);
+  const [keysLoading, setKeysLoading] = useState(true);
+  const [search, setSearch] = useState("");
+  const [generating, setGenerating] = useState(false);
+  const [genCount, setGenCount] = useState(1);
+
+  // New modules state
+  const [sysStats, setSysStats] = useState(null);
+  const [liveStats, setLiveStats] = useState(null);
+  const [referrers, setReferrers] = useState([]);
+  const [globalStats, setGlobalStats] = useState(null);
+
+  // Referrers pagination / sorting
+  const REF_LIMIT = 20;
+  const [refSort, setRefSort] = useState("count");   // count | last | first
+  const [refOrder, setRefOrder] = useState("desc");  // desc | asc
+  const [refPage, setRefPage] = useState(0);
+  const [refTotal, setRefTotal] = useState(0);
+  const [refLoading, setRefLoading] = useState(false);
+
+  // Football API keys module
+  const [fbKeys, setFbKeys] = useState([]);
+  const [fbKeysLoading, setFbKeysLoading] = useState(true);
+  const [fbNewKey, setFbNewKey] = useState("");
+  const [fbNewLabel, setFbNewLabel] = useState("");
+  const [fbAdding, setFbAdding] = useState(false);
+
+  // DaddyTV config module
+  const [daddyCfg, setDaddyCfg] = useState(null); // { enabled, channels_url, m3u8_url, channel_count, cache_age_sec, defaults }
+  const [daddyCfgLoading, setDaddyCfgLoading] = useState(true);
+  const [daddyForm, setDaddyForm] = useState({ channels_url: "", m3u8_url: "", enabled: true });
+  const [daddyTesting, setDaddyTesting] = useState(false);
+  const [daddyTestResult, setDaddyTestResult] = useState(null);
+  const [daddySaving, setDaddySaving] = useState(false);
+
+  // JackTV config module
+  const [jackCfg, setJackCfg] = useState(null);
+  const [jackCfgLoading, setJackCfgLoading] = useState(true);
+  const [jackForm, setJackForm] = useState(null);
+  const [jackSaving, setJackSaving] = useState(false);
+  const [jackTesting, setJackTesting] = useState(false);
+  const [jackTestResult, setJackTestResult] = useState(null);
+
+  const reloadUsers = useCallback(async () => {
+    setUsersLoading(true);
+    try {
+      // No artificial limit — fetch in chunks of 1000 until exhausted (Supabase max per query = 1000)
+      const all = [];
+      const pageSize = 1000;
+      for (let from = 0; ; from += pageSize) {
+        const { data, error } = await supabase
+          .from("user_profiles")
+          .select("id, email, role, is_vip, vip_granted_at, created_at")
+          .order("created_at", { ascending: false })
+          .range(from, from + pageSize - 1);
+        if (error) throw new Error(error.message);
+        if (!data || data.length === 0) break;
+        all.push(...data);
+        if (data.length < pageSize) break;
+        if (from > 50000) break; // hard safety cap
+      }
+      setUsers(all);
+    } catch (e) {
+      toast.error(`Impossible de charger les utilisateurs: ${e.message}`);
+    } finally {
+      setUsersLoading(false);
+    }
+  }, []);
+
+  const reloadKeys = useCallback(async () => {
+    setKeysLoading(true);
+    try {
+      const { data, error } = await supabase
+        .from("vip_keys")
+        .select("id, key, used, used_by, used_at, created_at")
+        .order("created_at", { ascending: false })
+        .limit(500);
+      if (error) throw new Error(error.message);
+      setVipKeys(data || []);
+    } catch (e) {
+      toast.error(`Impossible de charger les clés VIP: ${e.message}`);
+    } finally {
+      setKeysLoading(false);
+    }
+  }, []);
+
+  // Cheap real-time stats (polled every 5s): system + live only.
+  const fetchAdminStats = useCallback(async () => {
+    try {
+      const headers = await authHeader();
+      const [sys, live] = await Promise.all([
+        axios.get(`${API}/admin/system-stats`, { headers }).catch(() => ({ data: null })),
+        axios.get(`${API}/admin/live-stats`, { headers }).catch(() => ({ data: null })),
+      ]);
+      if (sys.data) setSysStats(sys.data);
+      if (live.data) setLiveStats(live.data);
+    } catch (_) {
+      /* silent */
+    }
+  }, []);
+
+  // Heavier counts (polled every 60s; server-cached 60s).
+  const fetchGlobalStats = useCallback(async () => {
+    try {
+      const headers = await authHeader();
+      const glob = await axios.get(`${API}/admin/global-stats`, { headers }).catch(() => ({ data: null }));
+      if (glob.data) setGlobalStats(glob.data);
+    } catch (_) {
+      /* silent */
+    }
+  }, []);
+
+  // Top referrers — paginated & sortable (server-cached 60s).
+  const fetchReferrers = useCallback(async () => {
+    setRefLoading(true);
+    try {
+      const headers = await authHeader();
+      const params = new URLSearchParams({
+        hours: "0",
+        limit: String(REF_LIMIT),
+        offset: String(refPage * REF_LIMIT),
+        sort: refSort,
+        order: refOrder,
+      });
+      const r = await axios
+        .get(`${API}/admin/top-referrers?${params.toString()}`, { headers })
+        .catch(() => ({ data: { referrers: [], total: 0 } }));
+      setReferrers(r.data?.referrers || []);
+      setRefTotal(r.data?.total ?? (r.data?.referrers?.length || 0));
+    } catch (_) {
+      /* silent */
+    } finally {
+      setRefLoading(false);
+    }
+  }, [refPage, refSort, refOrder]);
+
+  // ========== Football API Keys ==========
+  const reloadFbKeys = useCallback(async () => {
+    setFbKeysLoading(true);
+    try {
+      const headers = await authHeader();
+      const r = await axios.get(`${API}/admin/football-keys`, { headers });
+      setFbKeys(r.data?.keys || []);
+    } catch (e) {
+      toast.error(`Football API: ${e.response?.data?.detail || e.message}`);
+    } finally {
+      setFbKeysLoading(false);
+    }
+  }, []);
+
+  const addFbKey = async (e) => {
+    e?.preventDefault?.();
+    const key = fbNewKey.trim();
+    if (key.length < 20) {
+      toast.error("Clé invalide (min. 20 caractères)");
+      return;
+    }
+    setFbAdding(true);
+    try {
+      const headers = await authHeader();
+      await axios.post(
+        `${API}/admin/football-keys`,
+        { api_key: key, label: fbNewLabel.trim() || null, enabled: true },
+        { headers },
+      );
+      setFbNewKey("");
+      setFbNewLabel("");
+      toast.success("Clé RapidAPI ajoutée");
+      await reloadFbKeys();
+    } catch (err) {
+      toast.error(`Échec: ${err.response?.data?.detail || err.message}`);
+    } finally {
+      setFbAdding(false);
+    }
+  };
+
+  const toggleFbKey = async (k) => {
+    try {
+      const headers = await authHeader();
+      await axios.patch(
+        `${API}/admin/football-keys/${k.id}`,
+        { enabled: !k.enabled },
+        { headers },
+      );
+      await reloadFbKeys();
+    } catch (err) {
+      toast.error(`Échec: ${err.response?.data?.detail || err.message}`);
+    }
+  };
+
+  const deleteFbKey = async (id) => {
+    if (!window.confirm("Supprimer cette clé RapidAPI ?")) return;
+    try {
+      const headers = await authHeader();
+      await axios.delete(`${API}/admin/football-keys/${id}`, { headers });
+      toast.success("Clé supprimée");
+      await reloadFbKeys();
+    } catch (err) {
+      toast.error(`Échec: ${err.response?.data?.detail || err.message}`);
+    }
+  };
+
+  // ========== DaddyTV config ==========
+  const reloadDaddyCfg = useCallback(async () => {
+    setDaddyCfgLoading(true);
+    try {
+      const headers = await authHeader();
+      const r = await axios.get(`${API}/admin/daddy/config`, { headers });
+      setDaddyCfg(r.data);
+      setDaddyForm({
+        channels_url: r.data?.channels_url || "",
+        m3u8_url: r.data?.m3u8_url || "",
+        enabled: !!r.data?.enabled,
+      });
+    } catch (e) {
+      toast.error(`DaddyTV config: ${e.response?.data?.detail || e.message}`);
+    } finally {
+      setDaddyCfgLoading(false);
+    }
+  }, []);
+
+  const testDaddyCfg = async () => {
+    setDaddyTesting(true);
+    setDaddyTestResult(null);
+    try {
+      const headers = await authHeader();
+      const r = await axios.post(`${API}/admin/daddy/test`, daddyForm, { headers });
+      setDaddyTestResult(r.data);
+      if (r.data?.matched > 0) {
+        toast.success(`Test OK — ${r.data.matched} chaînes appariées`);
+      } else {
+        toast.warning("Test : aucune chaîne appariée");
+      }
+    } catch (e) {
+      toast.error(`Test échoué: ${e.response?.data?.detail || e.message}`);
+    } finally {
+      setDaddyTesting(false);
+    }
+  };
+
+  const saveDaddyCfg = async () => {
+    setDaddySaving(true);
+    try {
+      const headers = await authHeader();
+      const r = await axios.patch(`${API}/admin/daddy/config`, daddyForm, { headers });
+      toast.success(`Configuration enregistrée — ${r.data?.channel_count || 0} chaînes actives`);
+      await reloadDaddyCfg();
+    } catch (e) {
+      toast.error(`Échec: ${e.response?.data?.detail || e.message}`);
+    } finally {
+      setDaddySaving(false);
+    }
+  };
+
+  const resetDaddyDefaults = () => {
+    const def = daddyCfg?.defaults || {};
+    setDaddyForm({
+      channels_url: def.channels_url || "",
+      m3u8_url: def.m3u8_url || "",
+      enabled: true,
+    });
+    toast.message("Valeurs par défaut restaurées (non encore sauvegardées)");
+  };
+
+  // ========== JackTV config ==========
+  const reloadJackCfg = useCallback(async () => {
+    setJackCfgLoading(true);
+    try {
+      const headers = await authHeader();
+      const r = await axios.get(`${API}/admin/jacktv/config`, { headers });
+      setJackCfg(r.data);
+      // Strip "defaults" from form
+      const { defaults, ...formFields } = r.data || {};
+      setJackForm(formFields);
+    } catch (e) {
+      toast.error(`JackTV config: ${e.response?.data?.detail || e.message}`);
+    } finally {
+      setJackCfgLoading(false);
+    }
+  }, []);
+
+  const saveJackCfg = async () => {
+    if (!jackForm) return;
+    setJackSaving(true);
+    try {
+      const headers = await authHeader();
+      const r = await axios.patch(`${API}/admin/jacktv/config`, jackForm, { headers });
+      toast.success("Configuration JackTV enregistrée");
+      const { defaults, ...formFields } = { defaults: jackCfg?.defaults, ...r.data };
+      setJackCfg({ ...formFields, defaults: jackCfg?.defaults });
+      setJackForm(formFields);
+    } catch (e) {
+      toast.error(`Échec: ${e.response?.data?.detail || e.message}`);
+    } finally {
+      setJackSaving(false);
+    }
+  };
+
+  const resetJackDefaults = () => {
+    const def = jackCfg?.defaults;
+    if (!def) return;
+    setJackForm({ ...def });
+    toast.message("Valeurs JackTV par défaut restaurées (non encore sauvegardées)");
+  };
+
+  const testJackUrl = async () => {
+    if (!jackForm) return;
+    setJackTesting(true);
+    setJackTestResult(null);
+    try {
+      const headers = await authHeader();
+      const r = await axios.post(
+        `${API}/admin/jacktv/test`,
+        { site_url: jackForm.site_url },
+        { headers },
+      );
+      setJackTestResult(r.data);
+      if (r.data?.reachable) {
+        toast.success(`URL OK — HTTP ${r.data.http_status} (${r.data.body_len} octets)`);
+      } else {
+        toast.warning(
+          r.data?.error
+            ? `URL injoignable: ${r.data.error}`
+            : `URL injoignable — HTTP ${r.data?.http_status || "?"}`,
+        );
+      }
+    } catch (e) {
+      toast.error(`Test échoué: ${e.response?.data?.detail || e.message}`);
+    } finally {
+      setJackTesting(false);
+    }
+  };
+
+  const updateJackField = (key, value) => {
+    setJackForm((f) => (f ? { ...f, [key]: value } : f));
+    // Invalidate test result if URL is being edited
+    if (key === "site_url") setJackTestResult(null);
+  };
+
+
+  useEffect(() => {
+    if (!isAdmin) return;
+    reloadUsers();
+    reloadKeys();
+    reloadFbKeys();
+    reloadDaddyCfg();
+    reloadJackCfg();
+    fetchAdminStats();
+    fetchGlobalStats();
+    // Real-time (cheap) stats every 5s; heavier counts every 60s.
+    const tFast = setInterval(fetchAdminStats, 5000);
+    const tSlow = setInterval(fetchGlobalStats, 60000);
+    return () => {
+      clearInterval(tFast);
+      clearInterval(tSlow);
+    };
+  }, [isAdmin, reloadUsers, reloadKeys, reloadFbKeys, reloadDaddyCfg, reloadJackCfg, fetchAdminStats, fetchGlobalStats]);
+
+  // Referrers: refetch on sort/page change + light 30s auto-refresh.
+  useEffect(() => {
+    if (!isAdmin) return;
+    fetchReferrers();
+    const t = setInterval(fetchReferrers, 30000);
+    return () => clearInterval(t);
+  }, [isAdmin, fetchReferrers]);
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return users;
+    return users.filter((u) => (u.email || "").toLowerCase().includes(q));
+  }, [users, search]);
+
+  // Only render the first N rows. Rendering tens of thousands of <tr> nodes
+  // (and re-rendering them on every 5s stats poll) was the main cause of the
+  // admin page feeling sluggish. Searching narrows the list to find anyone.
+  const USERS_RENDER_CAP = 100;
+  const displayedUsers = useMemo(
+    () => filtered.slice(0, USERS_RENDER_CAP),
+    [filtered],
+  );
+
+  const stats = useMemo(() => {
+    const total = globalStats?.total_users ?? users.length;
+    const admins = globalStats?.admins ?? users.filter((u) => u.role === "admin").length;
+    const vips = globalStats?.vips ?? users.filter((u) => u.role === "vip" || u.is_vip).length;
+    const usedKeys = vipKeys.filter((k) => k.used).length;
+    return {
+      total,
+      admins,
+      vips,
+      usedKeys,
+      totalKeys: vipKeys.length,
+      channels: globalStats?.total_channels ?? 0,
+    };
+  }, [users, vipKeys, globalStats]);
+
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center text-white">
+        <Loader2 className="animate-spin" size={28} />
+      </div>
+    );
+  }
+  if (!user) {
+    return <Navigate to="/login" replace state={{ from: { pathname: "/admin" } }} />;
+  }
+  if (!isAdmin) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center text-white px-4">
+        <div className="ns-bg" />
+        <Shield size={48} className="text-red-500 mb-4" />
+        <h1 className="text-2xl font-bold mb-2">Accès refusé</h1>
+        <p className="text-white/60 text-sm mb-6">Vous devez être administrateur pour accéder à cette page.</p>
+        <Link to="/" className="player-btn px-4 py-2">Retour</Link>
+      </div>
+    );
+  }
+
+  const setUserRole = async (u, newRole) => {
+    const updates = newRole === "vip"
+      ? { role: "vip", is_vip: true, vip_granted_at: new Date().toISOString() }
+      : newRole === "admin"
+      ? { role: "admin" }
+      : { role: "member", is_vip: false, vip_granted_at: null };
+    try {
+      const { error } = await supabase.from("user_profiles").update(updates).eq("id", u.id);
+      if (error) throw new Error(error.message);
+      toast.success(`Rôle mis à jour: ${newRole}`);
+      await reloadUsers();
+    } catch (e) {
+      toast.error(`Échec: ${e.message}`);
+    }
+  };
+
+  const generateKeys = async (e) => {
+    e.preventDefault();
+    if (generating) return;
+    setGenerating(true);
+    try {
+      const headers = await authHeader();
+      const r = await axios.post(`${API}/admin/vip-keys/generate`, { count: Number(genCount) }, { headers });
+      toast.success(`${r.data.created} clé(s) VIP générée(s)`);
+      await reloadKeys();
+    } catch (err) {
+      const msg = err?.response?.data?.detail || err?.message || "Erreur";
+      toast.error(msg);
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  const deleteKey = async (id) => {
+    if (!window.confirm("Supprimer cette clé ?")) return;
+    try {
+      const { error } = await supabase.from("vip_keys").delete().eq("id", id);
+      if (error) throw new Error(error.message);
+      toast.success("Clé supprimée");
+      await reloadKeys();
+    } catch (e) {
+      toast.error(`Échec: ${e.message}`);
+    }
+  };
+
+  const copyKey = (k) => {
+    navigator.clipboard?.writeText(k).then(() => toast.success("Clé copiée"));
+  };
+
+  return (
+    <div className="relative min-h-screen text-white">
+      <div className="ns-bg" />
+      <div className="ns-grain" />
+
+      <TopBar
+        variant="admin"
+        backTo="/"
+        right={
+          <Link to="/dashboard" className="topbar-pill hidden sm:inline-flex" data-testid="admin-dashboard-link">
+            <LayoutDashboard size={13} />
+            <span className="text-xs">Dashboard</span>
+          </Link>
+        }
+      />
+
+      <main className="w-full mx-auto px-4 sm:px-6 lg:px-8 xl:px-12 py-6 space-y-6">
+        {/* Global Stats cards */}
+        <section className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3" data-testid="admin-stats">
+          {[
+            { label: "Utilisateurs", value: stats.total.toLocaleString("fr-FR"), icon: UsersIcon, color: "text-white" },
+            { label: "Admins", value: stats.admins, icon: Shield, color: "text-red-400" },
+            { label: "VIP", value: stats.vips, icon: Crown, color: "text-yellow-400" },
+            { label: "Chaînes", value: stats.channels.toLocaleString("fr-FR"), icon: Tv2, color: "text-pink-400" },
+            { label: "Clés VIP", value: `${stats.usedKeys} / ${stats.totalKeys}`, icon: KeyRound, color: "text-blue-400" },
+          ].map((s) => (
+            <div key={s.label} className="glass rounded-xl p-4 border border-white/10" data-testid={`admin-stat-${s.label.toLowerCase()}`}>
+              <s.icon size={16} className={s.color} />
+              <p className="text-2xl font-bold mt-2 tabular-nums">{s.value}</p>
+              <p className="text-[11px] uppercase tracking-wider text-white/50">{s.label}</p>
+            </div>
+          ))}
+        </section>
+
+        {/* System stats: CPU / RAM / Network / System */}
+        <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3" data-testid="admin-system-stats">
+          <SystemCard
+            title="CPU App"
+            icon={Cpu}
+            iconColor="text-yellow-400"
+            primary={sysStats ? `${sysStats.cpu_percent.toFixed(1)}%` : "—"}
+            barPct={sysStats?.cpu_percent || 0}
+            barColor="bg-yellow-400"
+            sub="FastAPI Process"
+            testid="sys-card-cpu"
+          />
+          <SystemCard
+            title="RAM App"
+            icon={MemoryStick}
+            iconColor="text-pink-400"
+            primary={sysStats ? `${sysStats.system_mem_percent.toFixed(1)}%` : "—"}
+            barPct={sysStats?.system_mem_percent || 0}
+            barColor="bg-pink-400"
+            sub={sysStats ? `${sysStats.process_mem_mb.toFixed(1)} MB / ${sysStats.total_mem_mb.toFixed(0)} MB` : "—"}
+            testid="sys-card-ram"
+          />
+          <div className="glass rounded-xl p-4 border border-white/10" data-testid="sys-card-network">
+            <div className="flex items-center gap-2 mb-3 text-cyan-400">
+              <Network size={14} />
+              <span className="text-[11px] uppercase tracking-wider">Réseau</span>
+            </div>
+            <p className="text-[11px] text-white/40 uppercase tracking-wider mb-2">En direct</p>
+            <div className="flex items-end gap-3">
+              <div>
+                <p className="text-2xl font-bold tabular-nums">{liveStats?.online ?? 0}</p>
+                <p className="text-[10px] text-white/50 uppercase tracking-wider">En ligne</p>
+              </div>
+              <div className="ml-auto">
+                <p className="text-xl font-semibold tabular-nums text-cyan-400">{liveStats?.total_24h ?? 0}</p>
+                <p className="text-[10px] text-white/50 uppercase tracking-wider">/ 24 h</p>
+              </div>
+            </div>
+          </div>
+          <div className="glass rounded-xl p-4 border border-white/10" data-testid="sys-card-system">
+            <div className="flex items-center gap-2 mb-3 text-blue-400">
+              <Server size={14} />
+              <span className="text-[11px] uppercase tracking-wider">Système</span>
+            </div>
+            <div className="space-y-1.5 text-sm">
+              <Row k="Uptime" v={sysStats?.uptime || "—"} />
+              <Row k="Platform" v={sysStats?.platform || "—"} />
+              <Row k="Python" v={sysStats?.python_version || "—"} />
+            </div>
+          </div>
+        </section>
+
+        {/* Statistiques en direct */}
+        <section className="glass-heavy rounded-2xl p-5 border border-white/10" data-testid="admin-live-section">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-bold flex items-center gap-2">
+              <Activity size={18} className="text-green-400" /> Statistiques en direct
+              <span className="ml-2 inline-flex items-center gap-1 text-[10px] uppercase tracking-wider text-green-400 px-2 py-0.5 rounded-full bg-green-500/10">
+                <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" /> LIVE
+              </span>
+            </h3>
+            <span className="text-xs text-white/40">
+              {liveStats?.online ?? 0} en ligne · {liveStats?.watching ?? 0} en visionnage
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            {/* En ligne */}
+            <div className="rounded-xl border border-white/10 bg-white/[0.02] p-5" data-testid="live-online">
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2 text-green-400">
+                  <Activity size={14} />
+                  <span className="text-[11px] uppercase tracking-wider">En ligne</span>
+                </div>
+                <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider text-green-400 px-2 py-0.5 rounded-full bg-green-500/10">
+                  Live
+                </span>
+              </div>
+              <p className="text-5xl font-extrabold text-green-400 tabular-nums">{liveStats?.online ?? 0}</p>
+              <div className="mt-4 pt-4 border-t border-white/5 text-xs space-y-1">
+                <div className="flex justify-between text-white/50">
+                  <span>Membres :</span>
+                  <span className="text-white/80 tabular-nums">{liveStats?.members_online ?? 0}</span>
+                </div>
+                <div className="flex justify-between text-white/50">
+                  <span>Invités :</span>
+                  <span className="text-white/80 tabular-nums">{liveStats?.guests_online ?? (liveStats?.online ?? 0)}</span>
+                </div>
+              </div>
+            </div>
+
+            {/* En visionnage */}
+            <div className="rounded-xl border border-white/10 bg-white/[0.02] p-5" data-testid="live-watching">
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2 text-purple-400">
+                  <Eye size={14} />
+                  <span className="text-[11px] uppercase tracking-wider">En visionnage</span>
+                </div>
+                <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider text-purple-400 px-2 py-0.5 rounded-full bg-purple-500/10">
+                  Live
+                </span>
+              </div>
+              <p className="text-5xl font-extrabold text-purple-400 tabular-nums">{liveStats?.watching ?? 0}</p>
+              <p className="text-xs text-white/50 mt-4 pt-4 border-t border-white/5">regardent maintenant</p>
+            </div>
+
+            {/* Top Chaînes en Direct */}
+            <div className="rounded-xl border border-white/10 bg-white/[0.02] p-5" data-testid="live-top-channels">
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2 text-orange-400">
+                  <Radio size={14} />
+                  <span className="text-[11px] uppercase tracking-wider">Top Chaînes en Direct</span>
+                </div>
+                <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider text-orange-400 px-2 py-0.5 rounded-full bg-orange-500/10">
+                  Live
+                </span>
+              </div>
+              {liveStats?.top_channels?.length ? (
+                <ol className="space-y-1.5 text-sm">
+                  {liveStats.top_channels.slice(0, 5).map((c, i) => (
+                    <li key={c.id} className="flex items-center justify-between" data-testid={`top-ch-${i}`}>
+                      <span className="flex items-center gap-2 min-w-0">
+                        <span className="text-white/40 text-xs tabular-nums w-5">#{i + 1}</span>
+                        <span className="text-white truncate">{c.name}</span>
+                      </span>
+                      <span className="text-orange-400 tabular-nums text-xs flex items-center gap-1">
+                        {c.viewers} <Activity size={10} />
+                      </span>
+                    </li>
+                  ))}
+                </ol>
+              ) : (
+                <p className="text-xs text-white/40 mt-4">Aucun visionnage actif.</p>
+              )}
+            </div>
+          </div>
+        </section>
+
+        {/* Top Référents */}
+        <section className="glass-heavy rounded-2xl p-5 border border-white/10" data-testid="admin-referrers-section">
+          <div className="flex items-center justify-between mb-4 gap-2 flex-wrap">
+            <h3 className="text-lg font-bold flex items-center gap-2">
+              <Globe size={18} className="text-cyan-400" /> Top Référents
+              {refLoading && <Loader2 size={13} className="animate-spin text-white/40" />}
+            </h3>
+            <span className="text-xs text-white/40">{refTotal.toLocaleString("fr-FR")} source(s)</span>
+          </div>
+
+          {/* Sort controls */}
+          <div className="flex items-center gap-2 mb-4 flex-wrap" data-testid="referrers-sort">
+            <span className="text-[10px] uppercase tracking-wider text-white/40 mr-1">Trier par</span>
+            <div className="flex bg-white/[0.04] border border-white/10 rounded-lg p-0.5">
+              {[
+                { id: "count", label: "Quantité", Icon: Hash },
+                { id: "last", label: "Dernier appel", Icon: Clock },
+                { id: "first", label: "Premier appel", Icon: CalendarClock },
+              ].map(({ id, label, Icon }) => (
+                <button
+                  key={id}
+                  onClick={() => { setRefSort(id); setRefPage(0); }}
+                  className={`flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-md transition ${
+                    refSort === id ? "bg-cyan-400/20 text-cyan-300" : "text-white/55 hover:text-white"
+                  }`}
+                  data-testid={`ref-sort-${id}`}
+                >
+                  <Icon size={12} /> {label}
+                </button>
+              ))}
+            </div>
+            <button
+              onClick={() => { setRefOrder((o) => (o === "desc" ? "asc" : "desc")); setRefPage(0); }}
+              className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium rounded-lg border border-white/10 text-white/60 hover:text-white"
+              title={refOrder === "desc" ? "Décroissant" : "Croissant"}
+              data-testid="ref-order-toggle"
+            >
+              {refOrder === "desc" ? <ArrowDown size={13} /> : <ArrowUp size={13} />}
+              {refOrder === "desc" ? "Décroissant" : "Croissant"}
+            </button>
+          </div>
+
+          {referrers.length === 0 ? (
+            <p className="text-sm text-white/50 text-center py-4">Aucun référent enregistré pour l'instant.</p>
+          ) : (
+            <ol className="space-y-2" data-testid="referrers-list">
+              {referrers.map((r, i) => {
+                const max = Math.max(...referrers.map((x) => x.count || 0), 1);
+                const pct = (r.count / max) * 100;
+                const rank = refPage * REF_LIMIT + i + 1;
+                const fmt = (iso) => {
+                  if (!iso) return "—";
+                  try {
+                    const d = new Date(iso);
+                    return d.toLocaleString("fr-FR", {
+                      day: "2-digit",
+                      month: "2-digit",
+                      year: "2-digit",
+                      hour: "2-digit",
+                      minute: "2-digit",
+                    });
+                  } catch {
+                    return "—";
+                  }
+                };
+                return (
+                  <li key={r.host} className="relative" data-testid={`referrer-${i}`}>
+                    <div
+                      className="absolute inset-0 rounded-lg bg-cyan-400/10"
+                      style={{ width: `${pct}%`, transition: "width .3s" }}
+                    />
+                    <div className="relative flex items-center justify-between px-3 py-2 gap-3">
+                      <span className="flex items-center gap-2 min-w-0 flex-1">
+                        <span className="text-white/40 text-xs tabular-nums w-7 shrink-0">#{rank}</span>
+                        <Globe size={12} className="text-cyan-400 shrink-0" />
+                        <span className="flex flex-col min-w-0">
+                          <span className="text-white truncate text-sm">{r.host}</span>
+                          <span className="text-[10px] text-white/45 tabular-nums">
+                            <span className="text-white/35">1er :</span> {fmt(r.first_call)}
+                            <span className="mx-1.5 text-white/20">•</span>
+                            <span className="text-white/35">dernier :</span> {fmt(r.last_call)}
+                          </span>
+                        </span>
+                      </span>
+                      <span className="text-cyan-400 tabular-nums font-semibold text-sm shrink-0">
+                        {r.count.toLocaleString("fr-FR")}
+                        <span className="text-[10px] font-normal text-white/40 ml-1">appels</span>
+                      </span>
+                    </div>
+                  </li>
+                );
+              })}
+            </ol>
+          )}
+
+          {/* Pagination */}
+          {refTotal > REF_LIMIT && (
+            <div className="flex items-center justify-between mt-4 pt-3 border-t border-white/5" data-testid="referrers-pagination">
+              <span className="text-xs text-white/40 tabular-nums">
+                {refPage * REF_LIMIT + 1}–{Math.min((refPage + 1) * REF_LIMIT, refTotal)} sur {refTotal.toLocaleString("fr-FR")}
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setRefPage((p) => Math.max(0, p - 1))}
+                  disabled={refPage === 0 || refLoading}
+                  className="flex items-center gap-1 px-2.5 py-1.5 text-xs rounded-lg border border-white/10 text-white/70 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed"
+                  data-testid="ref-prev"
+                >
+                  <ChevronLeft size={14} /> Précédent
+                </button>
+                <span className="text-xs text-white/50 tabular-nums">
+                  {refPage + 1} / {Math.max(1, Math.ceil(refTotal / REF_LIMIT))}
+                </span>
+                <button
+                  onClick={() => setRefPage((p) => ((p + 1) * REF_LIMIT < refTotal ? p + 1 : p))}
+                  disabled={(refPage + 1) * REF_LIMIT >= refTotal || refLoading}
+                  className="flex items-center gap-1 px-2.5 py-1.5 text-xs rounded-lg border border-white/10 text-white/70 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed"
+                  data-testid="ref-next"
+                >
+                  Suivant <ChevronRight size={14} />
+                </button>
+              </div>
+            </div>
+          )}
+        </section>
+
+        {/* === Statistiques détaillées (graphique 24h / 7j / 30j / 1an) === */}
+        <StatsTimeseriesPanel getAuthHeader={async () => { const { data: { session } } = await supabase.auth.getSession(); return session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}; }} />
+
+        {/* VIP keys */}
+        <section className="glass-heavy rounded-2xl p-5 border border-white/10" data-testid="admin-vip-keys-section">
+          <div className="flex items-center justify-between mb-3 gap-2">
+            <h3 className="text-lg font-bold flex items-center gap-2">
+              <KeyRound size={18} className="text-yellow-400" /> Clés VIP
+            </h3>
+            <form onSubmit={generateKeys} className="flex items-center gap-2">
+              <input
+                type="number"
+                min={1}
+                max={50}
+                value={genCount}
+                onChange={(e) => setGenCount(e.target.value)}
+                className="w-16 px-2 py-1.5 rounded-lg bg-white/5 border border-white/10 text-sm text-white text-center"
+                data-testid="admin-gen-count"
+              />
+              <button
+                type="submit"
+                disabled={generating}
+                className="px-3 py-1.5 rounded-lg bg-yellow-400 hover:bg-yellow-300 text-black font-semibold flex items-center gap-1.5 text-sm disabled:opacity-60"
+                data-testid="admin-generate-btn"
+              >
+                {generating ? <Loader2 className="animate-spin" size={14} /> : <Plus size={14} />}
+                Générer
+              </button>
+            </form>
+          </div>
+
+          {keysLoading ? (
+            <div className="py-6 flex items-center justify-center">
+              <Loader2 className="animate-spin text-yellow-400" size={20} />
+            </div>
+          ) : vipKeys.length === 0 ? (
+            <p className="text-white/50 text-sm text-center py-6">Aucune clé VIP pour l'instant.</p>
+          ) : (
+            <div className="max-h-[300px] overflow-y-auto pr-1">
+              <table className="w-full text-sm" data-testid="admin-keys-table">
+                <thead className="text-white/50 text-xs uppercase tracking-wider sticky top-0 bg-[#0e0e14]">
+                  <tr>
+                    <th className="text-left py-2 px-2">Clé</th>
+                    <th className="text-center py-2 px-2">Statut</th>
+                    <th className="text-left py-2 px-2 hidden sm:table-cell">Créée</th>
+                    <th className="text-right py-2 px-2">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {vipKeys.map((k) => (
+                    <tr key={k.id} className="border-t border-white/5 hover:bg-white/[0.02]">
+                      <td className="py-2 px-2 font-mono text-xs text-yellow-300">{k.key}</td>
+                      <td className="py-2 px-2 text-center">
+                        {k.used ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-green-500/15 text-green-400 text-xs">
+                            <Check size={11} /> utilisée
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-blue-500/15 text-blue-400 text-xs">
+                            disponible
+                          </span>
+                        )}
+                      </td>
+                      <td className="py-2 px-2 text-xs text-white/50 hidden sm:table-cell">
+                        {k.created_at ? new Date(k.created_at).toLocaleDateString("fr-FR") : "-"}
+                      </td>
+                      <td className="py-2 px-2 text-right">
+                        <button onClick={() => copyKey(k.key)} className="player-btn w-7 h-7" title="Copier">
+                          <Copy size={12} />
+                        </button>
+                        {!k.used && (
+                          <button
+                            onClick={() => deleteKey(k.id)}
+                            className="player-btn w-7 h-7 ml-1 hover:bg-red-500/20"
+                            title="Supprimer"
+                          >
+                            <Trash2 size={12} />
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+
+        {/* Football API Keys (RapidAPI) */}
+        <section className="glass-heavy rounded-2xl p-5 border border-white/10" data-testid="admin-fb-keys-section">
+          <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
+            <h3 className="text-lg font-bold flex items-center gap-2">
+              <Flame size={18} className="text-orange-400" /> Clés RapidAPI Football
+              <span className="text-sm font-normal text-white/40">({fbKeys.length})</span>
+            </h3>
+            <span className="text-xs text-white/45">
+              Table Supabase <code className="text-orange-300/80">football_api_keys</code>
+            </span>
+          </div>
+
+          <form onSubmit={addFbKey} className="flex flex-col sm:flex-row gap-2 mb-4">
+            <input
+              value={fbNewKey}
+              onChange={(e) => setFbNewKey(e.target.value)}
+              placeholder="Nouvelle clé X-RapidAPI-Key (ex: 593cf48882msh…)"
+              className="flex-1 px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-orange-400/40 font-mono"
+              data-testid="fb-new-key"
+            />
+            <input
+              value={fbNewLabel}
+              onChange={(e) => setFbNewLabel(e.target.value)}
+              placeholder="Libellé (optionnel)"
+              className="sm:w-44 px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-orange-400/40"
+              data-testid="fb-new-label"
+              maxLength={60}
+            />
+            <button
+              type="submit"
+              disabled={fbAdding}
+              className="px-3 py-2 rounded-lg bg-orange-400 hover:bg-orange-300 text-black font-semibold flex items-center justify-center gap-1.5 text-sm disabled:opacity-60"
+              data-testid="fb-add-btn"
+            >
+              {fbAdding ? <Loader2 className="animate-spin" size={14} /> : <Plus size={14} />}
+              Ajouter
+            </button>
+          </form>
+
+          {fbKeysLoading ? (
+            <div className="py-6 flex items-center justify-center">
+              <Loader2 className="animate-spin text-orange-400" size={20} />
+            </div>
+          ) : fbKeys.length === 0 ? (
+            <div className="rounded-xl border border-yellow-500/20 bg-yellow-500/5 p-4 text-sm text-yellow-300/90 flex items-start gap-2">
+              <AlertTriangle size={16} className="shrink-0 mt-0.5" />
+              <div>
+                Aucune clé RapidAPI configurée. Football Live utilise actuellement les clés fallback statiques (quota limité).
+                Ajoutez votre propre clé sur{" "}
+                <a
+                  href="https://rapidapi.com/Yewale/api/football-live-streaming-api"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="underline text-orange-300"
+                >
+                  rapidapi.com/Yewale/api/football-live-streaming-api
+                </a>.
+              </div>
+            </div>
+          ) : (
+            <div className="max-h-[360px] overflow-y-auto pr-1">
+              <table className="w-full text-sm" data-testid="fb-keys-table">
+                <thead className="text-white/50 text-xs uppercase tracking-wider sticky top-0 bg-[#0e0e14]">
+                  <tr>
+                    <th className="text-left py-2 px-2">Clé</th>
+                    <th className="text-left py-2 px-2 hidden md:table-cell">Libellé</th>
+                    <th className="text-center py-2 px-2">Statut</th>
+                    <th className="text-center py-2 px-2 hidden sm:table-cell">Succès / Erreurs</th>
+                    <th className="text-left py-2 px-2 hidden lg:table-cell">Dernier usage</th>
+                    <th className="text-right py-2 px-2">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {fbKeys.map((k) => (
+                    <tr key={k.id} className="border-t border-white/5 hover:bg-white/[0.02]" data-testid={`fb-row-${k.id}`}>
+                      <td className="py-2 px-2 font-mono text-xs text-orange-300/90">{k.api_key_masked}</td>
+                      <td className="py-2 px-2 text-xs text-white/70 hidden md:table-cell">{k.label || "—"}</td>
+                      <td className="py-2 px-2 text-center">
+                        {k.banned_today ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-red-500/15 text-red-400 text-xs" title={k.banned_reason || ""}>
+                            <AlertTriangle size={11} /> banni 24h
+                          </span>
+                        ) : k.enabled ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-green-500/15 text-green-400 text-xs">
+                            <Check size={11} /> activée
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-white/10 text-white/50 text-xs">
+                            désactivée
+                          </span>
+                        )}
+                      </td>
+                      <td className="py-2 px-2 text-center text-xs hidden sm:table-cell">
+                        <span className="text-green-400 font-semibold">{k.success_count}</span>
+                        <span className="text-white/30"> / </span>
+                        <span className="text-red-400 font-semibold">{k.error_count}</span>
+                      </td>
+                      <td className="py-2 px-2 text-xs text-white/50 hidden lg:table-cell">
+                        {k.last_used_at ? new Date(k.last_used_at).toLocaleString("fr-FR") : "—"}
+                        {k.last_error && (
+                          <div className="text-red-400/80 truncate max-w-[200px]" title={k.last_error}>
+                            ⚠ {k.last_error}
+                          </div>
+                        )}
+                      </td>
+                      <td className="py-2 px-2 text-right whitespace-nowrap">
+                        <button
+                          onClick={() => toggleFbKey(k)}
+                          className="player-btn w-7 h-7"
+                          title={k.enabled ? "Désactiver" : "Activer"}
+                          data-testid={`fb-toggle-${k.id}`}
+                        >
+                          {k.enabled ? <ToggleRight size={14} className="text-green-400" /> : <ToggleLeft size={14} className="text-white/50" />}
+                        </button>
+                        <button
+                          onClick={() => deleteFbKey(k.id)}
+                          className="player-btn w-7 h-7 ml-1 hover:bg-red-500/20"
+                          title="Supprimer"
+                          data-testid={`fb-del-${k.id}`}
+                        >
+                          <Trash2 size={12} />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+
+        {/* DaddyTV configuration */}
+        <section className="glass-heavy rounded-2xl p-5 border border-white/10" data-testid="admin-daddy-section">
+          <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
+            <h3 className="text-lg font-bold flex items-center gap-2">
+              <Radio size={18} className="text-[#ff8a00]" /> Configuration DaddyTV
+              {daddyCfg && (
+                <span className="text-sm font-normal text-white/40">
+                  ({daddyCfg.channel_count || 0} chaînes · cache {daddyCfg.cache_age_sec || 0}s)
+                </span>
+              )}
+            </h3>
+            <button
+              type="button"
+              onClick={() => setDaddyForm((f) => ({ ...f, enabled: !f.enabled }))}
+              className="text-sm flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 hover:border-[#ff8a00]/40"
+              data-testid="daddy-toggle-enabled"
+            >
+              {daddyForm.enabled ? (
+                <ToggleRight size={16} className="text-green-400" />
+              ) : (
+                <ToggleLeft size={16} className="text-white/50" />
+              )}
+              {daddyForm.enabled ? "Activée" : "Désactivée"}
+            </button>
+          </div>
+
+          {daddyCfgLoading ? (
+            <div className="py-8 flex items-center justify-center">
+              <Loader2 className="animate-spin text-[#ff8a00]" size={20} />
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <div>
+                <label className="text-xs uppercase tracking-wider text-white/50 mb-1 block">
+                  URL JSON des chaînes
+                </label>
+                <input
+                  value={daddyForm.channels_url}
+                  onChange={(e) => setDaddyForm({ ...daddyForm, channels_url: e.target.value })}
+                  placeholder="https://daddylive.li/player/player10.json"
+                  className="w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-[#ff8a00]/40 font-mono"
+                  data-testid="daddy-channels-url"
+                />
+                <div className="text-[11px] text-white/40 mt-1">
+                  Source primaire — liste des chaînes (id, nom). Défaut : <code>{daddyCfg?.defaults?.channels_url}</code>
+                </div>
+              </div>
+              <div>
+                <label className="text-xs uppercase tracking-wider text-white/50 mb-1 block">
+                  URL JSON des flux m3u8
+                </label>
+                <input
+                  value={daddyForm.m3u8_url}
+                  onChange={(e) => setDaddyForm({ ...daddyForm, m3u8_url: e.target.value })}
+                  placeholder="https://player.cfbu247.sbs/allchannel.json"
+                  className="w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-[#ff8a00]/40 font-mono"
+                  data-testid="daddy-m3u8-url"
+                />
+                <div className="text-[11px] text-white/40 mt-1">
+                  Source m3u8 — par chaîne id. Défaut : <code>{daddyCfg?.defaults?.m3u8_url}</code>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 pt-1">
+                <button
+                  onClick={testDaddyCfg}
+                  disabled={daddyTesting}
+                  className="px-3 py-2 rounded-lg bg-white/5 border border-white/10 hover:border-[#ff8a00]/40 text-sm flex items-center gap-1.5 disabled:opacity-60"
+                  data-testid="daddy-test-btn"
+                >
+                  {daddyTesting ? <Loader2 className="animate-spin" size={14} /> : <Activity size={14} />}
+                  Tester
+                </button>
+                <button
+                  onClick={resetDaddyDefaults}
+                  className="px-3 py-2 rounded-lg bg-white/5 border border-white/10 hover:border-white/20 text-sm flex items-center gap-1.5"
+                  data-testid="daddy-reset-btn"
+                >
+                  Restaurer défauts
+                </button>
+                <button
+                  onClick={saveDaddyCfg}
+                  disabled={daddySaving}
+                  className="ml-auto px-3 py-2 rounded-lg bg-[#ff8a00] hover:bg-[#ff9a20] text-black font-semibold flex items-center gap-1.5 text-sm disabled:opacity-60"
+                  data-testid="daddy-save-btn"
+                >
+                  {daddySaving ? <Loader2 className="animate-spin" size={14} /> : <Check size={14} />}
+                  Enregistrer
+                </button>
+              </div>
+
+              {daddyTestResult && (
+                <div className="mt-3 glass rounded-xl p-3 text-xs space-y-1" data-testid="daddy-test-result">
+                  <div className="flex flex-wrap gap-x-4 gap-y-1">
+                    <span>
+                      Channels JSON : {daddyTestResult.channels_ok ? (
+                        <span className="text-green-400 font-semibold">OK</span>
+                      ) : (
+                        <span className="text-red-400 font-semibold">KO</span>
+                      )} ({daddyTestResult.channels_total} entrées)
+                    </span>
+                    <span>
+                      M3U8 JSON : {daddyTestResult.m3u8_ok ? (
+                        <span className="text-green-400 font-semibold">OK</span>
+                      ) : (
+                        <span className="text-red-400 font-semibold">KO</span>
+                      )} ({daddyTestResult.m3u8_total} entrées)
+                    </span>
+                    <span>
+                      Appariées : <span className="font-bold text-[#ff8a00]">{daddyTestResult.matched}</span>
+                    </span>
+                  </div>
+                  {daddyTestResult.sample_channel && (
+                    <div className="text-white/60 truncate">
+                      Ex. chaîne : <code>#{daddyTestResult.sample_channel.id}</code> {daddyTestResult.sample_channel.name}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </section>
+
+        {/* JackTV configuration */}
+        <section className="glass-heavy rounded-2xl p-5 border border-white/10" data-testid="admin-jacktv-section">
+          <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
+            <h3 className="text-lg font-bold flex items-center gap-2">
+              <Tv2 size={18} className="text-amber-400" /> Configuration JackTV
+            </h3>
+            {jackForm?.site_url && (
+              <a
+                href={jackForm.site_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-xs text-white/50 hover:text-amber-400 truncate max-w-[280px]"
+                title={jackForm.site_url}
+              >
+                {jackForm.site_url}
+              </a>
+            )}
+          </div>
+
+          {jackCfgLoading || !jackForm ? (
+            <div className="py-8 flex items-center justify-center">
+              <Loader2 className="animate-spin text-amber-400" size={20} />
+            </div>
+          ) : (
+            <div className="space-y-5">
+              {/* Domaine */}
+              <div>
+                <label className="text-xs uppercase tracking-wider text-white/50 mb-1 block">
+                  URL du site JackTV
+                </label>
+                <input
+                  value={jackForm.site_url || ""}
+                  onChange={(e) => updateJackField("site_url", e.target.value)}
+                  placeholder="https://jack09eo.mpstickv5m73jgravity.my"
+                  className="w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-amber-400/40 font-mono"
+                  data-testid="jacktv-site-url"
+                />
+                <div className="text-[11px] text-white/40 mt-1">
+                  À mettre à jour quand le domaine change. Défaut : <code>{jackCfg?.defaults?.site_url}</code>
+                </div>
+              </div>
+
+              {/* Proportions overlay */}
+              <div>
+                <div className="text-xs uppercase tracking-wider text-white/50 mb-2 font-semibold">
+                  Proportions de l'overlay (lecteur iframe)
+                </div>
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                  <div>
+                    <label className="text-[11px] text-white/60 mb-1 block">Largeur max (px)</label>
+                    <input
+                      type="number"
+                      min={320}
+                      max={4096}
+                      value={jackForm.wrapper_max_width}
+                      onChange={(e) => updateJackField("wrapper_max_width", parseInt(e.target.value, 10) || 0)}
+                      className="w-full px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 text-sm text-white focus:outline-none focus:border-amber-400/40"
+                      data-testid="jacktv-wrapper-max-width"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[11px] text-white/60 mb-1 block">Ratio (CSS aspect-ratio)</label>
+                    <input
+                      value={jackForm.wrapper_aspect_ratio || ""}
+                      onChange={(e) => updateJackField("wrapper_aspect_ratio", e.target.value)}
+                      placeholder="16 / 9"
+                      className="w-full px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 text-sm text-white focus:outline-none focus:border-amber-400/40 font-mono"
+                      data-testid="jacktv-aspect-ratio"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[11px] text-white/60 mb-1 block">Hauteur header masquée (px)</label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={2000}
+                      value={jackForm.iframe_header_height}
+                      onChange={(e) => updateJackField("iframe_header_height", parseInt(e.target.value, 10) || 0)}
+                      className="w-full px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 text-sm text-white focus:outline-none focus:border-amber-400/40"
+                      data-testid="jacktv-header-height"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[11px] text-white/60 mb-1 block">Ratio masque bas (0.0 - 2.0)</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min={0}
+                      max={2}
+                      value={jackForm.iframe_bottom_ratio}
+                      onChange={(e) => updateJackField("iframe_bottom_ratio", parseFloat(e.target.value) || 0)}
+                      className="w-full px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 text-sm text-white focus:outline-none focus:border-amber-400/40"
+                      data-testid="jacktv-bottom-ratio"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[11px] text-white/60 mb-1 block">Couleur masque (CSS)</label>
+                    <input
+                      value={jackForm.iframe_mask_color || ""}
+                      onChange={(e) => updateJackField("iframe_mask_color", e.target.value)}
+                      placeholder="#00141E"
+                      className="w-full px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 text-sm text-white focus:outline-none focus:border-amber-400/40 font-mono"
+                      data-testid="jacktv-mask-color"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[11px] text-white/60 mb-1 block">Scale iframe (0.1 - 5.0)</label>
+                    <input
+                      type="number"
+                      step="0.05"
+                      min={0.1}
+                      max={5}
+                      value={jackForm.iframe_scale}
+                      onChange={(e) => updateJackField("iframe_scale", parseFloat(e.target.value) || 1)}
+                      className="w-full px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 text-sm text-white focus:outline-none focus:border-amber-400/40"
+                      data-testid="jacktv-scale"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[11px] text-white/60 mb-1 block">Translate X</label>
+                    <input
+                      value={jackForm.iframe_translate_x || ""}
+                      onChange={(e) => updateJackField("iframe_translate_x", e.target.value)}
+                      placeholder="0%"
+                      className="w-full px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 text-sm text-white focus:outline-none focus:border-amber-400/40 font-mono"
+                      data-testid="jacktv-translate-x"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[11px] text-white/60 mb-1 block">Translate Y</label>
+                    <input
+                      value={jackForm.iframe_translate_y || ""}
+                      onChange={(e) => updateJackField("iframe_translate_y", e.target.value)}
+                      placeholder="0%"
+                      className="w-full px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 text-sm text-white focus:outline-none focus:border-amber-400/40 font-mono"
+                      data-testid="jacktv-translate-y"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Sections visibles */}
+              <div>
+                <div className="text-xs uppercase tracking-wider text-white/50 mb-2 font-semibold">
+                  Sections affichées dans l'overlay
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {[
+                    { k: "show_score_banner", label: "Bandeau score" },
+                    { k: "show_servers", label: "Sources/serveurs" },
+                    { k: "show_events", label: "Événements" },
+                    { k: "show_stats", label: "Statistiques" },
+                    { k: "show_toggle_mode", label: "Bouton bascule lecteur" },
+                  ].map(({ k, label }) => (
+                    <button
+                      key={k}
+                      type="button"
+                      onClick={() => updateJackField(k, !jackForm[k])}
+                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition ${
+                        jackForm[k]
+                          ? "bg-amber-400/15 border-amber-400/40 text-amber-300"
+                          : "bg-white/5 border-white/10 text-white/50 hover:border-white/20"
+                      }`}
+                      data-testid={`jacktv-toggle-${k}`}
+                    >
+                      {jackForm[k] ? <ToggleRight size={14} /> : <ToggleLeft size={14} />}
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 pt-1">
+                <button
+                  onClick={testJackUrl}
+                  disabled={jackTesting}
+                  className="px-3 py-2 rounded-lg bg-white/5 border border-white/10 hover:border-amber-400/40 text-sm flex items-center gap-1.5 disabled:opacity-60"
+                  data-testid="jacktv-test-btn"
+                >
+                  {jackTesting ? <Loader2 className="animate-spin" size={14} /> : <Activity size={14} />}
+                  Tester l'URL
+                </button>
+                <button
+                  onClick={resetJackDefaults}
+                  className="px-3 py-2 rounded-lg bg-white/5 border border-white/10 hover:border-white/20 text-sm flex items-center gap-1.5"
+                  data-testid="jacktv-reset-btn"
+                >
+                  Restaurer défauts
+                </button>
+                <button
+                  onClick={saveJackCfg}
+                  disabled={jackSaving}
+                  className="ml-auto px-3 py-2 rounded-lg bg-amber-400 hover:bg-amber-300 text-black font-semibold flex items-center gap-1.5 text-sm disabled:opacity-60"
+                  data-testid="jacktv-save-btn"
+                >
+                  {jackSaving ? <Loader2 className="animate-spin" size={14} /> : <Check size={14} />}
+                  Enregistrer
+                </button>
+              </div>
+
+              {jackTestResult && (
+                <div
+                  className={`mt-3 glass rounded-xl p-3 text-xs space-y-1 border ${
+                    jackTestResult.reachable ? "border-green-400/30" : "border-red-400/30"
+                  }`}
+                  data-testid="jacktv-test-result"
+                >
+                  <div className="flex flex-wrap gap-x-4 gap-y-1">
+                    <span>
+                      Statut :{" "}
+                      {jackTestResult.reachable ? (
+                        <span className="text-green-400 font-semibold">Joignable</span>
+                      ) : (
+                        <span className="text-red-400 font-semibold">Injoignable</span>
+                      )}
+                    </span>
+                    <span>
+                      HTTP :{" "}
+                      <span className="font-semibold">{jackTestResult.http_status || "—"}</span>
+                    </span>
+                    <span>
+                      Octets reçus :{" "}
+                      <span className="font-semibold tabular-nums">
+                        {(jackTestResult.body_len || 0).toLocaleString("fr-FR")}
+                      </span>
+                    </span>
+                  </div>
+                  <div className="text-white/50 truncate">
+                    URL testée : <code>{jackTestResult.site_url}</code>
+                  </div>
+                  {jackTestResult.error && (
+                    <div className="text-red-400/90">Erreur : {jackTestResult.error}</div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </section>
+
+        {/* Users */}
+
+        <section className="glass-heavy rounded-2xl p-5 border border-white/10" data-testid="admin-users-section">
+          <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
+            <h3 className="text-lg font-bold flex items-center gap-2">
+              <UsersIcon size={18} className="text-[#ff2e63]" /> Utilisateurs ({filtered.length.toLocaleString("fr-FR")})
+            </h3>
+            <div className="relative">
+              <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-white/50" />
+              <input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Rechercher par email..."
+                className="pl-8 pr-3 py-1.5 rounded-lg bg-white/5 border border-white/10 text-sm text-white placeholder:text-white/40 w-56 focus:outline-none focus:border-white/20"
+                data-testid="admin-users-search"
+              />
+            </div>
+          </div>
+
+          {usersLoading ? (
+            <div className="py-8 flex items-center justify-center">
+              <Loader2 className="animate-spin text-[#ff2e63]" size={20} />
+            </div>
+          ) : filtered.length === 0 ? (
+            <p className="text-white/50 text-sm text-center py-6">Aucun utilisateur trouvé.</p>
+          ) : (
+            <div className="max-h-[500px] overflow-y-auto pr-1">
+              <table className="w-full text-sm" data-testid="admin-users-table">
+                <thead className="text-white/50 text-xs uppercase tracking-wider sticky top-0 bg-[#0e0e14]">
+                  <tr>
+                    <th className="text-left py-2 px-2">Email</th>
+                    <th className="text-center py-2 px-2">Rôle</th>
+                    <th className="text-left py-2 px-2 hidden sm:table-cell">Inscrit le</th>
+                    <th className="text-right py-2 px-2">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {displayedUsers.map((u) => {
+                    const role = u.role === "admin" ? "admin" : (u.role === "vip" || u.is_vip) ? "vip" : "member";
+                    return (
+                      <tr key={u.id} className="border-t border-white/5 hover:bg-white/[0.02]">
+                        <td className="py-2 px-2 truncate max-w-[200px]">{u.email || "—"}</td>
+                        <td className="py-2 px-2 text-center">
+                          <span
+                            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold ${
+                              role === "admin"
+                                ? "bg-red-500/15 text-red-400"
+                                : role === "vip"
+                                ? "bg-yellow-500/15 text-yellow-400"
+                                : "bg-blue-500/15 text-blue-400"
+                            }`}
+                          >
+                            {role === "admin" ? <Shield size={10} /> : role === "vip" ? <Crown size={10} /> : null}
+                            {role}
+                          </span>
+                        </td>
+                        <td className="py-2 px-2 text-xs text-white/50 hidden sm:table-cell">
+                          <CalendarClock size={10} className="inline mr-1" />
+                          {u.created_at ? new Date(u.created_at).toLocaleDateString("fr-FR") : "-"}
+                        </td>
+                        <td className="py-2 px-2 text-right space-x-1">
+                          <button
+                            disabled={role === "member"}
+                            onClick={() => setUserRole(u, "member")}
+                            className="px-2 py-1 rounded-md text-xs bg-blue-500/10 hover:bg-blue-500/20 disabled:opacity-30 disabled:cursor-not-allowed"
+                            data-testid={`admin-set-member-${u.id}`}
+                          >
+                            Member
+                          </button>
+                          <button
+                            disabled={role === "vip"}
+                            onClick={() => setUserRole(u, "vip")}
+                            className="px-2 py-1 rounded-md text-xs bg-yellow-500/10 hover:bg-yellow-500/20 disabled:opacity-30 disabled:cursor-not-allowed"
+                            data-testid={`admin-set-vip-${u.id}`}
+                          >
+                            VIP
+                          </button>
+                          <button
+                            disabled={role === "admin" || u.id === user.id}
+                            onClick={() => setUserRole(u, "admin")}
+                            className="px-2 py-1 rounded-md text-xs bg-red-500/10 hover:bg-red-500/20 disabled:opacity-30 disabled:cursor-not-allowed"
+                            data-testid={`admin-set-admin-${u.id}`}
+                          >
+                            Admin
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              {filtered.length > displayedUsers.length && (
+                <p className="text-xs text-white/40 text-center py-3 border-t border-white/5 mt-1">
+                  Affichage de {displayedUsers.length.toLocaleString("fr-FR")} sur{" "}
+                  {filtered.length.toLocaleString("fr-FR")} utilisateurs — affinez avec la recherche pour trouver un compte précis.
+                </p>
+              )}
+            </div>
+          )}
+        </section>
+      </main>
+    </div>
+  );
+}
+
+function SystemCard({ title, icon: Icon, iconColor, primary, barPct, barColor, sub, testid }) {
+  return (
+    <div className="glass rounded-xl p-4 border border-white/10" data-testid={testid}>
+      <div className="flex items-center gap-2 mb-3" style={{}}>
+        <Icon size={14} className={iconColor} />
+        <span className={`text-[11px] uppercase tracking-wider ${iconColor}`}>{title}</span>
+      </div>
+      <p className="text-3xl font-bold tabular-nums">{primary}</p>
+      <div className="mt-3 h-1.5 rounded-full bg-white/5 overflow-hidden">
+        <div
+          className={`h-full ${barColor} transition-all`}
+          style={{ width: `${Math.min(100, Math.max(0, barPct))}%` }}
+        />
+      </div>
+      <p className="mt-2 text-[11px] text-white/40 truncate">{sub}</p>
+    </div>
+  );
+}
+
+function Row({ k, v }) {
+  return (
+    <div className="flex items-center justify-between gap-2">
+      <span className="text-white/50 text-xs uppercase tracking-wider">{k}:</span>
+      <span className="text-white text-sm truncate text-right">{v}</span>
+    </div>
+  );
+}

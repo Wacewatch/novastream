@@ -1,0 +1,655 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import Hls from "hls.js";
+import {
+  Play,
+  Pause,
+  Volume2,
+  VolumeX,
+  Maximize,
+  Minimize,
+  X,
+  Loader2,
+  RotateCcw,
+  MoreVertical,
+  Check,
+  ChevronRight,
+  ChevronLeft,
+  PictureInPicture2,
+  Link as LinkIcon,
+  Wand2,
+  Server,
+} from "lucide-react";
+import { toast } from "sonner";
+import { EpgNowBadge } from "@/components/TopBar";
+
+// Detect iOS / iPadOS — Safari there doesn't support standard Fullscreen API
+// on arbitrary containers; we must call webkitEnterFullscreen() on the <video>.
+const isIOS = () => {
+  if (typeof navigator === "undefined") return false;
+  const ua = navigator.userAgent || "";
+  if (/iP(hone|od|ad)/.test(ua)) return true;
+  // iPadOS 13+ masquerades as Mac with touch points
+  return ua.includes("Mac") && navigator.maxTouchPoints > 1;
+};
+
+const BACKEND_URL = (process.env.NEXT_PUBLIC_BACKEND_URL || process.env.REACT_APP_BACKEND_URL || (typeof window !== 'undefined' ? window.location.origin : ''));
+
+export default function VideoPlayer({
+  channel,
+  streamUrl,
+  onClose,
+  onRetry,
+  onError = null,
+  onStarted = null,
+  // Optional: enable in-player server switching (Sports / Football).
+  // servers: [{ id, name, stream_url, url? }]
+  // activeServerId: currently selected id
+  // onSwitchServer: (server) => void — parent updates streamUrl WITHOUT
+  // re-running the ad modal so users can flip servers freely.
+  servers = [],
+  activeServerId = null,
+  onSwitchServer = null,
+}) {
+  const videoRef = useRef(null);
+  const hlsRef = useRef(null);
+  const containerRef = useRef(null);
+  const hideTimer = useRef(null);
+  const menuRef = useRef(null);
+
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [muted, setMuted] = useState(false);
+  const [volume, setVolume] = useState(1);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [controlsVisible, setControlsVisible] = useState(true);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [retryToken, setRetryToken] = useState(0);
+
+  // Menu state
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [menuView, setMenuView] = useState("root"); // root | quality | servers
+  const [qualityLevels, setQualityLevels] = useState([]); // HLS levels
+  const [currentLevel, setCurrentLevel] = useState(-1);   // -1 = auto
+
+  const attach = useCallback(() => {
+    if (!streamUrl || !videoRef.current) return () => {};
+    const video = videoRef.current;
+    const absUrl = streamUrl.startsWith("http") ? streamUrl : `${BACKEND_URL}${streamUrl}`;
+
+    setLoading(true);
+    setError(null);
+    setQualityLevels([]);
+    setCurrentLevel(-1);
+
+    let destroyed = false;
+    let hls = null;
+
+    if (Hls.isSupported()) {
+      hls = new Hls({
+        // Worker offloads m3u8 parsing + demuxing → smoother playback
+        enableWorker: true,
+        lowLatencyMode: true,
+        backBufferLength: 30,
+        maxBufferLength: 30,
+        maxMaxBufferLength: 60,
+        // ABR — start auto, prefer mid-tier and switch up only if bandwidth
+        // sustained > current bitrate for ~3 s.
+        startLevel: -1,
+        abrEwmaDefaultEstimate: 1_500_000, // 1.5 Mbps initial estimate
+        abrBandWidthFactor: 0.9,
+        abrBandWidthUpFactor: 0.7,
+        liveSyncDurationCount: 3,
+        liveMaxLatencyDurationCount: 8,
+        manifestLoadingTimeOut: 12000,
+        manifestLoadingMaxRetry: 2,
+        levelLoadingTimeOut: 12000,
+        levelLoadingMaxRetry: 4,
+        fragLoadingTimeOut: 20000,
+        fragLoadingMaxRetry: 6,
+      });
+      hlsRef.current = hls;
+      hls.loadSource(absUrl);
+      hls.attachMedia(video);
+
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        if (destroyed) return;
+        setLoading(false);
+        setQualityLevels(
+          (hls.levels || []).map((lv, i) => ({
+            index: i,
+            height: lv.height,
+            width: lv.width,
+            bitrate: lv.bitrate,
+          }))
+        );
+        setCurrentLevel(hls.currentLevel);
+        video.play().catch(() => {});
+      });
+
+      hls.on(Hls.Events.LEVEL_SWITCHED, (_e, data) => {
+        if (destroyed) return;
+        setCurrentLevel(data.level);
+      });
+
+      // Track network errors so we can give up after a few retries and let the
+      // parent (DaddyTV) switch to iframe fallback.
+      let netErrors = 0;
+      const NET_MAX = 3;
+
+      hls.on(Hls.Events.ERROR, (_e, data) => {
+        if (destroyed) return;
+        try {
+          if (data.fatal) {
+            if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+              netErrors += 1;
+              if (netErrors <= NET_MAX) {
+                try { hls.startLoad(); return; } catch (_err) { /* noop */ }
+              }
+              // After NET_MAX retries → notify parent (iframe fallback path).
+              setError("Flux temporairement indisponible.");
+              setLoading(false);
+              try { onError && onError(data); } catch (_) { /* noop */ }
+              return;
+            }
+            if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+              try { hls.recoverMediaError(); return; } catch (_err) { /* noop */ }
+            }
+            setError("Flux temporairement indisponible.");
+            setLoading(false);
+            try { onError && onError(data); } catch (_) { /* noop */ }
+          }
+        } catch (_outer) {
+          /* swallow */
+        }
+      });
+    } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+      video.src = absUrl;
+      const onMeta = () => {
+        if (destroyed) return;
+        setLoading(false);
+        video.play().catch(() => {});
+      };
+      const onErr = () => {
+        if (destroyed) return;
+        setError("Flux temporairement indisponible.");
+        setLoading(false);
+        try { onError && onError({ kind: "native" }); } catch (_) { /* noop */ }
+      };
+      video.addEventListener("loadedmetadata", onMeta);
+      video.addEventListener("error", onErr);
+    } else {
+      setError("Lecteur non supporté sur ce navigateur.");
+      setLoading(false);
+    }
+
+    return () => {
+      destroyed = true;
+      if (hls) {
+        try { hls.destroy(); } catch (_) { /* noop */ }
+      }
+      hlsRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [streamUrl, retryToken]);
+
+  useEffect(() => {
+    const cleanup = attach();
+    return cleanup;
+  }, [attach]);
+
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    const onPlay = () => setIsPlaying(true);
+    const onPause = () => setIsPlaying(false);
+    const onWaiting = () => setLoading(true);
+    const onPlaying = () => {
+      setLoading(false);
+      try { onStarted && onStarted(); } catch (_) { /* noop */ }
+    };
+    v.addEventListener("play", onPlay);
+    v.addEventListener("pause", onPause);
+    v.addEventListener("waiting", onWaiting);
+    v.addEventListener("playing", onPlaying);
+    return () => {
+      v.removeEventListener("play", onPlay);
+      v.removeEventListener("pause", onPause);
+      v.removeEventListener("waiting", onWaiting);
+      v.removeEventListener("playing", onPlaying);
+    };
+  }, [onStarted]);
+
+  useEffect(() => {
+    const handler = () =>
+      setIsFullscreen(!!(document.fullscreenElement || document.webkitFullscreenElement));
+    document.addEventListener("fullscreenchange", handler);
+    document.addEventListener("webkitfullscreenchange", handler);
+    // iOS native video fullscreen
+    const v = videoRef.current;
+    const onBegin = () => setIsFullscreen(true);
+    const onEnd = () => setIsFullscreen(false);
+    if (v) {
+      v.addEventListener("webkitbeginfullscreen", onBegin);
+      v.addEventListener("webkitendfullscreen", onEnd);
+    }
+    return () => {
+      document.removeEventListener("fullscreenchange", handler);
+      document.removeEventListener("webkitfullscreenchange", handler);
+      if (v) {
+        v.removeEventListener("webkitbeginfullscreen", onBegin);
+        v.removeEventListener("webkitendfullscreen", onEnd);
+      }
+    };
+  }, []);
+
+  // Close menu on outside click
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onClick = (e) => {
+      if (menuRef.current && !menuRef.current.contains(e.target)) {
+        setMenuOpen(false);
+        setMenuView("root");
+      }
+    };
+    document.addEventListener("mousedown", onClick);
+    return () => document.removeEventListener("mousedown", onClick);
+  }, [menuOpen]);
+
+  const togglePlay = () => {
+    const v = videoRef.current;
+    if (!v) return;
+    if (v.paused) v.play().catch(() => {});
+    else v.pause();
+  };
+
+  const toggleMute = () => {
+    const v = videoRef.current;
+    if (!v) return;
+    v.muted = !v.muted;
+    setMuted(v.muted);
+  };
+
+  const onVolume = (e) => {
+    const val = parseFloat(e.target.value);
+    setVolume(val);
+    if (videoRef.current) {
+      videoRef.current.volume = val;
+      if (val === 0) {
+        videoRef.current.muted = true;
+        setMuted(true);
+      } else if (videoRef.current.muted) {
+        videoRef.current.muted = false;
+        setMuted(false);
+      }
+    }
+  };
+
+  const toggleFullscreen = () => {
+    const video = videoRef.current;
+    const container = containerRef.current;
+    // iOS Safari: standard Fullscreen API on the container is ignored.
+    // Use the native video element's webkitEnterFullscreen() — that's the only
+    // path that actually goes fullscreen on iPhone / older iPad Safari.
+    if (isIOS()) {
+      try {
+        if (video && typeof video.webkitEnterFullscreen === "function") {
+          // Make sure controls show natively while in fullscreen.
+          video.setAttribute("controls", "controls");
+          video.webkitEnterFullscreen();
+          // Remove our 'controls' attr once user exits (iOS fires webkitendfullscreen)
+          const onExit = () => {
+            video.removeAttribute("controls");
+            video.removeEventListener("webkitendfullscreen", onExit);
+          };
+          video.addEventListener("webkitendfullscreen", onExit);
+          return;
+        }
+      } catch (_) { /* fall through to standard API */ }
+    }
+    if (!container) return;
+    const doc = document;
+    const inFs = doc.fullscreenElement || doc.webkitFullscreenElement;
+    if (inFs) {
+      (doc.exitFullscreen || doc.webkitExitFullscreen)?.call(doc);
+    } else {
+      (container.requestFullscreen || container.webkitRequestFullscreen)?.call(container);
+    }
+  };
+
+  const togglePip = async () => {
+    const v = videoRef.current;
+    if (!v) return;
+    try {
+      if (document.pictureInPictureElement) {
+        await document.exitPictureInPicture();
+      } else {
+        await v.requestPictureInPicture();
+      }
+    } catch {
+      toast.error("Picture-in-Picture indisponible");
+    }
+  };
+
+  const handleRetry = () => {
+    // Immediate visual feedback while parent re-resolves
+    setError(null);
+    setLoading(true);
+    if (onRetry) onRetry();
+    else setRetryToken((t) => t + 1);
+  };
+
+  const copyEmbedUrl = async () => {
+    if (!channel?.id) return;
+    const embedUrl = `${window.location.origin}/embed/${encodeURIComponent(channel.id)}`;
+    try {
+      await navigator.clipboard.writeText(embedUrl);
+      toast.success("URL embed copiée", { description: embedUrl, duration: 3500 });
+    } catch (_e) {
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = embedUrl;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+        toast.success("URL embed copiée");
+      } catch {
+        toast.error("Impossible de copier l'URL");
+      }
+    }
+  };
+
+  const setHlsLevel = (level) => {
+    if (hlsRef.current) {
+      hlsRef.current.currentLevel = level;
+      setCurrentLevel(level);
+    }
+  };
+
+  const showControls = useCallback(() => {
+    setControlsVisible(true);
+    if (hideTimer.current) clearTimeout(hideTimer.current);
+    if (!menuOpen) {
+      hideTimer.current = setTimeout(() => setControlsVisible(false), 3000);
+    }
+  }, [menuOpen]);
+
+  // Start the auto-hide timer as soon as the player mounts so the UI
+  // retracts even if the user never moves their mouse.
+  useEffect(() => {
+    showControls();
+    return () => {
+      if (hideTimer.current) clearTimeout(hideTimer.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Tap on touch devices toggles controls (and starts hide timer when shown).
+  const handleTouchStart = (_e) => {
+    if (controlsVisible) {
+      setControlsVisible(false);
+      if (hideTimer.current) clearTimeout(hideTimer.current);
+    } else {
+      showControls();
+    }
+  };
+
+  const formatLevel = (lv) => {
+    if (!lv) return "Auto";
+    if (lv.height) return `${lv.height}p`;
+    return `${Math.round((lv.bitrate || 0) / 1000)} kbps`;
+  };
+  const currentQualityLabel =
+    currentLevel === -1 || !qualityLevels.length
+      ? "Auto"
+      : formatLevel(qualityLevels.find((l) => l.index === currentLevel));
+
+  return (
+    <div
+      className={`player-shell ${controlsVisible ? "" : "ui-hidden"}`}
+      data-testid="video-player-shell"
+      onMouseMove={showControls}
+      onMouseLeave={() => {
+        if (hideTimer.current) clearTimeout(hideTimer.current);
+        if (!menuOpen) setControlsVisible(false);
+      }}
+      onTouchStart={handleTouchStart}
+    >
+      <div className="player-frame" ref={containerRef}>
+        <video
+          ref={videoRef}
+          playsInline
+          autoPlay
+          data-testid="video-element"
+          onClick={togglePlay}
+        />
+
+        {loading && !error && (
+          <div className="absolute inset-0 flex items-center justify-center bg-black/40 pointer-events-none">
+            <Loader2 className="animate-spin text-white/90" size={42} />
+          </div>
+        )}
+
+        {error && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/75 px-6 text-center gap-3">
+            <p className="text-white/90 text-base">{error}</p>
+            <div className="flex gap-2">
+              <button onClick={handleRetry} className="ad-btn-secondary" data-testid="player-error-retry-btn">
+                <RotateCcw size={16} className="inline-block mr-2" />
+                Réessayer
+              </button>
+              <button onClick={onClose} className="ad-btn-secondary" data-testid="player-error-close-btn">
+                Fermer
+              </button>
+            </div>
+          </div>
+        )}
+
+        <div className={`player-controls ${controlsVisible ? "visible" : ""}`}>
+          {/* Top bar */}
+          <div className="player-top">
+            <div className="flex items-center gap-3 min-w-0 flex-1">
+              {channel?.logo ? (
+                <img
+                  src={channel.logo}
+                  alt=""
+                  className="player-top-logo"
+                  onError={(e) => { e.currentTarget.style.display = "none"; }}
+                />
+              ) : null}
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="live-badge"><span className="dot" />En direct</span>
+                  <h3 className="text-white text-base font-semibold truncate" data-testid="player-channel-name">
+                    {channel?.name}
+                  </h3>
+                </div>
+                <EpgNowBadge channelName={channel?.name || ""} />
+              </div>
+            </div>
+            <button onClick={onClose} className="player-btn" data-testid="player-close-btn" aria-label="Fermer">
+              <X size={20} />
+            </button>
+          </div>
+
+          {/* Bottom bar */}
+          <div className="player-bottom">
+            <button onClick={togglePlay} className="player-btn" data-testid="video-play-btn" aria-label="Lecture/Pause">
+              {isPlaying ? <Pause size={20} /> : <Play size={20} />}
+            </button>
+
+            <div className="flex items-center gap-2">
+              <button onClick={toggleMute} className="player-btn" data-testid="video-mute-btn" aria-label="Son">
+                {muted || volume === 0 ? <VolumeX size={20} /> : <Volume2 size={20} />}
+              </button>
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.05"
+                value={muted ? 0 : volume}
+                onChange={onVolume}
+                className="volume-slider"
+                data-testid="video-volume-slider"
+              />
+            </div>
+
+            <div className="flex-1" />
+
+            <button onClick={toggleFullscreen} className="player-btn" data-testid="video-fullscreen-btn" aria-label="Plein écran">
+              {isFullscreen ? <Minimize size={20} /> : <Maximize size={20} />}
+            </button>
+
+            {/* Menu (kebab) */}
+            <div className="player-menu-wrap" ref={menuRef}>
+              <button
+                onClick={() => { setMenuOpen((o) => !o); setMenuView("root"); }}
+                className="player-btn"
+                data-testid="video-menu-btn"
+                aria-label="Menu"
+              >
+                <MoreVertical size={20} />
+              </button>
+
+              {menuOpen && (
+                <div className="player-menu" data-testid="video-menu">
+                  {menuView === "root" && (
+                    <>
+                      {servers && servers.length > 1 && (
+                        <button
+                          className="menu-item"
+                          onClick={() => setMenuView("servers")}
+                          data-testid="menu-servers"
+                        >
+                          <span className="flex items-center gap-2">
+                            <Server size={16} />
+                            Serveur
+                          </span>
+                          <span className="menu-value">
+                            {(servers.find((s) => s.id === activeServerId)?.name) || "—"}
+                            <ChevronRight size={14} />
+                          </span>
+                        </button>
+                      )}
+
+                      {qualityLevels.length > 1 && (
+                        <button
+                          className="menu-item"
+                          onClick={() => setMenuView("quality")}
+                          data-testid="menu-quality"
+                        >
+                          <span className="flex items-center gap-2">
+                            <Wand2 size={16} />
+                            Qualité
+                          </span>
+                          <span className="menu-value">
+                            {currentQualityLabel}
+                            <ChevronRight size={14} />
+                          </span>
+                        </button>
+                      )}
+
+                      <button
+                        className="menu-item"
+                        onClick={() => { handleRetry(); setMenuOpen(false); }}
+                        data-testid="menu-reload"
+                      >
+                        <span className="flex items-center gap-2">
+                          <RotateCcw size={16} />
+                          Recharger le flux
+                        </span>
+                      </button>
+
+                      <button
+                        className="menu-item"
+                        onClick={() => { togglePip(); setMenuOpen(false); }}
+                        data-testid="menu-pip"
+                      >
+                        <span className="flex items-center gap-2">
+                          <PictureInPicture2 size={16} />
+                          Picture-in-Picture
+                        </span>
+                      </button>
+
+                      <button
+                        className="menu-item"
+                        onClick={() => { copyEmbedUrl(); setMenuOpen(false); }}
+                        data-testid="menu-embed"
+                      >
+                        <span className="flex items-center gap-2">
+                          <LinkIcon size={16} />
+                          Copier l'URL embed
+                        </span>
+                      </button>
+                    </>
+                  )}
+
+                  {menuView === "servers" && (
+                    <>
+                      <button className="menu-back" onClick={() => setMenuView("root")} data-testid="servers-back">
+                        <ChevronLeft size={14} />
+                        Serveur
+                      </button>
+                      {(servers || []).map((srv) => (
+                        <button
+                          key={srv.id}
+                          className={`menu-radio ${activeServerId === srv.id ? "active" : ""}`}
+                          onClick={() => {
+                            onSwitchServer?.(srv);
+                            setMenuOpen(false);
+                            setMenuView("root");
+                          }}
+                          data-testid={`server-${srv.id}`}
+                        >
+                          {srv.name}
+                          {activeServerId === srv.id && <Check size={14} className="check" />}
+                        </button>
+                      ))}
+                    </>
+                  )}
+
+                  {menuView === "quality" && (
+                    <>
+                      <button className="menu-back" onClick={() => setMenuView("root")}>
+                        <ChevronLeft size={14} />
+                        Qualité
+                      </button>
+                      <button
+                        className={`menu-radio ${currentLevel === -1 ? "active" : ""}`}
+                        onClick={() => setHlsLevel(-1)}
+                        data-testid="quality-auto"
+                      >
+                        Auto
+                        {currentLevel === -1 && <Check size={14} className="check" />}
+                      </button>
+                      {qualityLevels.length === 0 && (
+                        <div className="menu-title" style={{ color: "rgba(255,255,255,0.4)", fontWeight: 400 }}>
+                          Un seul niveau disponible
+                        </div>
+                      )}
+                      {qualityLevels.map((lv) => (
+                        <button
+                          key={lv.index}
+                          className={`menu-radio ${currentLevel === lv.index ? "active" : ""}`}
+                          onClick={() => setHlsLevel(lv.index)}
+                          data-testid={`quality-${lv.height || lv.index}`}
+                        >
+                          {formatLevel(lv)}
+                          {currentLevel === lv.index && <Check size={14} className="check" />}
+                        </button>
+                      ))}
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export { Loader2 };
