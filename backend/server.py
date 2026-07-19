@@ -2203,6 +2203,188 @@ async def admin_global_stats(authorization: Optional[str] = Header(None)):
     return result
 
 
+def _delta_pct(cur: int, prev: int):
+    """Percent change vs previous period. None when there is no baseline."""
+    if prev == 0:
+        return None if cur == 0 else 100.0
+    return round((cur - prev) / prev * 100.0, 1)
+
+
+@api_router.get("/admin/analytics-overview")
+async def admin_analytics_overview(
+    authorization: Optional[str] = Header(None),
+    range_: str = Query("7d", alias="range"),
+):
+    """Rich analytics for the admin dashboard (admin-only).
+
+    Returns, for the selected range:
+      * kpis         — total_plays / unique_visitors / member_plays / vip_plays /
+                       guest_plays / embed_plays, each with {current, previous,
+                       delta_pct} (delta vs the immediately preceding period).
+      * distribution — audience split {member, vip, guest, embed}.
+      * top_channels — most-played channels in the range (name + country + plays).
+      * top_countries— most-played countries in the range.
+      * peak         — busiest time bucket in the range.
+      * bucket       — "hour" for 24h, otherwise "day".
+    """
+    jwt = (authorization or "").removeprefix("Bearer ").strip()
+    await _require_admin(jwt)
+
+    now = datetime.now(timezone.utc)
+    rng = (range_ or "7d").lower()
+    if rng == "24h":
+        span = timedelta(hours=24)
+        bucket = "hour"
+        fmt = "%Y-%m-%dT%H:00:00Z"
+    elif rng == "30d":
+        span = timedelta(days=30)
+        bucket = "day"
+        fmt = "%Y-%m-%dT00:00:00Z"
+    elif rng in ("1y", "365d"):
+        rng = "1y"
+        span = timedelta(days=365)
+        bucket = "day"
+        fmt = "%Y-%m-%dT00:00:00Z"
+    else:
+        rng = "7d"
+        span = timedelta(days=7)
+        bucket = "day"
+        fmt = "%Y-%m-%dT00:00:00Z"
+
+    start = now - span
+    prev_start = start - span
+
+    cache_key = f"ns:analytics:{rng}"
+    cached = await _cache_get_json(cache_key)
+    if cached is not None:
+        return cached
+
+    async def _period_totals(gte, lt):
+        """Aggregate totals + unique IPs for a [gte, lt) window."""
+        pipeline = [
+            {"$match": {"ts": {"$gte": gte, "$lt": lt}}},
+            {"$group": {
+                "_id": None,
+                "total": {"$sum": 1},
+                "members_raw": {"$sum": {"$cond": [{"$eq": ["$is_member", True]}, 1, 0]}},
+                "vip": {"$sum": {"$cond": [{"$eq": ["$is_vip", True]}, 1, 0]}},
+                "embed": {"$sum": {"$cond": [{"$eq": ["$is_embed", True]}, 1, 0]}},
+                "ips": {"$addToSet": "$ip"},
+            }},
+        ]
+        try:
+            agg = await db.views.aggregate(pipeline, allowDiskUse=True).to_list(1)
+        except Exception as e:
+            logger.warning(f"analytics period aggregate failed: {e}")
+            agg = []
+        if not agg:
+            return {"total": 0, "members_raw": 0, "vip": 0, "embed": 0, "unique": 0}
+        r = agg[0]
+        ips = [ip for ip in (r.get("ips") or []) if ip]
+        return {
+            "total": int(r.get("total") or 0),
+            "members_raw": int(r.get("members_raw") or 0),
+            "vip": int(r.get("vip") or 0),
+            "embed": int(r.get("embed") or 0),
+            "unique": len(set(ips)),
+        }
+
+    async def _top_and_peak(gte, lt):
+        """Per-channel counts + per-bucket totals for the current window."""
+        pipeline = [
+            {"$match": {"ts": {"$gte": gte, "$lt": lt}}},
+            {"$facet": {
+                "byChannel": [
+                    {"$group": {"_id": "$channel_id", "plays": {"$sum": 1}}},
+                    {"$sort": {"plays": -1}},
+                    {"$limit": 60},
+                ],
+                "byBucket": [
+                    {"$group": {
+                        "_id": {"$dateToString": {"format": fmt, "date": "$ts", "timezone": "UTC"}},
+                        "total": {"$sum": 1},
+                    }},
+                    {"$sort": {"total": -1}},
+                    {"$limit": 1},
+                ],
+            }},
+        ]
+        try:
+            agg = await db.views.aggregate(pipeline, allowDiskUse=True).to_list(1)
+        except Exception as e:
+            logger.warning(f"analytics top aggregate failed: {e}")
+            agg = []
+        facet = agg[0] if agg else {}
+        return facet.get("byChannel", []), facet.get("byBucket", [])
+
+    cur, prev, (by_channel, by_bucket) = await asyncio.gather(
+        _period_totals(start, now),
+        _period_totals(prev_start, start),
+        _top_and_peak(start, now),
+    )
+
+    cur_member_only = max(0, cur["members_raw"] - cur["vip"])
+    cur_guest = max(0, cur["total"] - cur["members_raw"])
+    prev_member_only = max(0, prev["members_raw"] - prev["vip"])
+    prev_guest = max(0, prev["total"] - prev["members_raw"])
+
+    def _kpi(cur_v, prev_v):
+        return {"current": cur_v, "previous": prev_v, "delta_pct": _delta_pct(cur_v, prev_v)}
+
+    kpis = {
+        "total_plays": _kpi(cur["total"], prev["total"]),
+        "unique_visitors": _kpi(cur["unique"], prev["unique"]),
+        "member_plays": _kpi(cur_member_only, prev_member_only),
+        "vip_plays": _kpi(cur["vip"], prev["vip"]),
+        "guest_plays": _kpi(cur_guest, prev_guest),
+        "embed_plays": _kpi(cur["embed"], prev["embed"]),
+    }
+
+    # Resolve channel_id -> {name, country} + roll up per-country totals.
+    channels = await get_channels()
+    by_id = {c["id"]: c for c in channels}
+    top_channels = []
+    country_counts: Dict[str, int] = {}
+    for row in by_channel:
+        cid = row.get("_id")
+        plays = int(row.get("plays") or 0)
+        c = by_id.get(cid)
+        name = c.get("name", cid) if c else (cid or "—")
+        country = (c.get("country") if c else "") or "—"
+        if len(top_channels) < 8:
+            top_channels.append({"id": cid, "name": name, "country": country, "plays": plays})
+        country_counts[country] = country_counts.get(country, 0) + plays
+
+    top_countries = [
+        {"country": k, "plays": v}
+        for k, v in sorted(country_counts.items(), key=lambda kv: kv[1], reverse=True)[:8]
+    ]
+
+    peak = None
+    if by_bucket:
+        b = by_bucket[0]
+        peak = {"t": b.get("_id"), "total": int(b.get("total") or 0)}
+
+    result = {
+        "range": rng,
+        "bucket": bucket,
+        "start": start.isoformat(),
+        "kpis": kpis,
+        "distribution": {
+            "member": cur_member_only,
+            "vip": cur["vip"],
+            "guest": cur_guest,
+            "embed": cur["embed"],
+        },
+        "top_channels": top_channels,
+        "top_countries": top_countries,
+        "peak": peak,
+    }
+    await _cache_set_json(cache_key, result, 60)
+    return result
+
+
+
 
 
 

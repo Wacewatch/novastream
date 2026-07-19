@@ -39,6 +39,7 @@ import { useAuth } from "@/context/AuthContext";
 import { supabase } from "@/lib/supabase";
 import { toast } from "sonner";
 import StatsTimeseriesPanel from "@/components/admin/StatsTimeseriesPanel";
+import AnalyticsOverview from "@/components/admin/AnalyticsOverview";
 import TopBar from "@/components/TopBar";
 
 const BACKEND_URL = (process.env.NEXT_PUBLIC_BACKEND_URL || process.env.REACT_APP_BACKEND_URL || (typeof window !== 'undefined' ? window.location.origin : ''));
@@ -818,6 +819,9 @@ export default function Admin() {
             </div>
           )}
         </section>
+
+        {/* === Vue d'ensemble analytics (KPI + tendances + top chaînes/pays) === */}
+        <AnalyticsOverview getAuthHeader={async () => { const { data: { session } } = await supabase.auth.getSession(); return session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}; }} />
 
         {/* === Statistiques détaillées (graphique 24h / 7j / 30j / 1an) === */}
         <StatsTimeseriesPanel getAuthHeader={async () => { const { data: { session } } = await supabase.auth.getSession(); return session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}; }} />
