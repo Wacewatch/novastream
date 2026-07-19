@@ -94,6 +94,7 @@ export default function AnalyticsOverview({ getAuthHeader }) {
   const distribution = data?.distribution || {};
   const topChannels = data?.top_channels || [];
   const topCountries = data?.top_countries || [];
+  const bySource = data?.by_source || [];
   const peak = data?.peak || null;
 
   const distData = useMemo(
@@ -352,6 +353,34 @@ export default function AnalyticsOverview({ getAuthHeader }) {
           <p className="text-sm text-white/70 mt-3 pt-3 border-t border-white/5">{peakWhen}</p>
         </div>
       </div>
+
+      {/* Lectures par source */}
+      {bySource.length > 0 && (
+        <div className="rounded-xl border border-white/10 bg-black/30 p-4 mt-4" data-testid="analytics-by-source">
+          <div className="flex items-center gap-2 mb-3 text-white/70">
+            <Radio size={15} className="text-pink-400" />
+            <span className="text-sm font-semibold">Lectures par source ({rangeLabel})</span>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2.5">
+            {bySource.map((s, i) => {
+              const maxSrc = bySource.reduce((m, x) => Math.max(m, x.plays || 0), 0) || 1;
+              const color = CHANNEL_COLORS[i % CHANNEL_COLORS.length];
+              return (
+                <div key={s.source} className="flex items-center gap-3">
+                  <span className="text-sm text-white/80 w-24 truncate">{s.label}</span>
+                  <div className="flex-1 h-2.5 rounded-full bg-white/5 overflow-hidden">
+                    <div
+                      className="h-full rounded-full"
+                      style={{ width: `${Math.max(3, (s.plays / maxSrc) * 100)}%`, background: color }}
+                    />
+                  </div>
+                  <span className="text-xs text-white/70 tabular-nums w-16 text-right">{fmt(s.plays)}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </section>
   );
 }

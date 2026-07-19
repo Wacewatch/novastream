@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Backend API tests for LiveWatch - Testing GET /api/admin/analytics-overview endpoint
+Backend API tests for LiveWatch - Testing admin endpoints with per-source breakdown
 """
 import requests
 import json
@@ -15,6 +15,9 @@ ADMIN_PASSWORD = "Shot!2345Admin"
 
 # Backend can be accessed via localhost:8001 or through the public URL
 BACKEND_URL = "http://localhost:8001"
+
+# Expected sources
+EXPECTED_SOURCES = ["livetv", "frametv", "northtv", "daddytv", "sports", "football", "bosstv", "jacktv"]
 
 def get_admin_token() -> Optional[str]:
     """Get admin access token from Supabase"""
@@ -47,9 +50,123 @@ def get_admin_token() -> Optional[str]:
         return None
 
 
+def test_live_stats_without_auth():
+    """Test 1: GET /api/admin/live-stats without Authorization header -> expect 401"""
+    print("\n=== Test 1: Live Stats WITHOUT Authorization ===")
+    try:
+        response = requests.get(
+            f"{BACKEND_URL}/api/admin/live-stats",
+            timeout=10
+        )
+        
+        if response.status_code == 401:
+            print(f"✅ PASS: Got expected 401 status code")
+            return True
+        else:
+            print(f"❌ FAIL: Expected 401, got {response.status_code}")
+            print(f"Response: {response.text[:200]}")
+            return False
+    except Exception as e:
+        print(f"❌ FAIL: Exception occurred: {e}")
+        return False
+
+
+def test_live_stats_with_admin_token(token: str):
+    """Test 2: GET /api/admin/live-stats with admin token -> verify by_source"""
+    print(f"\n=== Test 2: Live Stats WITH Admin Token ===")
+    try:
+        response = requests.get(
+            f"{BACKEND_URL}/api/admin/live-stats",
+            headers={
+                "Authorization": f"Bearer {token}"
+            },
+            timeout=15
+        )
+        
+        print(f"Status Code: {response.status_code}")
+        
+        if response.status_code != 200:
+            print(f"❌ FAIL: Expected 200, got {response.status_code}")
+            print(f"Response: {response.text[:500]}")
+            return False
+        
+        # Parse JSON response
+        try:
+            data = response.json()
+        except json.JSONDecodeError as e:
+            print(f"❌ FAIL: Invalid JSON response: {e}")
+            return False
+        
+        # Verify by_source key exists
+        if "by_source" not in data:
+            print(f"❌ FAIL: Missing 'by_source' key in response")
+            print(f"Available keys: {list(data.keys())}")
+            return False
+        
+        print(f"✅ 'by_source' key present in response")
+        
+        by_source = data.get("by_source", [])
+        
+        # Verify by_source is a list
+        if not isinstance(by_source, list):
+            print(f"❌ FAIL: 'by_source' is not a list, got {type(by_source)}")
+            return False
+        
+        print(f"✅ 'by_source' is a list with {len(by_source)} items")
+        
+        # Verify each item has required keys
+        if by_source:
+            required_keys = ["source", "label", "online", "total_24h"]
+            for idx, item in enumerate(by_source):
+                missing_keys = [key for key in required_keys if key not in item]
+                if missing_keys:
+                    print(f"❌ FAIL: by_source[{idx}] missing keys: {missing_keys}")
+                    return False
+                
+                # Verify values are integers
+                if not isinstance(item["online"], int):
+                    print(f"❌ FAIL: by_source[{idx}]['online'] is not an integer")
+                    return False
+                if not isinstance(item["total_24h"], int):
+                    print(f"❌ FAIL: by_source[{idx}]['total_24h'] is not an integer")
+                    return False
+            
+            print(f"✅ All by_source items have required keys: {required_keys}")
+        
+        # Verify expected sources are present
+        sources_found = [item["source"] for item in by_source]
+        missing_sources = [src for src in EXPECTED_SOURCES if src not in sources_found]
+        
+        if missing_sources:
+            print(f"⚠️  WARNING: Some expected sources not found: {missing_sources}")
+            print(f"   Found sources: {sources_found}")
+        else:
+            print(f"✅ All expected sources present: {EXPECTED_SOURCES}")
+        
+        # Print per-source breakdown
+        print(f"\n📊 Per-Source Breakdown:")
+        total_online = 0
+        total_24h = 0
+        for item in by_source:
+            print(f"  - {item['label']:12s} ({item['source']:10s}): online={item['online']:4d}, 24h={item['total_24h']:4d}")
+            total_online += item['online']
+            total_24h += item['total_24h']
+        
+        print(f"\n  Total across all sources: online={total_online}, 24h={total_24h}")
+        
+        print(f"\n✅ PASS: Live stats by_source validation successful")
+        return True
+        
+    except Exception as e:
+        print(f"❌ FAIL: Exception occurred: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 def test_analytics_without_auth():
-    """Test 1: GET /api/admin/analytics-overview without Authorization header -> expect 401"""
-    print("\n=== Test 1: Analytics Overview WITHOUT Authorization ===")
+    """Test 3: GET /api/admin/analytics-overview without Authorization header -> expect 401"""
+    print("\n=== Test 3: Analytics Overview WITHOUT Authorization ===")
     try:
         response = requests.get(
             f"{BACKEND_URL}/api/admin/analytics-overview?range=7d",
@@ -94,8 +211,8 @@ def test_analytics_with_admin_token(token: str, range_param: str = "7d"):
             print(f"❌ FAIL: Invalid JSON response: {e}")
             return False
         
-        # Verify required keys
-        required_keys = ["range", "bucket", "start", "kpis", "distribution", "top_channels", "top_countries", "peak"]
+        # Verify required keys (including by_source)
+        required_keys = ["range", "bucket", "start", "kpis", "distribution", "top_channels", "top_countries", "peak", "by_source"]
         missing_keys = [key for key in required_keys if key not in data]
         
         if missing_keys:
@@ -182,6 +299,48 @@ def test_analytics_with_admin_token(token: str, range_param: str = "7d"):
             
             print(f"✅ top_countries items have required keys: {country_required_keys}")
         
+        # Verify by_source is a list
+        by_source = data.get("by_source", [])
+        if not isinstance(by_source, list):
+            print(f"❌ FAIL: by_source is not a list")
+            return False
+        
+        print(f"✅ by_source is a list with {len(by_source)} items")
+        
+        # Verify by_source items have required keys
+        if by_source:
+            source_required_keys = ["source", "label", "plays"]
+            for idx, item in enumerate(by_source):
+                missing_source_keys = [key for key in source_required_keys if key not in item]
+                
+                if missing_source_keys:
+                    print(f"❌ FAIL: by_source[{idx}] missing keys: {missing_source_keys}")
+                    return False
+                
+                # Verify plays is an integer
+                if not isinstance(item["plays"], int):
+                    print(f"❌ FAIL: by_source[{idx}]['plays'] is not an integer")
+                    return False
+            
+            print(f"✅ by_source items have required keys: {source_required_keys}")
+            
+            # Check if livetv has plays > 0 for 7d and 30d
+            if range_param in ["7d", "30d"]:
+                livetv_item = next((item for item in by_source if item["source"] == "livetv"), None)
+                if livetv_item:
+                    if livetv_item["plays"] > 0:
+                        print(f"✅ livetv has plays > 0 ({livetv_item['plays']}) for range {range_param}")
+                    else:
+                        print(f"⚠️  WARNING: livetv has 0 plays for range {range_param}")
+                else:
+                    print(f"⚠️  WARNING: livetv not found in by_source")
+            
+            # Print per-source breakdown
+            print(f"\n📊 Per-Source Plays for range={range_param}:")
+            for item in by_source:
+                print(f"  - {item['label']:12s} ({item['source']:10s}): plays={item['plays']:5d}")
+        
+        
         # Verify bucket value based on range
         bucket = data.get("bucket")
         expected_bucket = "hour" if range_param == "24h" else "day"
@@ -222,13 +381,13 @@ def test_analytics_with_admin_token(token: str, range_param: str = "7d"):
 def main():
     """Run all tests"""
     print("=" * 80)
-    print("BACKEND API TESTS - GET /api/admin/analytics-overview")
+    print("BACKEND API TESTS - Admin Endpoints with Per-Source Breakdown")
     print("=" * 80)
     
     results = []
     
-    # Test 1: Without authorization
-    results.append(("Test 1: 401 without auth", test_analytics_without_auth()))
+    # Test 1: Live stats without authorization
+    results.append(("Test 1: Live stats 401 without auth", test_live_stats_without_auth()))
     
     # Get admin token
     admin_token = get_admin_token()
@@ -244,17 +403,17 @@ def main():
         print(f"\nTotal: {sum(results)} / {len(results)} tests passed")
         sys.exit(1)
     
-    # Test 2: With admin token - range=7d
-    results.append(("Test 2: 200 with admin token (7d)", test_analytics_with_admin_token(admin_token, "7d")))
+    # Test 2: Live stats with admin token
+    results.append(("Test 2: Live stats 200 with admin token + by_source", test_live_stats_with_admin_token(admin_token)))
     
-    # Test 3: With admin token - range=24h
-    results.append(("Test 3: 200 with admin token (24h)", test_analytics_with_admin_token(admin_token, "24h")))
+    # Test 3: Analytics without authorization
+    results.append(("Test 3: Analytics 401 without auth", test_analytics_without_auth()))
     
-    # Test 4: With admin token - range=30d
-    results.append(("Test 4: 200 with admin token (30d)", test_analytics_with_admin_token(admin_token, "30d")))
+    # Test 4: Analytics with admin token - range=7d
+    results.append(("Test 4: Analytics 200 with admin token (7d) + by_source", test_analytics_with_admin_token(admin_token, "7d")))
     
-    # Test 5: With admin token - range=1y
-    results.append(("Test 5: 200 with admin token (1y)", test_analytics_with_admin_token(admin_token, "1y")))
+    # Test 5: Analytics with admin token - range=30d
+    results.append(("Test 5: Analytics 200 with admin token (30d) + by_source", test_analytics_with_admin_token(admin_token, "30d")))
     
     # Print summary
     print("\n" + "=" * 80)

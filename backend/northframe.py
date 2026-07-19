@@ -14,7 +14,7 @@ from typing import Optional, List, Dict, Any
 
 import httpx
 from urllib.parse import quote
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Header
 
 logger = logging.getLogger("livewatch.northframe")
 
@@ -45,11 +45,47 @@ NORTH_TTL = 600
 NORTH_STREAM_TTL = 120
 
 _get_http_client = None  # injected
+_record_view = None  # injected
 
 
-def init(get_http_client):
-    global _get_http_client
+def init(get_http_client, record_view=None):
+    global _get_http_client, _record_view
     _get_http_client = get_http_client
+    _record_view = record_view
+
+
+def _track_nf_view(request, authorization, channel_id, source, vip=0, embed=0):
+    """Best-effort, non-blocking per-source view recording for NorthTV/FrameTV."""
+    if _record_view is None:
+        return
+    try:
+        is_member = bool(
+            authorization
+            and authorization.lower().startswith("bearer ")
+            and len(authorization) > 20
+        )
+        xff = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip() if request else ""
+        ip = xff or (request.client.host if (request and request.client) else "")
+        user_id = None
+        if is_member:
+            try:
+                token = authorization.split(" ", 1)[1].strip()
+                seg = token.split(".")
+                if len(seg) >= 2:
+                    import base64 as _b64, json as _json
+                    body = seg[1] + "=" * (-len(seg[1]) % 4)
+                    payload = _json.loads(_b64.urlsafe_b64decode(body).decode("utf-8", errors="ignore"))
+                    sub = payload.get("sub")
+                    if isinstance(sub, str) and sub:
+                        user_id = sub
+            except Exception:
+                user_id = None
+        asyncio.create_task(_record_view(
+            channel_id, is_member=is_member, is_vip=bool(is_member and vip),
+            is_embed=bool(embed), ip=ip, user_id=user_id, source=source,
+        ))
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"track nf view failed: {e}")
 
 
 async def _client() -> httpx.AsyncClient:
@@ -204,7 +240,7 @@ async def resolve_north_stream(slug: str) -> Optional[str]:
 
 
 @router.get("/north/stream/{slug}")
-async def north_stream(slug: str):
+async def north_stream(slug: str, request: Request = None, authorization: Optional[str] = Header(None), vip: int = 0, embed: int = 0):
     slug_clean = re.sub(r"[^a-zA-Z0-9_\-]", "", slug or "")
     if not slug_clean:
         raise HTTPException(status_code=400, detail="bad slug")
@@ -214,6 +250,7 @@ async def north_stream(slug: str):
     except Exception as e:
         logger.warning(f"north stream error {slug}: {e}")
         url = None
+    _track_nf_view(request, authorization, f"north:{slug_clean}", "northtv", vip, embed)
     if url:
         return {"success": True, "stream_url": url, "iframe_url": iframe_url, "type": "hls"}
     # No m3u8 could be extracted (JS-obfuscated player): fall back to iframe.
@@ -393,7 +430,7 @@ async def resolve_frame_stream(cid: str) -> Optional[str]:
 
 
 @router.get("/frame/stream/{cid}")
-async def frame_stream(cid: str):
+async def frame_stream(cid: str, request: Request = None, authorization: Optional[str] = Header(None), vip: int = 0, embed: int = 0):
     try:
         url = await resolve_frame_stream(cid)
     except Exception as e:
@@ -401,6 +438,7 @@ async def frame_stream(cid: str):
         raise HTTPException(status_code=502, detail="frame upstream error")
     if not url:
         raise HTTPException(status_code=404, detail="stream not found")
+    _track_nf_view(request, authorization, f"frame:{cid}", "frametv", vip, embed)
     return {"success": True, "stream_url": url, "type": "hls"}
 
 

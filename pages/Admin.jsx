@@ -40,6 +40,7 @@ import { supabase } from "@/lib/supabase";
 import { toast } from "sonner";
 import StatsTimeseriesPanel from "@/components/admin/StatsTimeseriesPanel";
 import AnalyticsOverview from "@/components/admin/AnalyticsOverview";
+import LiveSourcesPanel from "@/components/admin/LiveSourcesPanel";
 import TopBar from "@/components/TopBar";
 
 const BACKEND_URL = (process.env.NEXT_PUBLIC_BACKEND_URL || process.env.REACT_APP_BACKEND_URL || (typeof window !== 'undefined' ? window.location.origin : ''));
@@ -53,6 +54,7 @@ async function authHeader() {
 
 export default function Admin() {
   const { user, loading, isAdmin } = useAuth();
+  const [tab, setTab] = useState("overview");
   const [users, setUsers] = useState([]);
   const [usersLoading, setUsersLoading] = useState(true);
   const [vipKeys, setVipKeys] = useState([]);
@@ -539,7 +541,32 @@ export default function Admin() {
       />
 
       <main className="w-full mx-auto px-4 sm:px-6 lg:px-8 xl:px-12 py-6 space-y-6">
-        {/* Global Stats cards */}
+        {/* Tab navigation */}
+        <div className="sticky top-2 z-20 flex flex-wrap gap-1.5 p-1.5 rounded-2xl glass-heavy border border-white/10 w-fit mx-auto" data-testid="admin-tabs">
+          {[
+            { id: "overview", label: "Vue d'ensemble", icon: LayoutDashboard },
+            { id: "live", label: "En direct", icon: Activity },
+            { id: "analytics", label: "Analytics", icon: Tv2 },
+            { id: "users", label: "Utilisateurs", icon: UsersIcon },
+            { id: "config", label: "Configuration", icon: Server },
+          ].map((t) => (
+            <button
+              key={t.id}
+              onClick={() => setTab(t.id)}
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition ${
+                tab === t.id
+                  ? "bg-[#ff2e63] text-white shadow-lg shadow-[#ff2e63]/20"
+                  : "text-white/60 hover:text-white hover:bg-white/5"
+              }`}
+              data-testid={`admin-tab-${t.id}`}
+            >
+              <t.icon size={15} />
+              <span className="hidden sm:inline">{t.label}</span>
+            </button>
+          ))}
+        </div>
+
+        {tab === 'overview' && (
         <section className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3" data-testid="admin-stats">
           {[
             { label: "Utilisateurs", value: stats.total.toLocaleString("fr-FR"), icon: UsersIcon, color: "text-white" },
@@ -556,7 +583,10 @@ export default function Admin() {
           ))}
         </section>
 
+        )}
+
         {/* System stats: CPU / RAM / Network / System */}
+        {tab === 'overview' && (
         <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3" data-testid="admin-system-stats">
           <SystemCard
             title="CPU App"
@@ -608,7 +638,10 @@ export default function Admin() {
           </div>
         </section>
 
+        )}
+
         {/* Statistiques en direct */}
+        {tab === 'live' && (
         <section className="glass-heavy rounded-2xl p-5 border border-white/10" data-testid="admin-live-section">
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-lg font-bold flex items-center gap-2">
@@ -694,7 +727,10 @@ export default function Admin() {
           </div>
         </section>
 
+        )}
+
         {/* Top Référents */}
+        {tab === 'analytics' && (
         <section className="glass-heavy rounded-2xl p-5 border border-white/10" data-testid="admin-referrers-section">
           <div className="flex items-center justify-between mb-4 gap-2 flex-wrap">
             <h3 className="text-lg font-bold flex items-center gap-2">
@@ -820,13 +856,28 @@ export default function Admin() {
           )}
         </section>
 
+        )}
+
+        {/* === Stats en direct par source (LiveTV / FrameTV / NorthTV / DaddyTV / Sports…) === */}
+        {tab === 'live' && (
+        <LiveSourcesPanel bySource={liveStats?.by_source} />
+
+        )}
+
         {/* === Vue d'ensemble analytics (KPI + tendances + top chaînes/pays) === */}
+        {tab === 'analytics' && (
         <AnalyticsOverview getAuthHeader={async () => { const { data: { session } } = await supabase.auth.getSession(); return session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}; }} />
 
+        )}
+
         {/* === Statistiques détaillées (graphique 24h / 7j / 30j / 1an) === */}
+        {tab === 'analytics' && (
         <StatsTimeseriesPanel getAuthHeader={async () => { const { data: { session } } = await supabase.auth.getSession(); return session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}; }} />
 
+        )}
+
         {/* VIP keys */}
+        {tab === 'users' && (
         <section className="glass-heavy rounded-2xl p-5 border border-white/10" data-testid="admin-vip-keys-section">
           <div className="flex items-center justify-between mb-3 gap-2">
             <h3 className="text-lg font-bold flex items-center gap-2">
@@ -911,7 +962,10 @@ export default function Admin() {
           )}
         </section>
 
+        )}
+
         {/* Football API Keys (RapidAPI) */}
+        {tab === 'config' && (
         <section className="glass-heavy rounded-2xl p-5 border border-white/10" data-testid="admin-fb-keys-section">
           <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
             <h3 className="text-lg font-bold flex items-center gap-2">
@@ -1042,7 +1096,10 @@ export default function Admin() {
           )}
         </section>
 
+        )}
+
         {/* DaddyTV configuration */}
+        {tab === 'config' && (
         <section className="glass-heavy rounded-2xl p-5 border border-white/10" data-testid="admin-daddy-section">
           <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
             <h3 className="text-lg font-bold flex items-center gap-2">
@@ -1165,7 +1222,10 @@ export default function Admin() {
           )}
         </section>
 
+        )}
+
         {/* JackTV configuration */}
+        {tab === 'config' && (
         <section className="glass-heavy rounded-2xl p-5 border border-white/10" data-testid="admin-jacktv-section">
           <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
             <h3 className="text-lg font-bold flex items-center gap-2">
@@ -1404,7 +1464,10 @@ export default function Admin() {
           )}
         </section>
 
+        )}
+
         {/* Users */}
+        {tab === 'users' && (
 
         <section className="glass-heavy rounded-2xl p-5 border border-white/10" data-testid="admin-users-section">
           <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
@@ -1504,6 +1567,7 @@ export default function Admin() {
             </div>
           )}
         </section>
+        )}
       </main>
     </div>
   );

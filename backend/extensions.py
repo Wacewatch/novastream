@@ -56,6 +56,46 @@ def init_extensions(*, get_http_client, supabase_query, require_admin, extract_b
 ext_router = APIRouter()
 
 
+def _track_source_view(request, authorization, channel_id, source, vip=0, embed=0):
+    """Best-effort, non-blocking per-source view recording (Sports/Football/BossTV)."""
+    if _record_view is None:
+        return
+    try:
+        is_member = bool(
+            authorization
+            and authorization.lower().startswith("bearer ")
+            and len(authorization) > 20
+        )
+        xff = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip() if request else ""
+        ip = xff or (request.client.host if (request and request.client) else "")
+        user_id = None
+        if is_member:
+            try:
+                token = authorization.split(" ", 1)[1].strip()
+                seg = token.split(".")
+                if len(seg) >= 2:
+                    import base64 as _b64, json as _json
+                    body = seg[1] + "=" * (-len(seg[1]) % 4)
+                    payload = _json.loads(_b64.urlsafe_b64decode(body).decode("utf-8", errors="ignore"))
+                    sub = payload.get("sub")
+                    if isinstance(sub, str) and sub:
+                        user_id = sub
+            except Exception:
+                user_id = None
+        asyncio.create_task(_record_view(
+            channel_id,
+            is_member=is_member,
+            is_vip=bool(is_member and vip),
+            is_embed=bool(embed),
+            ip=ip,
+            user_id=user_id,
+            source=source,
+        ))
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"track source view failed: {e}")
+
+
+
 # =====================================================================
 # DaddyTV — dynamic version
 # Channels list + m3u8 list are fetched from external JSON URLs configurable
@@ -641,6 +681,7 @@ async def daddy_stream(
             is_embed=bool(embed),
             ip=ip,
             user_id=user_id,
+            source="daddytv",
         ))
 
     return {
@@ -1210,12 +1251,17 @@ async def sports_matches(sport: str = Query("", description="Filter by sport / c
 
 @ext_router.get("/sports/streams")
 async def sports_streams(
+    request: Request,
     source: str = Query("", description="Source name (alpha, beta, ...)"),
     id: str = Query("", alias="id", description="Source-specific match id"),
+    authorization: Optional[str] = Header(None),
+    vip: int = 0,
+    embed: int = 0,
 ):
     if not source or not id:
         return {"streams": []}
     streams = await _fetch_sports_streams(source, id)
+    _track_source_view(request, authorization, f"sports:{source}:{id}", "sports", vip, embed)
     return {"streams": streams}
 
 
@@ -1653,7 +1699,7 @@ async def football_matches():
 
 
 @ext_router.get("/football/streams")
-async def football_streams(mid: str = Query("", description="Match id from /football/matches"), request: Request = None):
+async def football_streams(mid: str = Query("", description="Match id from /football/matches"), request: Request = None, authorization: Optional[str] = Header(None), vip: int = 0, embed: int = 0):
     if not mid:
         return {"servers": []}
     if not _fb_servers_by_mid:
@@ -1674,6 +1720,7 @@ async def football_streams(mid: str = Query("", description="Match id from /foot
             "stream_url": proxied,  # HLS proxy URL (frontend should use this)
             "header": s.get("header"),
         })
+    _track_source_view(request, authorization, f"football:{mid}", "football", vip, embed)
     return {"servers": out}
 
 
@@ -2266,13 +2313,14 @@ async def bosstv_matches(
 
 
 @ext_router.get("/bosstv/streams")
-async def bosstv_streams(mid: str = Query("", description="Match id from /bosstv/matches")):
+async def bosstv_streams(mid: str = Query("", description="Match id from /bosstv/matches"), request: Request = None, authorization: Optional[str] = Header(None), vip: int = 0, embed: int = 0):
     if not mid:
         return {"servers": []}
     # Ensure cache is hot
     if not _bosstv_servers_by_mid:
         await _fetch_bosstv_matches()
     servers = _bosstv_servers_by_mid.get(mid, [])
+    _track_source_view(request, authorization, f"bosstv:{mid}", "bosstv", vip, embed)
     return {"servers": servers}
 
 

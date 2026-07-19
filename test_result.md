@@ -120,7 +120,34 @@ backend:
         -agent: "testing"
         -comment: "✅ Automated backend testing completed successfully. All 5 tests passed: (1) 401 without Authorization header ✓, (2) 200 with admin token for range=7d ✓ (total_plays=1970, unique_visitors=571, vip_plays=357, embed_plays=461, 8 top_channels, 3 top_countries, peak=314), (3) 200 for range=24h with bucket='hour' ✓ (total_plays=308), (4) 200 for range=30d ✓ (total_plays=6300), (5) 200 for range=1y ✓ (total_plays=6300). All JSON structure validations passed: kpis contain all required keys (total_plays, unique_visitors, member_plays, vip_plays, guest_plays, embed_plays) with sub-keys (current, previous, delta_pct), distribution has member/vip/guest/embed, top_channels and top_countries are properly formatted lists, bucket values correct ('hour' for 24h, 'day' for others). Non-zero values confirmed for seeded data ranges. Endpoint is fully functional."
 
+  - task: "Stats en direct par source (by_source) sur /api/admin/live-stats + /api/admin/analytics-overview"
+    implemented: true
+    working: true
+    file: "backend/server.py, backend/extensions.py, backend/northframe.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        -working: true
+        -agent: "main"
+        -comment: "Ajout d'un champ 'source' aux vues (_record_view) et tagging par endpoint: /stream=livetv, daddy/stream=daddytv, north/stream=northtv, frame/stream=frametv, sports/streams=sports, football/streams=football, bosstv/streams=bosstv. _compute_stats agrège live_by_source + source_24h. /api/admin/live-stats retourne 'by_source': [{source,label,online,total_24h}]. /api/admin/analytics-overview retourne 'by_source': [{source,label,plays}] pour la période. Validé manuellement: live-stats by_source online total 258 réparti sur 8 sources; analytics 7d by_source LiveTV 1059/DaddyTV 373/etc. Données seedées avec sources + fenêtre live."
+        -working: true
+        -agent: "testing"
+        -comment: "✅ Automated backend testing completed successfully. All 5 tests passed: (1) GET /api/admin/live-stats without auth returns 401 ✓, (2) GET /api/admin/live-stats with admin token returns 200 with by_source field containing 8 sources (livetv, frametv, northtv, daddytv, sports, football, bosstv, jacktv) with correct structure {source, label, online, total_24h} - Total online=78, 24h=566 across all sources (LiveTV: online=40/24h=265, DaddyTV: 15/94, FrameTV: 5/61, NorthTV: 5/43, Sports: 5/38, JackTV: 4/12, Football: 2/34, BossTV: 2/19) ✓, (3) GET /api/admin/analytics-overview without auth returns 401 ✓, (4) GET /api/admin/analytics-overview?range=7d with admin token returns 200 with by_source field containing plays per source - livetv has 1019 plays (total 2174 plays: LiveTV 1019, DaddyTV 353, FrameTV 203, NorthTV 178, Sports 163, Football 128, BossTV 73, JackTV 57) ✓, (5) GET /api/admin/analytics-overview?range=30d returns 200 with by_source - livetv has 2966 plays (total 6349 plays: LiveTV 2966, DaddyTV 1001, FrameTV 603, NorthTV 562, Sports 482, Football 375, BossTV 189, JackTV 171) ✓. All previously tested keys (kpis, distribution, top_channels, top_countries, peak) remain present and functional. Per-source breakdown feature is fully operational on both endpoints."
+
 frontend:
+  - task: "Onglets Admin + panneau LiveSourcesPanel + by_source dans AnalyticsOverview"
+    implemented: true
+    working: true
+    file: "pages/Admin.jsx, components/admin/LiveSourcesPanel.jsx, components/admin/AnalyticsOverview.jsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        -working: true
+        -agent: "main"
+        -comment: "Admin réorganisé en 5 onglets (Vue d'ensemble / En direct / Analytics / Utilisateurs / Configuration) via rendu conditionnel. Nouveau panneau 'Stats en direct par source' (LiveSourcesPanel) avec 8 cartes source (icône, compteur live pulsant, part du live, 24h), lit liveStats.by_source (polling 5s). Bloc 'Lectures par source' ajouté dans AnalyticsOverview. Vérifié visuellement via login admin (onglet En direct): 8 sources affichées avec données, aucune erreur console."
+
   - task: "Composant AnalyticsOverview + intégration page Admin"
     implemented: true
     working: true
@@ -147,6 +174,11 @@ test_plan:
 
 agent_communication:
     -agent: "main"
-    -message: "Preview LiveWatch restaurée et fonctionnelle (Next.js port 3000 + FastAPI port 8001 via supervisor + Mongo + Supabase). Nouvelle fonctionnalité: endpoint analytics admin + panneau frontend. Merci de tester UNIQUEMENT le nouvel endpoint /api/admin/analytics-overview. Auth admin: creer un token via login password Supabase avec le compte de test admin -> email 'shot.admin@livewatch.app', password 'Shot!2345Admin' (role=admin dans user_profiles). Le backend interne tourne sur http://localhost:8001. Vérifier: 401 sans token; 403 avec token non-admin; 200 avec token admin; presence des cles kpis (avec current/previous/delta_pct), distribution, top_channels, top_countries, peak, bucket; tester les ranges 24h/7d/30d/1y. Ne PAS toucher aux autres endpoints."
+    -message: "NOUVELLE ITERATION - Stats en direct par source. Merci de tester les DEUX endpoints admin: (1) GET /api/admin/live-stats et (2) GET /api/admin/analytics-overview?range=7d (et 24h/30d/1y). Auth admin: POST https://atrhxsizjjqjdhjafgei.supabase.co/auth/v1/token?grant_type=password avec header apikey=<anon key> et body {\"email\":\"shot.admin@livewatch.app\",\"password\":\"Shot!2345Admin\"} -> access_token -> Authorization: Bearer. Anon key: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImF0cmh4c2l6ampxamRoamFmZ2VpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjgxMzQ3NzAsImV4cCI6MjA4MzcxMDc3MH0.Mc_XTxmG8zwX34WrLIasHp5C1mydTRJfaOibFtwLOb8. Backend interne: http://localhost:8001. VERIFIER: (a) live-stats renvoie 200 + clé 'by_source' = liste d'objets {source,label,online,total_24h}, avec les 8 sources connues (livetv,frametv,northtv,daddytv,sports,football,bosstv,jacktv) et valeurs >=0 (certaines >0 car données seedées). (b) analytics-overview renvoie 200 + clé 'by_source' = liste {source,label,plays} avec plays>0 pour livetv sur 7d/30d. (c) 401 sans token. Ne PAS tester le frontend. Ne PAS modifier d'autres endpoints."
+
+# --- Previous iteration (still valid) ---
+# analytics-overview base tested 5/5 OK previously.
     -agent: "testing"
     -message: "Backend testing completed for GET /api/admin/analytics-overview endpoint. Created automated test suite in /app/backend_test.py. All 5 tests passed successfully: (1) Returns 401 without Authorization header, (2-5) Returns 200 with valid admin token for all ranges (24h, 7d, 30d, 1y) with correct JSON structure and non-zero values from seeded data. Endpoint is fully functional and ready for production use."
+    -agent: "testing"
+    -message: "✅ Backend testing completed for per-source breakdown feature. Updated /app/backend_test.py with comprehensive tests for both admin endpoints. All 5 tests passed: (1) live-stats 401 without auth ✓, (2) live-stats 200 with by_source (8 sources, online=78, 24h=566) ✓, (3) analytics-overview 401 without auth ✓, (4) analytics-overview 7d with by_source (livetv 1019 plays) ✓, (5) analytics-overview 30d with by_source (livetv 2966 plays) ✓. Per-source breakdown is fully functional on both endpoints with correct data structure and values. All previously tested keys remain intact. No issues found."

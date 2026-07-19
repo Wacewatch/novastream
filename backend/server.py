@@ -317,6 +317,7 @@ async def _record_view(
     is_embed: bool = False,
     ip: Optional[str] = None,
     user_id: Optional[str] = None,
+    source: str = "livetv",
 ) -> None:
     try:
         await db.views.insert_one({
@@ -327,6 +328,7 @@ async def _record_view(
             "is_embed": bool(is_embed),
             "ip": (ip or "")[:64] or None,
             "user_id": user_id or None,
+            "source": (source or "livetv"),
         })
     except Exception as e:
         logger.warning(f"record view failed: {e}")
@@ -373,6 +375,29 @@ async def _compute_stats() -> Dict[str, Any]:
             logger.warning(f"stats aggregate failed: {e}")
         live_total = sum(per_channel.values())
         guests_live = max(0, live_total - members_live)
+
+        # Per-source breakdown (live window + last 24h).
+        live_by_source: Dict[str, int] = {}
+        source_24h: Dict[str, int] = {}
+        try:
+            src_pipeline = [
+                {"$match": {"ts": {"$gte": live_threshold}}},
+                {"$group": {"_id": {"$ifNull": ["$source", "livetv"]}, "n": {"$sum": 1}}},
+            ]
+            async for row in db.views.aggregate(src_pipeline):
+                live_by_source[row["_id"] or "livetv"] = int(row.get("n") or 0)
+        except Exception as e:
+            logger.warning(f"stats source-live aggregate failed: {e}")
+        try:
+            src24_pipeline = [
+                {"$match": {"ts": {"$gte": since_24h}}},
+                {"$group": {"_id": {"$ifNull": ["$source", "livetv"]}, "n": {"$sum": 1}}},
+            ]
+            async for row in db.views.aggregate(src24_pipeline):
+                source_24h[row["_id"] or "livetv"] = int(row.get("n") or 0)
+        except Exception as e:
+            logger.warning(f"stats source-24h aggregate failed: {e}")
+
         data = {
             "total_24h": total_24h,
             "total_all_time": total_all_time,
@@ -380,6 +405,8 @@ async def _compute_stats() -> Dict[str, Any]:
             "members_live": members_live,
             "guests_live": guests_live,
             "per_channel": per_channel,
+            "live_by_source": live_by_source,
+            "source_24h": source_24h,
         }
         _stats_cache["data"] = data
         _stats_cache["exp"] = time.time() + STATS_TTL
@@ -1164,6 +1191,7 @@ async def get_stream_url(
         is_embed=bool(embed),
         ip=_client_ip(request),
         user_id=user_id,
+        source="livetv",
     ))
     return {
         "id": canonical_id,
@@ -1857,6 +1885,34 @@ async def admin_live_stats(authorization: Optional[str] = Header(None)):
                 "viewers": n,
             })
 
+    # Per-source live breakdown (LiveTV / FrameTV / NorthTV / DaddyTV / Sports…)
+    SOURCE_LABELS = {
+        "livetv": "LiveTV",
+        "frametv": "FrameTV",
+        "northtv": "NorthTV",
+        "daddytv": "DaddyTV",
+        "sports": "Sports",
+        "football": "Football",
+        "bosstv": "BossTV",
+        "jacktv": "JackTV",
+    }
+    live_by_source = stats.get("live_by_source", {}) or {}
+    source_24h = stats.get("source_24h", {}) or {}
+    all_source_keys = list(SOURCE_LABELS.keys())
+    for k in list(live_by_source.keys()) + list(source_24h.keys()):
+        if k not in all_source_keys:
+            all_source_keys.append(k)
+    by_source = [
+        {
+            "source": k,
+            "label": SOURCE_LABELS.get(k, k.capitalize()),
+            "online": int(live_by_source.get(k, 0)),
+            "total_24h": int(source_24h.get(k, 0)),
+        }
+        for k in all_source_keys
+    ]
+    by_source.sort(key=lambda s: (s["online"], s["total_24h"]), reverse=True)
+
     return {
         "online": live_total,
         "watching": live_total,
@@ -1865,6 +1921,7 @@ async def admin_live_stats(authorization: Optional[str] = Header(None)):
         "total_24h": total_24h,
         "total_all_time": total_all_time,
         "top_channels": top_channels,
+        "by_source": by_source,
     }
 
 
@@ -2307,6 +2364,10 @@ async def admin_analytics_overview(
                     {"$sort": {"total": -1}},
                     {"$limit": 1},
                 ],
+                "bySource": [
+                    {"$group": {"_id": {"$ifNull": ["$source", "livetv"]}, "plays": {"$sum": 1}}},
+                    {"$sort": {"plays": -1}},
+                ],
             }},
         ]
         try:
@@ -2315,9 +2376,9 @@ async def admin_analytics_overview(
             logger.warning(f"analytics top aggregate failed: {e}")
             agg = []
         facet = agg[0] if agg else {}
-        return facet.get("byChannel", []), facet.get("byBucket", [])
+        return facet.get("byChannel", []), facet.get("byBucket", []), facet.get("bySource", [])
 
-    cur, prev, (by_channel, by_bucket) = await asyncio.gather(
+    cur, prev, (by_channel, by_bucket, by_source_raw) = await asyncio.gather(
         _period_totals(start, now),
         _period_totals(prev_start, start),
         _top_and_peak(start, now),
@@ -2365,6 +2426,20 @@ async def admin_analytics_overview(
         b = by_bucket[0]
         peak = {"t": b.get("_id"), "total": int(b.get("total") or 0)}
 
+    SOURCE_LABELS = {
+        "livetv": "LiveTV", "frametv": "FrameTV", "northtv": "NorthTV",
+        "daddytv": "DaddyTV", "sports": "Sports", "football": "Football",
+        "bosstv": "BossTV", "jacktv": "JackTV",
+    }
+    by_source = []
+    for row in (by_source_raw or []):
+        key = row.get("_id") or "livetv"
+        by_source.append({
+            "source": key,
+            "label": SOURCE_LABELS.get(key, str(key).capitalize()),
+            "plays": int(row.get("plays") or 0),
+        })
+
     result = {
         "range": rng,
         "bucket": bucket,
@@ -2378,6 +2453,7 @@ async def admin_analytics_overview(
         },
         "top_channels": top_channels,
         "top_countries": top_countries,
+        "by_source": by_source,
         "peak": peak,
     }
     await _cache_set_json(cache_key, result, 60)
@@ -2867,7 +2943,7 @@ api_router.include_router(epg_router)
 # ----------------- NorthTV + FrameTV -----------------
 from northframe import router as nf_router, init as nf_init  # noqa: E402
 
-nf_init(get_http_client=get_http_client)
+nf_init(get_http_client=get_http_client, record_view=_record_view)
 api_router.include_router(nf_router)
 
 
