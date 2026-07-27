@@ -184,19 +184,30 @@ async def north_channels(country: str = Query("", description="Filter by country
 
 _M3U8_RE = re.compile(r'(https?://[^\s"\'<>\\]+\.m3u8[^\s"\'<>\\]*)', re.I)
 _FIELD_RE = re.compile(r'''(?:file|source|src|hls|url)\s*[:=]\s*["']([^"']+\.m3u8[^"']*)["']''', re.I)
+# Depuis ~nov-2025, northlive.lol exige un PLAY_TOKEN (généré par la page
+# player embed) dans le body de l'appel play_url. Sans lui:
+#   403 "Ouvrez le player embed avant de demander le flux."
+# On extrait la variable JS PLAY_TOKEN = "..." depuis la page HTML player.
+_PLAY_TOKEN_RE = re.compile(r'''PLAY_TOKEN\s*=\s*["']([A-Za-z0-9_\-\.=]+)["']''')
 
 
-async def _north_play_url(slug_clean: str) -> Optional[str]:
+async def _north_play_url(slug_clean: str, play_token: Optional[str] = None) -> Optional[str]:
     """Call the upstream ?route=play_url (POST) endpoint — the exact same
     request the upstream JS player performs — to obtain the real stream URL.
 
     The upstream player page never embeds the .m3u8 directly; instead its JS
-    POSTs {slug, api_key} to /api/v1/index.php?route=play_url and receives
-    {"success": true, "url": "https://northlive.lol/api/tv_proxy.php?tok=...",
-     "direct": false}. That token-signed URL serves a live HLS manifest, but
-    northlive.lol only accepts it when the request carries their own
-    Referer/Origin/UA — hence we always fetch it server-side via
-    /north/proxy rather than letting the browser hit it directly."""
+    POSTs {slug, api_key, play_token} to /api/v1/index.php?route=play_url and
+    receives {"success": true,
+             "url": "https://northlive.lol/api/tv_proxy.php?tok=...&pt=...",
+             "direct": false}. That token-signed URL serves a live HLS
+    manifest, but northlive.lol only accepts it when the request carries
+    their own Referer/Origin/UA — hence we always fetch it server-side via
+    /north/proxy rather than letting the browser hit it directly.
+
+    NOTE: Since ~nov-2025, upstream returns 403 "Ouvrez le player embed
+    avant de demander le flux." if `play_token` is missing from the body.
+    That token is emitted by the player HTML as `PLAY_TOKEN = "..."` and
+    must be forwarded here."""
     url = f"{NORTH_API_BASE}?route=play_url&api_key={NORTH_API_KEY}"
     headers = {
         "Content-Type": "application/json",
@@ -204,11 +215,21 @@ async def _north_play_url(slug_clean: str) -> Optional[str]:
         "X-API-Key": NORTH_API_KEY,
         "User-Agent": "NorthliveClient/1.0",
         "Accept": "application/json",
+        "Referer": f"https://northlive.lol/api/v1/index.php?route=tv/{slug_clean}/player",
+        "Origin": "https://northlive.lol",
     }
-    body = {"slug": slug_clean, "api_key": NORTH_API_KEY}
+    body: Dict[str, Any] = {"slug": slug_clean, "api_key": NORTH_API_KEY}
+    if play_token:
+        body["play_token"] = play_token
     cli = await _client()
     r = await cli.post(url, headers=headers, json=body, timeout=25.0)
-    r.raise_for_status()
+    # Do not raise on 403 — we want to log the upstream message for debug.
+    if r.status_code >= 400:
+        logger.warning(
+            "north play_url %s -> HTTP %s (play_token=%s) body=%s",
+            slug_clean, r.status_code, "yes" if play_token else "no", r.text[:200],
+        )
+        r.raise_for_status()
     try:
         js = r.json()
     except Exception:
@@ -226,8 +247,10 @@ async def resolve_north_stream(slug: str, force: bool = False) -> Optional[str]:
     slug_clean = re.sub(r"[^a-zA-Z0-9_\-]", "", slug or "")
     if not slug_clean:
         return None
-    url = ""
-    # 1) Best-effort: scrape a directly-embedded .m3u8 from the player HTML.
+    url: Optional[str] = ""
+    play_token: Optional[str] = None
+    # 1) Fetch the player HTML once: it may contain a directly-embedded
+    #    .m3u8 (rare, legacy) AND the PLAY_TOKEN we need for step 2.
     try:
         r = await _north_get(f"?route=tv/{slug_clean}/player")
         html = r.text or ""
@@ -239,15 +262,21 @@ async def resolve_north_stream(slug: str, force: bool = False) -> Optional[str]:
             m2 = _FIELD_RE.search(clean)
             if m2:
                 url = m2.group(1)
+        # Always try to grab PLAY_TOKEN — required for step 2.
+        mt = _PLAY_TOKEN_RE.search(html)
+        if mt:
+            play_token = mt.group(1)
     except Exception as e:
         logger.warning(f"north player scrape {slug}: {e}")
-    # 2) Modern players load the m3u8 dynamically via ?route=play_url (POST).
-    #    Replicate that call to obtain the real token-signed stream URL.
+    # 2) Modern players load the m3u8 dynamically via ?route=play_url (POST)
+    #    with the play_token from the player page. Replicate that call.
     if not url:
         try:
-            url = await _north_play_url(slug_clean)
+            url = await _north_play_url(slug_clean, play_token=play_token)
         except Exception as e:
-            logger.warning(f"north play_url {slug}: {e}")
+            logger.warning(
+                f"north play_url {slug}: {e} (play_token={'present' if play_token else 'missing'})"
+            )
             url = None
     if not url:
         return None
