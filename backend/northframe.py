@@ -11,10 +11,12 @@ import time
 import asyncio
 import logging
 from typing import Optional, List, Dict, Any
+from urllib.parse import urljoin
 
 import httpx
 from urllib.parse import quote
 from fastapi import APIRouter, HTTPException, Query, Request, Header
+from fastapi.responses import HTMLResponse, Response
 
 logger = logging.getLogger("livewatch.northframe")
 
@@ -37,6 +39,19 @@ NORTH_HEADERS = {
     "X-API-Key": NORTH_API_KEY,
     "Accept": "application/json, text/html",
     "User-Agent": "NorthliveClient/1.0",
+}
+
+# Headers used specifically when the SERVER fetches the actual HLS
+# manifest/segments (tv_proxy.php?tok=...) on behalf of the browser.
+# northlive.lol 403s if the request doesn't look like it comes from
+# their own player context, so we always mimic that here rather than
+# letting the browser hit the CDN directly.
+NORTH_PROXY_HEADERS = {
+    "User-Agent": "NorthliveClient/1.0",
+    "X-API-Key": NORTH_API_KEY,
+    "Referer": "https://northlive.lol/",
+    "Origin": "https://northlive.lol",
+    "Accept": "*/*",
 }
 
 _north_cache: Dict[str, Any] = {"ts": 0, "data": []}
@@ -178,9 +193,10 @@ async def _north_play_url(slug_clean: str) -> Optional[str]:
     The upstream player page never embeds the .m3u8 directly; instead its JS
     POSTs {slug, api_key} to /api/v1/index.php?route=play_url and receives
     {"success": true, "url": "https://northlive.lol/api/tv_proxy.php?tok=...",
-     "direct": false}. That token-signed URL serves a live HLS manifest with
-    CORS `Access-Control-Allow-Origin: *`, so it can be played natively via
-    hls.js on our frontend."""
+     "direct": false}. That token-signed URL serves a live HLS manifest, but
+    northlive.lol only accepts it when the request carries their own
+    Referer/Origin/UA — hence we always fetch it server-side via
+    /north/proxy rather than letting the browser hit it directly."""
     url = f"{NORTH_API_BASE}?route=play_url&api_key={NORTH_API_KEY}"
     headers = {
         "Content-Type": "application/json",
@@ -202,10 +218,10 @@ async def _north_play_url(slug_clean: str) -> Optional[str]:
     return None
 
 
-async def resolve_north_stream(slug: str) -> Optional[str]:
+async def resolve_north_stream(slug: str, force: bool = False) -> Optional[str]:
     now = time.time()
     cached = _north_stream_cache.get(slug)
-    if cached and (now - cached["ts"] < NORTH_STREAM_TTL):
+    if not force and cached and (now - cached["ts"] < NORTH_STREAM_TTL):
         return cached["url"]
     slug_clean = re.sub(r"[^a-zA-Z0-9_\-]", "", slug or "")
     if not slug_clean:
@@ -239,20 +255,81 @@ async def resolve_north_stream(slug: str) -> Optional[str]:
     return url
 
 
+def _rewrite_m3u8(text: str, base_url: str, proxy_prefix: str) -> str:
+    """Rewrite every non-comment line (sub-manifests and .ts/.m4s segments)
+    of an HLS manifest so the browser fetches them through our own
+    /north/proxy route instead of talking to northlive.lol directly."""
+    out = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            abs_url = urljoin(base_url, stripped)
+            out.append(f"{proxy_prefix}?u={quote(abs_url, safe='')}")
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
+@router.get("/north/proxy")
+async def north_proxy(u: str, request: Request):
+    """Fetch the northlive.lol manifest/segment server-side with the
+    headers their CDN expects, so the browser never talks to it directly.
+    This is what fixes the 403 you get when handing the raw tv_proxy.php
+    URL straight to hls.js."""
+    if "northlive.lol" not in u:
+        raise HTTPException(status_code=400, detail="bad target")
+    cli = await _client()
+    try:
+        r = await cli.get(u, headers=NORTH_PROXY_HEADERS, timeout=25.0)
+    except Exception as e:
+        logger.warning(f"north proxy fetch failed {u}: {e}")
+        raise HTTPException(status_code=502, detail="upstream fetch failed")
+
+    if r.status_code == 403:
+        # tok is likely expired/IP-locked; caller should retry with a
+        # freshly resolved stream_url (force=True on /north/stream).
+        raise HTTPException(status_code=403, detail="upstream refused (stale token?)")
+
+    ctype = r.headers.get("content-type", "")
+    is_manifest = (
+        "mpegurl" in ctype
+        or u.split("?")[0].endswith(".m3u8")
+        or r.content[:7] == b"#EXTM3U"
+    )
+
+    if is_manifest:
+        body_text = r.text
+        proxy_prefix = f"{_public_base(request)}/api/north/proxy"
+        rewritten = _rewrite_m3u8(body_text, u, proxy_prefix)
+        return Response(
+            content=rewritten,
+            status_code=r.status_code,
+            media_type="application/vnd.apple.mpegurl",
+        )
+
+    return Response(
+        content=r.content,
+        status_code=r.status_code,
+        media_type=ctype or "video/mp2t",
+    )
+
+
 @router.get("/north/stream/{slug}")
-async def north_stream(slug: str, request: Request = None, authorization: Optional[str] = Header(None), vip: int = 0, embed: int = 0):
+async def north_stream(slug: str, request: Request = None, authorization: Optional[str] = Header(None), vip: int = 0, embed: int = 0, force: int = 0):
     slug_clean = re.sub(r"[^a-zA-Z0-9_\-]", "", slug or "")
     if not slug_clean:
         raise HTTPException(status_code=400, detail="bad slug")
     iframe_url = f"/api/north/player/{slug_clean}"
     try:
-        url = await resolve_north_stream(slug)
+        url = await resolve_north_stream(slug, force=bool(force))
     except Exception as e:
         logger.warning(f"north stream error {slug}: {e}")
         url = None
     _track_nf_view(request, authorization, f"north:{slug_clean}", "northtv", vip, embed)
     if url:
-        return {"success": True, "stream_url": url, "iframe_url": iframe_url, "type": "hls"}
+        base = _public_base(request) if request else ""
+        proxied = f"{base}/api/north/proxy?u={quote(url, safe='')}"
+        return {"success": True, "stream_url": proxied, "iframe_url": iframe_url, "type": "hls"}
     # No m3u8 could be extracted (JS-obfuscated player): fall back to iframe.
     return {"success": True, "stream_url": None, "iframe_url": iframe_url, "type": "iframe"}
 
@@ -263,7 +340,6 @@ async def north_player(slug: str):
     Rewrites absolute /api/v1/... calls (used by the embedded JS) to a
     dedicated upstream proxy path served by this app.
     """
-    from fastapi.responses import HTMLResponse, Response
     slug_clean = re.sub(r"[^a-zA-Z0-9_\-]", "", slug or "")
     if not slug_clean:
         raise HTTPException(status_code=400, detail="bad slug")
@@ -284,7 +360,6 @@ async def north_player(slug: str):
 @router.api_route("/north/upstream/{path:path}",
                   methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
 async def north_upstream(path: str, request: Request):
-    from fastapi.responses import Response
     # Merge query string with api_key
     query = dict(request.query_params)
     query['api_key'] = NORTH_API_KEY
@@ -313,7 +388,6 @@ async def north_upstream(path: str, request: Request):
 
 @router.get("/north/north-upstream-noop")
 async def north_noop():
-    from fastapi.responses import Response
     return Response(status_code=204)
 
 
